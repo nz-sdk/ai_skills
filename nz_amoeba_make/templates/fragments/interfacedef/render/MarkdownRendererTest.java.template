@@ -1,0 +1,135 @@
+// The document is what a human reads to learn the contract, so these tests pin the two things a renderer silently
+// gets wrong: nesting collapsing into an unreadable flat list, and free-text descriptions breaking the table.
+package {{PKG}}.interfacedef.render;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DataAccess;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+import {{PKG}}.interfacedef.SpecFixtures;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class MarkdownRendererTest {
+
+    private static String render(InterfaceSpec spec) {
+        return MarkdownRenderer.render("orders", "1.0.0", spec);
+    }
+
+    private static InterfaceSpec withBody(List<FieldSpec> body) {
+        return new InterfaceSpec("t", "이 모듈이 하는 일", DataAccess.NONE,
+                List.of(new OperationSpec("op", HttpMethod.GET, "/x", "요약", "설명 문장",
+                        List.of(), null, List.of(new ResponseSpec(200, "성공", body)))));
+    }
+
+    @Test
+    void headerCarriesModuleVersionAndDataAccess() {
+        String md = render(SpecFixtures.orders());
+        assertTrue(md.startsWith("# 주문 API"), md);
+        assertTrue(md.contains("모듈 `orders`"), md);
+        assertTrue(md.contains("버전 `1.0.0`"), md);
+        assertTrue(md.contains("데이터 접근 `mybatis`"), md);
+    }
+
+    /** The document describes the generated structure, so it must not claim a layer the module does not have. */
+    @Test
+    void headerNamesTheServiceLayerShape() {
+        assertTrue(render(SpecFixtures.orders()).contains("서비스 계층 `인터페이스 + 구현`"),
+                render(SpecFixtures.orders()));
+        assertTrue(render(SpecFixtures.orders().withServiceInterface(false))
+                        .contains("서비스 계층 `구현 클래스만`"),
+                render(SpecFixtures.orders().withServiceInterface(false)));
+    }
+
+    @Test
+    void titleFallsBackToModuleIdAndVersionIsOmittedForADraft() {
+        String md = MarkdownRenderer.render("orders", null,
+                new InterfaceSpec(null, "이 모듈이 하는 일", DataAccess.NONE,
+                        List.of(SpecFixtures.getOrder())));
+        assertTrue(md.startsWith("# orders"), md);
+        assertFalse(md.contains("버전"), md);
+    }
+
+    @Test
+    void operationListLinksToEachSection() {
+        String md = render(SpecFixtures.orders());
+        assertTrue(md.contains("| [getOrder](#getorder) | GET | `/orders/{orderId}` | 주문 단건 조회 |"), md);
+        assertTrue(md.contains("| [createOrder](#createorder) | POST | `/orders` | 주문 생성 |"), md);
+        assertTrue(md.contains("## getOrder"), md);
+    }
+
+    @Test
+    void parameterTableCarriesLocationAndRequiredMark() {
+        String md = render(SpecFixtures.orders());
+        assertTrue(md.contains("| `orderId` | path | `integer` | ✅ | 조회할 주문 번호 |"), md);
+    }
+
+    /** Nesting must survive as a dotted path, or the table cannot say which object a field belongs to. */
+    @Test
+    void nestedObjectBecomesADottedPath() {
+        String md = render(SpecFixtures.orders());
+        assertTrue(md.contains("| `customer` | `object` | ✅ | 주문한 고객 정보 |"), md);
+        assertTrue(md.contains("| `customer.name` | `string` | ✅ | 고객 이름 |"), md);
+        assertTrue(md.contains("| `customer.vip` | `boolean` |  | 우수 고객 여부 |"), md);
+    }
+
+    @Test
+    void arrayOfScalarsGetsABracketRowForTheElement() {
+        String md = render(SpecFixtures.orders());
+        assertTrue(md.contains("| `tags` | `array` |  | 주문에 붙은 태그 목록 |"), md);
+        assertTrue(md.contains("| `tags[]` | `string` | ✅ | 태그 문자열 |"), md);
+    }
+
+    @Test
+    void arrayOfObjectsPrefixesElementFields() {
+        String md = render(SpecFixtures.orders());
+        assertTrue(md.contains("| `items[]` | `object` | ✅ | 주문 상품 한 건 |"), md);
+        assertTrue(md.contains("| `items[].sku` | `string` | ✅ | 상품 식별 코드 |"), md);
+        assertTrue(md.contains("| `items[].quantity` | `integer` | ✅ | 주문 수량 |"), md);
+    }
+
+    /** Array of array falls out of the same recursion; pinned because it has no dedicated branch. */
+    @Test
+    void arrayOfArrayNestsBrackets() {
+        String md = render(withBody(List.of(new FieldSpec("grid", FieldType.ARRAY, null, true,
+                "행 목록", null, List.of(),
+                new FieldSpec("row", FieldType.ARRAY, null, true, "한 행의 값 목록", null, List.of(),
+                        FieldSpec.scalar("cell", FieldType.INTEGER, true, "칸 값"))))));
+        assertTrue(md.contains("| `grid` | `array` | ✅ | 행 목록 |"), md);
+        assertTrue(md.contains("| `grid[]` | `array` | ✅ | 한 행의 값 목록 |"), md);
+        assertTrue(md.contains("| `grid[][]` | `integer` | ✅ | 칸 값 |"), md);
+    }
+
+    @Test
+    void formatRefinesTheTypeCell() {
+        String md = render(SpecFixtures.orders());
+        assertTrue(md.contains("| `orderedAt` | `string` (date-time) | ✅ | 주문이 접수된 시각 |"), md);
+    }
+
+    @Test
+    void emptyBodyAndEmptyParametersSaySoInsteadOfRenderingAnEmptyTable() {
+        String md = render(withBody(List.of()));
+        assertTrue(md.contains("_파라미터 없음_"), md);
+        assertTrue(md.contains("_바디 없음_"), md);
+    }
+
+    /**
+     * Descriptions are caller-supplied free text. A raw pipe would split the row and a raw newline would end the
+     * table, so both must be neutralized — this is the one place a malformed document is a correctness bug.
+     */
+    @Test
+    void pipesAndNewlinesInDescriptionsCannotBreakTheTable() {
+        String md = render(withBody(List.of(FieldSpec.scalar("sku", FieldType.STRING, true,
+                "a | b\nsecond line"))));
+        assertTrue(md.contains("| `sku` | `string` | ✅ | a \\| b<br>second line |"), md);
+        // The row survives as exactly one line.
+        assertTrue(md.lines().filter(l -> l.contains("`sku`")).count() == 1, md);
+    }
+}

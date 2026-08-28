@@ -1,0 +1,8 @@
+// Standalone consumer of the published Protean library — its own Gradle build.
+// Auto-provisions the Java 21 toolchain via the Foojay Disco API when a matching JDK is not installed
+// (no-op when JDK 21 is present) — smooths a fresh clone → ./gradlew run.
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.9.0'
+}
+
+rootProject.name = 'protean-{{NAME}}-sample'

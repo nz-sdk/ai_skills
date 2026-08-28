@@ -1,0 +1,242 @@
+// The coverage gap that let a real defect ship: SpecGuardTool had no tests at all, and its reload guard read
+// argument names that protean's tool does not use — so the guard never fired and META-INF/protean/ was writable
+// with no promotion gate in the way.
+//
+// Every assertion here is about whether the call REACHED the delegate. That is the whole contract of a guard: block
+// or pass through unchanged. Asserting only on the returned message would let a "blocked" verdict coexist with the
+// underlying call having already happened.
+package {{PKG}}.interfacedef.deploy;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.SpecFixtures;
+
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+import org.htcom.protean.module.ModuleResource;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class SpecGuardToolTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private McpTool delegate;
+    private ModulePlatform platform;
+
+    @BeforeEach
+    void setUp() {
+        delegate = mock(McpTool.class);
+        platform = mock(ModulePlatform.class);
+        when(delegate.call(any(), any())).thenReturn(McpToolResult.ok("delegated", mapper.createObjectNode()));
+    }
+
+    private ObjectNode args() {
+        ObjectNode args = mapper.createObjectNode();
+        args.put("id", "orders");
+        return args;
+    }
+
+    /** A {@code files[]} entry, matching protean's reload schema: the path lives in {@code filename}. */
+    private void addFile(ObjectNode args, String filename) {
+        ArrayNode files = args.has("files") ? (ArrayNode) args.get("files") : args.putArray("files");
+        ObjectNode file = files.addObject();
+        file.put("filename", filename);
+        file.put("content", "whatever");
+    }
+
+    private void removeFile(ObjectNode args, String path) {
+        ArrayNode removals = args.has("removeFiles")
+                ? (ArrayNode) args.get("removeFiles") : args.putArray("removeFiles");
+        removals.add(path);
+    }
+
+    private void assertBlocked(McpToolResult result, String fragment) {
+        assertTrue(result.isError(), () -> "expected the guard to block, got: " + result.text());
+        assertTrue(result.text().contains(fragment),
+                () -> "expected '" + fragment + "' in: " + result.text());
+        verify(delegate, never()).call(any(), any());
+    }
+
+    private void assertPassedThrough(McpToolResult result) {
+        assertFalse(result.isError(), () -> "expected pass-through, got: " + result.text());
+        assertEquals("delegated", result.text());
+        verify(delegate).call(any(), any());
+    }
+
+    // --- reload_module_resources: the reserved prefix must be unwritable ---
+
+    private SpecGuardTool reloadGuard() {
+        return SpecGuardTool.forReloadResources(delegate, platform);
+    }
+
+    /**
+     * The exact defect. The reserved spec resource arrives as a {@code files[]} entry whose path is in
+     * {@code filename} — not under an {@code add} key — and reloadResources runs no promotion gate, so letting this
+     * through means the module's declared contract can be swapped with nothing checking it.
+     */
+    @Test
+    void writingTheSealedSpecResourceIsRefused() {
+        ObjectNode args = args();
+        addFile(args, SpecResource.PATH);
+        assertBlocked(reloadGuard().call(args, null), "refusing to write reserved resource");
+    }
+
+    @Test
+    void removingTheSealedSpecResourceIsRefused() {
+        ObjectNode args = args();
+        removeFile(args, SpecResource.PATH);
+        assertBlocked(reloadGuard().call(args, null), "refusing to remove reserved resource");
+    }
+
+    /** Anything under the reserved prefix is platform-owned, not just the one known filename. */
+    @Test
+    void anyPathUnderTheReservedPrefixIsRefused() {
+        ObjectNode args = args();
+        addFile(args, SpecResource.RESERVED_PREFIX + "something-else.json");
+        assertBlocked(reloadGuard().call(args, null), "refusing to write reserved resource");
+    }
+
+    /**
+     * Path normalization has to happen before the prefix comparison, or a Windows-style or leading-slash spelling
+     * of the same resource walks straight past a literal string check.
+     */
+    @Test
+    void evasiveSpellingsOfTheReservedPathAreRefused() {
+        for (String spelling : new String[] {
+                "/META-INF/protean/interface.json",
+                "META-INF\\protean\\interface.json",
+                "/META-INF\\protean\\interface.json",
+                "meta-inf/protean/interface.json"}) {
+            delegate = mock(McpTool.class);
+            when(delegate.call(any(), any())).thenReturn(McpToolResult.ok("delegated", mapper.createObjectNode()));
+            ObjectNode args = args();
+            addFile(args, spelling);
+            McpToolResult result = SpecGuardTool.forReloadResources(delegate, platform).call(args, null);
+            assertTrue(result.isError(), () -> "spelling should have been refused: " + spelling);
+            verify(delegate, never()).call(any(), any());
+        }
+    }
+
+    /** A guard that blocked ordinary resource reloads would make the tool useless. */
+    @Test
+    void anOrdinaryResourceReloadPassesThrough() {
+        ObjectNode args = args();
+        addFile(args, "mapper/orders/OrdersMapper.xml");
+        removeFile(args, "mapper/orders/Stale.xml");
+        assertPassedThrough(reloadGuard().call(args, null));
+    }
+
+    @Test
+    void aCallWithNoResourceArgumentsPassesThrough() {
+        assertPassedThrough(reloadGuard().call(args(), null));
+    }
+
+    /** One reserved path among several legitimate ones must still block the whole call. */
+    @Test
+    void aReservedPathMixedWithLegitimateOnesBlocksTheCall() {
+        ObjectNode args = args();
+        addFile(args, "mapper/orders/OrdersMapper.xml");
+        addFile(args, SpecResource.PATH);
+        assertBlocked(reloadGuard().call(args, null), "refusing to write reserved resource");
+    }
+
+    // --- patch_module: refused for a module that carries a sealed spec ---
+
+    private SpecGuardTool patchGuard() {
+        return SpecGuardTool.forPatch(delegate, mapper, platform);
+    }
+
+    private void moduleWithSealedSpec(String moduleId) {
+        InterfaceSpec spec = SpecFixtures.orders();
+        ModuleDescriptor descriptor = ModuleDescriptor.builder()
+                .id(moduleId).version("1.0.0")
+                .controllerFqcn("module.orders.OrdersController")
+                .resources(Map.of(SpecResource.PATH,
+                        ModuleResource.text(SpecResource.serialize(mapper, spec))))
+                .build();
+        when(platform.find(moduleId)).thenReturn(Optional.of(descriptor));
+    }
+
+    private void moduleWithoutSpec(String moduleId) {
+        ModuleDescriptor descriptor = ModuleDescriptor.builder()
+                .id(moduleId).version("1.0.0")
+                .controllerFqcn("module.legacy.LegacyController")
+                .build();
+        when(platform.find(moduleId)).thenReturn(Optional.of(descriptor));
+    }
+
+    /**
+     * Patching source alone would leave the sealed spec describing routes the module no longer serves. update_module
+     * with a specId replaces both together, so the caller is pointed there.
+     */
+    @Test
+    void patchingASpecBearingModuleIsRefused() {
+        moduleWithSealedSpec("orders");
+        McpToolResult result = patchGuard().call(args(), null);
+        assertBlocked(result, "carries a declared interface");
+        assertTrue(result.text().contains("protean.update_module"), result::text);
+    }
+
+    /** A module deployed before the interface requirement must keep working. */
+    @Test
+    void patchingAModuleWithoutASealedSpecPassesThrough() {
+        moduleWithoutSpec("legacy");
+        ObjectNode args = args();
+        args.put("id", "legacy");
+        assertPassedThrough(patchGuard().call(args, null));
+    }
+
+    /** An unknown module is the built-in's error to report, not the guard's. */
+    @Test
+    void patchingAnUnknownModulePassesThroughToTheBuiltIn() {
+        when(platform.find("ghost")).thenReturn(Optional.empty());
+        ObjectNode args = args();
+        args.put("id", "ghost");
+        assertPassedThrough(patchGuard().call(args, null));
+    }
+
+    @Test
+    void aPatchWithNoModuleIdPassesThroughSoTheBuiltInReportsIt() {
+        assertPassedThrough(patchGuard().call(mapper.createObjectNode(), null));
+    }
+
+    // --- the delegating surface must stay transparent ---
+
+    @Test
+    void identityAndSchemaComeFromTheBuiltIn() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        when(delegate.name()).thenReturn("protean.reload_module_resources");
+        when(delegate.title()).thenReturn("Reload Module Resources");
+        when(delegate.description()).thenReturn("Reloads resources.");
+        when(delegate.inputSchema()).thenReturn(schema);
+        when(delegate.action()).thenReturn(ModuleActionAuthorizer.ModuleAction.UPDATE);
+
+        SpecGuardTool guard = reloadGuard();
+        assertEquals("protean.reload_module_resources", guard.name());
+        assertEquals("Reload Module Resources", guard.title());
+        assertEquals(ModuleActionAuthorizer.ModuleAction.UPDATE, guard.action());
+        assertEquals(schema, guard.inputSchema());
+        // The added sentence is how an agent learns the restriction exists at all.
+        assertTrue(guard.description().startsWith("Reloads resources."), guard::description);
+        assertTrue(guard.description().contains(SpecResource.RESERVED_PREFIX), guard::description);
+    }
+}

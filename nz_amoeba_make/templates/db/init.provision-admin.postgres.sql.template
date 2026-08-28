@@ -1,0 +1,11 @@
+-- [worker.db.auto-provision + PostgreSQL docker] Creates the provisioning ADMIN role application.yml expects
+-- (protean.worker.db.admin-username / admin-password). Auto-provision carves a per-module schema+role at deploy
+-- via this account, so it needs CREATEDB/CREATEROLE. Runs on first boot of a fresh data volume.
+-- Name this so it sorts BEFORE any data init (e.g. 00-provision-admin.sql). Live-demo credentials — not for prod.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ADMIN_USER}}') THEN
+    CREATE ROLE "{{ADMIN_USER}}" LOGIN PASSWORD '{{ADMIN_PW}}' CREATEDB CREATEROLE;
+  END IF;
+END
+$$;

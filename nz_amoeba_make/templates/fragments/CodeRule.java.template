@@ -1,0 +1,27 @@
+// [CAPABILITY: custom CodeRule] Promotion gate ② (protean.gate.review-enabled=true, default).
+// A @Component implementing CodeRule is auto-collected by the Rule System and runs alongside the built-in
+// ForbiddenApiRule on each deploy. Return a non-empty list to REJECT the module. This example bans a package.
+package {{PKG}};
+
+import org.htcom.protean.gate.rules.CodeRule;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+
+@Component
+public class ExampleCodeRule implements CodeRule {
+
+    @Override
+    public String name() {
+        return "no-example-forbidden-package";
+    }
+
+    /** Rejects any class whose name lives under a forbidden package. Bytecode is available for deeper checks. */
+    @Override
+    public List<String> check(String className, byte[] bytecode) {
+        if (className != null && className.startsWith("com.forbidden.")) {
+            return List.of("class " + className + " uses forbidden package com.forbidden.*");
+        }
+        return List.of();
+    }
+}

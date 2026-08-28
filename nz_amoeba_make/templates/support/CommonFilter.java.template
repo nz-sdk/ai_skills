@@ -1,0 +1,47 @@
+// [COMMON SUPPORT] Servlet filter over every request. Currently a PASS-THROUGH — it only calls the next filter.
+//
+// It is registered now, doing nothing, so that adding a cross-cutting concern later is a one-file edit instead of
+// a wiring exercise. Boot registers any Filter @Component automatically.
+//
+// WHY THIS ORDER. protean already installs filters, and the position decides what this one can see:
+//     CorrelationIdFilter        HIGHEST_PRECEDENCE        puts the correlation id in scope
+//     RequestTraceFilter         HIGHEST_PRECEDENCE + 10   records the trace entry
+//  >> CommonFilter               HIGHEST_PRECEDENCE + 20   here
+//     Spring Security chain      -100                      authenticates; may reject with 401
+//     ModuleTimeoutFilter        LOWEST_PRECEDENCE         request watchdog
+// Sitting BEFORE Spring Security means this sees EVERY request — including ones security rejects — but no
+// Principal yet. That is the useful half of the pair: CommonInterceptor runs inside the MVC layer, after
+// authentication, where the Principal and the matched handler are known. Reach for the filter when the concern is
+// "all traffic" and for the interceptor when it is "a handled request".
+//
+// Do not do blocking work here. Every request pays for it, and an SSE/streaming response keeps the thread for the
+// life of the stream.
+package {{PKG}}.support;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+
+@Component
+@Order(Ordered.HIGHEST_PRECEDENCE + 20)
+public class CommonFilter extends OncePerRequestFilter {
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+            throws ServletException, IOException {
+        // --- before: nothing yet ---
+        try {
+            chain.doFilter(request, response);
+        } finally {
+            // --- after: nothing yet. Runs even when the chain throws, which is where cleanup belongs. ---
+        }
+    }
+}

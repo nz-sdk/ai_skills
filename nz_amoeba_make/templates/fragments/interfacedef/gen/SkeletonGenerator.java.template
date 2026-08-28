@@ -1,0 +1,306 @@
+// [INTERFACE DEFINITION] InterfaceSpec -> the module's Java skeleton.
+//
+// This class is the whole point of the "generate, don't inspect" direction. The old flow had an agent infer the I/O,
+// write free-form Java, and deploy it — leaving the platform to reconstruct the contract afterwards from
+// @RequestParam/@RequestBody/return types, which is lossy (a Map<String,Object> return erases the output shape
+// entirely) and after the fact. Here the contract comes first and the DTOs, the controller and the service
+// interface are functions OF it, so they cannot disagree with it. What is left for the module author is the part
+// that actually needs judgement: the service body, the SQL, and the tests.
+//
+// Nothing here compiles or runs anything. It emits text, exactly as the canonical module-source examples do
+// (proteanSrc/examples/quickstart/.../SampleModules.java).
+package {{PKG}}.interfacedef.gen;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+import {{PKG}}.interfacedef.InterfaceSpecValidator;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.regex.Pattern;
+
+/** Renders the skeleton. Stateless entry point; per-call state lives in the local {@link Layout} and writers. */
+public final class SkeletonGenerator {
+
+    private static final Pattern PACKAGE_NAME =
+            Pattern.compile("^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$");
+
+    /**
+     * Host base types every generated module inherits — the seam for cross-cutting logic added later, so that
+     * adding it does not mean editing modules that are already deployed. Both are empty by design; see their
+     * sources in {@code {{PKG}}.support}.
+     *
+     * <p>They must live in the HOST app: a module deploys as source and RuntimeCompiler builds its classpath from
+     * {@code java.class.path}, so a supertype the module names has to resolve there.
+     */
+    static final String BASE_SERVICE = "{{PKG}}.support.BaseService";
+    static final String BASE_MAPPER = "{{PKG}}.support.BaseMapper";
+
+    private SkeletonGenerator() {
+    }
+
+    /**
+     * Inputs for one generation.
+     *
+     * @param moduleId    protean module id; also the stem of every generated class name
+     * @param packageName base package for the module's own classes; DTOs land in {@code packageName + ".dto"}
+     */
+    public record Request(String moduleId, String packageName, InterfaceSpec spec) {
+    }
+
+    /**
+     * The class and file names this generation uses. Derived once so every emitted file agrees — package-private
+     * because the per-artifact writers in this package all read from it.
+     */
+    record Layout(
+            String basePackage, String dtoPackage, String base,
+            String controller, String service, String serviceImpl,
+            String mapper, String config, String contractTest, String mapperXmlPath
+    ) {
+        /**
+         * Derives every name for one generation.
+         *
+         * <p>{@code service} is the type the CONTROLLER INJECTS and {@code serviceImpl} is the {@code @Service}
+         * bean. With an interface those are two classes; without one they are the same class, and the injected
+         * name stays {@code <Base>Service} either way. That is what lets the controller, the component list and
+         * the contract test stay identical across both modes — only this method knows the difference.
+         */
+        static Layout of(String moduleId, String packageName, boolean serviceInterface) {
+            String base = JavaNames.pascal(moduleId);
+            return new Layout(packageName, packageName + ".dto", base,
+                    base + "Controller",
+                    base + "Service",
+                    serviceInterface ? base + "ServiceImpl" : base + "Service",
+                    base + "Mapper", base + "MyBatisConfig", base + "ContractTest",
+                    "mapper/" + moduleId + "/" + base + "Mapper.xml");
+        }
+
+        /** Whether this layout separates the declared service type from its implementation. */
+        boolean hasServiceInterface() {
+            return !service.equals(serviceImpl);
+        }
+
+        String fqcn(String simpleName) {
+            return basePackage + "." + simpleName;
+        }
+
+        String dtoFqcn(String simpleName) {
+            return dtoPackage + "." + simpleName;
+        }
+    }
+
+    /** One method parameter, in every spelling the emitted files need. */
+    record MethodParam(String wireName, String javaName, String javaType, ParamIn in,
+                       boolean required, String description) {
+    }
+
+    /**
+     * The signature shared by the controller method, the service interface method and the stub implementation.
+     * Computed once per operation so the three cannot drift apart.
+     *
+     * @param requestDto simple name of the request DTO, or {@code null} when the operation has no body
+     * @param bodyParam  Java variable name for the body parameter, or {@code null}
+     */
+    record Signature(OperationSpec operation, String returnType, String responseDto,
+                     List<MethodParam> params, String requestDto, String bodyParam) {
+
+        /** Every parameter the method declares, body included, in declaration order. */
+        List<String> javaTypes() {
+            List<String> types = new ArrayList<>(params.stream().map(MethodParam::javaType).toList());
+            if (requestDto != null) {
+                types.add(requestDto);
+            }
+            return types;
+        }
+
+        /** The argument list to forward to the service, e.g. {@code orderId, request}. */
+        String forwardedArguments() {
+            List<String> names = new ArrayList<>(params.stream().map(MethodParam::javaName).toList());
+            if (bodyParam != null) {
+                names.add(bodyParam);
+            }
+            return String.join(", ", names);
+        }
+    }
+
+    /**
+     * Generates the skeleton for one module.
+     *
+     * @throws IllegalArgumentException if the spec is invalid or the package name is not a legal Java package
+     * @throws IllegalStateException    if two parameters of one operation collapse to the same Java variable name
+     */
+    public static SkeletonBundle generate(Request request) {
+        InterfaceSpecValidator.validateOrThrow(request.spec());
+        if (request.packageName() == null || !PACKAGE_NAME.matcher(request.packageName()).matches()) {
+            throw new IllegalArgumentException("packageName: '" + request.packageName()
+                    + "' is not a legal Java package name");
+        }
+        InterfaceSpec spec = request.spec();
+        Layout layout = Layout.of(request.moduleId(), request.packageName(), spec.generatesServiceInterface());
+        boolean myBatis = spec.dataAccess() == InterfaceSpec.DataAccess.MYBATIS;
+
+        List<Signature> signatures = spec.operations().stream()
+                .map(op -> signature(op, layout))
+                .toList();
+
+        List<GeneratedFile> files = new ArrayList<>();
+        files.addAll(dtoFiles(spec, layout, signatures));
+        files.add(GeneratedFile.ownedSource(layout.controller() + ".java",
+                ControllerWriter.write(layout, spec, signatures)));
+        if (layout.hasServiceInterface()) {
+            files.add(GeneratedFile.ownedSource(layout.service() + ".java",
+                    ServiceWriter.writeInterface(layout, spec, signatures)));
+        }
+        // Authored in both modes. Without an interface this file IS the service, so it is still the author's — the
+        // spec cannot fix a method body, only its signature.
+        files.add(GeneratedFile.authoredSource(layout.serviceImpl() + ".java",
+                ServiceWriter.writeImplementation(layout, spec, signatures, myBatis)));
+        files.add(GeneratedFile.authoredTest(layout.contractTest() + ".java",
+                ContractTestWriter.write(layout, signatures)));
+
+        List<String> components = new ArrayList<>(
+                List.of(layout.fqcn(layout.controller()), layout.fqcn(layout.serviceImpl())));
+        if (myBatis) {
+            files.addAll(MyBatisSkeletonWriter.write(layout, signatures));
+            components.add(layout.fqcn(layout.config()));
+        }
+
+        return new SkeletonBundle(layout.fqcn(layout.controller()), components, myBatis,
+                myBatis ? layout.fqcn(layout.mapper()) : null,
+                myBatis ? layout.mapperXmlPath() : null,
+                files);
+    }
+
+    /** Resolves the shared signature for one operation. */
+    private static Signature signature(OperationSpec op, Layout layout) {
+        // Reserve the names the emitted methods already use so a spec parameter cannot shadow them.
+        Set<String> used = new HashSet<>(Set.of("service", "mapper", "this"));
+        List<MethodParam> params = new ArrayList<>(op.parameters().size());
+        for (ParamSpec p : op.parameters()) {
+            String javaName = JavaNames.camel(p.name());
+            if (!used.add(javaName)) {
+                // Two wire names can collapse onto one identifier (page-size and page_size both give pageSize).
+                // Renaming silently would make the binding annotation and the variable disagree in a way that is
+                // very hard to see, so this fails the generation instead.
+                throw new IllegalStateException("operation '" + op.operationId() + "': parameters '" + p.name()
+                        + "' and another collapse to the same Java name '" + javaName + "'");
+            }
+            params.add(new MethodParam(p.name(), javaName, paramType(p), p.in(), p.required(), p.description()));
+        }
+
+        String requestDto = op.hasRequestBody() ? JavaNames.pascal(op.operationId()) + "Request" : null;
+        String bodyParam = requestDto == null ? null : uniqueName("request", used);
+
+        Optional<ResponseSpec> success = op.successResponse();
+        String responseDto = success.filter(r -> !r.body().isEmpty())
+                .map(r -> JavaNames.pascal(op.operationId()) + "Response")
+                .orElse(null);
+        // void, never ResponseEntity<?> or Map: promotion gate 2 rejects a non-concrete return type, because an
+        // erased return makes the response shape unrecoverable from the deployed module.
+        String returnType = responseDto == null ? "void" : responseDto;
+
+        return new Signature(op, returnType, responseDto, params, requestDto, bodyParam);
+    }
+
+    /**
+     * A parameter's Java type. A composite parameter is validated to be a repeated query value, and
+     * {@code ParamSpec} carries no element type, so it degrades to {@code List<String>} — the same degradation
+     * the OpenAPI renderer makes, kept identical on purpose.
+     */
+    private static String paramType(ParamSpec p) {
+        return p.type() == FieldType.ARRAY ? "List<String>" : JavaNames.scalarType(p.type(), null);
+    }
+
+    private static String uniqueName(String preferred, Set<String> used) {
+        String name = preferred;
+        for (int n = 2; !used.add(name); n++) {
+            name = preferred + n;
+        }
+        return name;
+    }
+
+    /** One DTO file per declared request body and per success response body. */
+    private static List<GeneratedFile> dtoFiles(InterfaceSpec spec, Layout layout, List<Signature> signatures) {
+        List<GeneratedFile> files = new ArrayList<>();
+        for (Signature sig : signatures) {
+            OperationSpec op = sig.operation();
+            if (sig.requestDto() != null) {
+                files.add(GeneratedFile.ownedSource(sig.requestDto() + ".java",
+                        DtoWriter.write(layout.dtoPackage(), sig.requestDto(),
+                                op.operationId() + " 요청 본문 — " + JavaNames.oneLine(op.description()),
+                                op.requestBody())));
+            }
+            if (sig.responseDto() != null) {
+                ResponseSpec success = op.successResponse().orElseThrow();
+                files.add(GeneratedFile.ownedSource(sig.responseDto() + ".java",
+                        DtoWriter.write(layout.dtoPackage(), sig.responseDto(),
+                                op.operationId() + " " + success.status() + " 응답 본문 — "
+                                        + JavaNames.oneLine(success.description()),
+                                success.body())));
+            }
+        }
+        return files;
+    }
+
+    // --- shared emit helpers, used by the writers in this package ---
+
+    /** Renders a sorted import block, skipping anything in {@code layout}'s own package. */
+    static String imports(Set<String> fqcns, String ownPackage) {
+        StringBuilder out = new StringBuilder();
+        for (String fqcn : new TreeSet<>(fqcns)) {
+            int lastDot = fqcn.lastIndexOf('.');
+            if (lastDot < 0) {
+                continue;
+            }
+            String packageName = fqcn.substring(0, lastDot);
+            // Same-package and java.lang types need no import. The java.lang test must be an exact package match,
+            // not a prefix: java.lang.reflect.Method lives in a SUBPACKAGE and does require an import.
+            if (packageName.equals(ownPackage) || packageName.equals("java.lang")) {
+                continue;
+            }
+            out.append("import ").append(fqcn).append(";\n");
+        }
+        return out.toString();
+    }
+
+    /** Collects the DTO imports a file needs from a signature list. Ordered for deterministic output. */
+    static Set<String> dtoImports(Layout layout, List<Signature> signatures) {
+        Set<String> imports = new LinkedHashSet<>();
+        for (Signature sig : signatures) {
+            if (sig.requestDto() != null) {
+                imports.add(layout.dtoFqcn(sig.requestDto()));
+            }
+            if (sig.responseDto() != null) {
+                imports.add(layout.dtoFqcn(sig.responseDto()));
+            }
+        }
+        return imports;
+    }
+
+    /** True when any signature declares a generic {@code List} parameter, which needs the java.util import. */
+    static boolean usesList(List<Signature> signatures) {
+        return signatures.stream().anyMatch(s -> s.params().stream()
+                .anyMatch(p -> p.javaType().startsWith("List<")));
+    }
+
+    /** The method-parameter list for the service interface and its implementation (no binding annotations). */
+    static String plainParameters(Signature sig) {
+        List<String> parts = new ArrayList<>();
+        for (MethodParam p : sig.params()) {
+            parts.add(p.javaType() + " " + p.javaName());
+        }
+        if (sig.requestDto() != null) {
+            parts.add(sig.requestDto() + " " + sig.bodyParam());
+        }
+        return String.join(", ", parts);
+    }
+}

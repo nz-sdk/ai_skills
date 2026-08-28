@@ -1,0 +1,46 @@
+// [COMMON SUPPORT] Spring MVC interceptor over every handled request. Currently a PASS-THROUGH.
+//
+// IT REACHES DEPLOYED MODULES, which is the point. protean's DynamicEndpointRegistrar injects the host's
+// RequestMappingHandlerMapping bean and calls registerMapping on it, so a module's routes live in the same handler
+// mapping this interceptor is attached to. Under worker/container isolation the module's route is a ReverseProxy
+// handler on that same mapping, so it is covered there too.
+//
+// Compared with CommonFilter: this runs INSIDE the MVC layer, after Spring Security, so the Principal is
+// available and `handler` identifies the matched method — but requests rejected earlier (401, 404) never arrive.
+// Use the filter for "all traffic", this for "a handled request".
+//
+// preHandle MUST return true to continue. Returning false silently ends the request, which is a very easy way to
+// make every module look broken — if you add a rejection path, write the response status before returning false.
+//
+// Registered by WebSupportConfig; an interceptor bean alone does nothing.
+package {{PKG}}.support;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+import org.springframework.lang.Nullable;
+import org.springframework.stereotype.Component;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.servlet.ModelAndView;
+
+@Component
+public class CommonInterceptor implements HandlerInterceptor {
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
+        // --- nothing yet --- must stay true, see the header note.
+        return true;
+    }
+
+    @Override
+    public void postHandle(HttpServletRequest request, HttpServletResponse response, Object handler,
+                           @Nullable ModelAndView modelAndView) {
+        // --- nothing yet. Not called when the handler threw. ---
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler,
+                                @Nullable Exception ex) {
+        // --- nothing yet. Always called once preHandle returned true — cleanup belongs here, not in postHandle. ---
+    }
+}

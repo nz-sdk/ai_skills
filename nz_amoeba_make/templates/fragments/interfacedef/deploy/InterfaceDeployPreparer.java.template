@@ -1,0 +1,350 @@
+// [INTERFACE DEFINITION] Rewrites protean.deploy_module / update_module arguments so the declared contract is what
+// actually gets installed.
+//
+// Everything here happens BEFORE the built-in tool is called, so nothing in protean is modified and no gate,
+// compile or store logic is duplicated. What this adds to the arguments:
+//
+//   1. the server-owned skeleton files, REPLACING whatever the caller submitted under those names. This is the step
+//      that removes the drift: the DTOs, the controller and (when the spec asks for one) the service interface are
+//      functions of the spec, so a hand-edited copy is discarded rather than trusted.
+//   2. the authored skeleton files, but only when absent — a caller who omitted the service implementation gets a
+//      throwing stub, which fails at gate 3 with a clear message instead of failing to compile.
+//   3. the spec itself, sealed as a reserved module resource (SpecResource) so it is versioned and signed with the
+//      module.
+//   4. gate-3 probes generated from the spec, merged with any the caller supplied.
+//   5. controller / components / needsSharedBeans, taken from the skeleton. The caller no longer has to get these
+//      right, and `components` defaulting to [controller] alone is the classic MVC-module wiring failure.
+package {{PKG}}.interfacedef.deploy;
+
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpecValidator;
+import {{PKG}}.interfacedef.gen.GeneratedFile;
+import {{PKG}}.interfacedef.gen.SkeletonBundle;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator;
+import org.htcom.protean.module.ModulePlatform;
+import org.htcom.protean.module.VerificationPlan;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+
+/** Prepares deploy arguments from a declared interface. */
+@Component
+public class InterfaceDeployPreparer {
+
+    private final ObjectMapper mapper;
+    private final DraftStore draftStore;
+    private final ModulePlatform platform;
+
+    public InterfaceDeployPreparer(ObjectMapper mapper, DraftStore draftStore, ModulePlatform platform) {
+        this.mapper = mapper;
+        this.draftStore = draftStore;
+        this.platform = platform;
+    }
+
+    /** A caller-facing rejection. The message is written to be actionable on its own. */
+    public static class PreparationException extends RuntimeException {
+        public PreparationException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Refuses to change the service-layer shape of a module that is already deployed.
+     *
+     * <p>The replace loop below only overwrites files the skeleton also emits, and only server-owned ones. So a
+     * switch strands the previous shape: going interface → no-interface leaves the old {@code <Base>Service.java}
+     * (an interface) in place, because in the no-interface mode that name is an AUTHORED file and authored files
+     * are kept, and {@code <Base>ServiceImpl.java} survives untouched as well — the module ends up carrying two
+     * service structures and fails to compile.
+     *
+     * <p>The fix would be deleting files, and the files to delete are the ones the author wrote logic into. That
+     * is not a call this code should make silently, so it refuses and says what to do instead.
+     */
+    private void rejectServiceLayerSwitch(String moduleId, InterfaceSpec next) {
+        Optional<InterfaceSpec> deployed = platform.find(moduleId)
+                .flatMap(descriptor -> SpecResource.read(mapper, descriptor.resources()));
+        if (deployed.isEmpty()) {
+            return; // First deploy, or a module that carries no sealed spec — nothing to contradict.
+        }
+        boolean was = deployed.get().generatesServiceInterface();
+        boolean now = next.generatesServiceInterface();
+        if (was == now) {
+            return;
+        }
+        throw new PreparationException("module '" + moduleId + "' is deployed with serviceInterface=" + was
+                + " and this deploy declares serviceInterface=" + now + ". The service-layer shape cannot change "
+                + "on an existing module: the previous shape's service files are author-owned, so they would be "
+                + "kept alongside the new ones and the module would not compile. Either declare "
+                + "serviceInterface=" + was + " to match what is deployed, or uninstall the module "
+                + "(protean.uninstall_module) and deploy it fresh under the new shape.");
+    }
+
+    /**
+     * The rewritten call.
+     *
+     * @param args     arguments to hand to the built-in tool
+     * @param replaced server-owned files the caller submitted with different content — silently discarded edits, so
+     *                 they are reported back
+     * @param seeded   authored files the caller omitted, filled in from the skeleton
+     */
+    public record Prepared(
+            ObjectNode args,
+            InterfaceSpec spec,
+            SkeletonBundle skeleton,
+            String moduleId,
+            String version,
+            String specId,
+            List<String> replaced,
+            List<String> seeded,
+            List<VerificationPlan.Probe> probes
+    ) {
+        public Prepared {
+            replaced = List.copyOf(replaced);
+            seeded = List.copyOf(seeded);
+            probes = List.copyOf(probes);
+        }
+    }
+
+    public Prepared prepare(JsonNode rawArgs) {
+        JsonNode args = rawArgs == null ? mapper.missingNode() : rawArgs;
+
+        if (args.hasNonNull("manifest")) {
+            // The manifest form carries no place for a specId and cannot be rewritten file-by-file. Rejecting is
+            // honest; silently accepting it would be a hole straight through every check below.
+            throw new PreparationException("the manifest form is not accepted on this deployment. Use the files[] "
+                    + "form with a specId from amoeba.define_interface.");
+        }
+        String moduleId = requireText(args, "id");
+        String version = requireText(args, "version");
+
+        Resolved resolved = resolveSpec(args, moduleId);
+        rejectServiceLayerSwitch(moduleId, resolved.spec());
+        Map<String, FileEntry> files = collectFiles(args);
+        List<String> replaced = new ArrayList<>();
+        List<String> seeded = new ArrayList<>();
+
+        for (GeneratedFile generated : resolved.skeleton().files()) {
+            String key = keyOf(generated.filename(), generated.kind().wire());
+            FileEntry existing = files.get(key);
+            if (generated.serverOwned()) {
+                if (existing != null && !existing.content().equals(generated.content())) {
+                    replaced.add(generated.filename());
+                }
+                files.put(key, FileEntry.of(generated));
+            } else if (existing == null) {
+                seeded.add(generated.filename());
+                files.put(key, FileEntry.of(generated));
+            }
+        }
+
+        if (resolved.skeleton().hasMapper()) {
+            checkMapper(resolved.skeleton(), files);
+        }
+
+        // Seal the spec last, so it cannot be shadowed by a caller-supplied resource of the same path.
+        files.put(keyOf(SpecResource.PATH, "resource"),
+                new FileEntry(SpecResource.PATH, SpecResource.serialize(mapper, resolved.spec()),
+                        "resource", false));
+
+        ObjectNode prepared = args.deepCopy();
+        writeFiles(prepared, files);
+        prepared.put("controller", resolved.skeleton().controllerFqcn());
+        ArrayNode components = prepared.putArray("components");
+        resolved.skeleton().componentFqcns().forEach(components::add);
+        prepared.put("needsSharedBeans", resolved.skeleton().needsSharedBeans());
+        // Not part of the built-in contract; carried this far only to reach us.
+        prepared.remove("specId");
+        prepared.remove("interface");
+        prepared.remove("packageName");
+
+        List<VerificationPlan.Probe> probes = ProbeGenerator.probesFor(resolved.spec());
+        VerificationPlan merged = ProbeGenerator.merge(existingPlan(args), probes);
+        if (merged != null) {
+            prepared.set("verification", mapper.valueToTree(merged));
+        }
+
+        return new Prepared(prepared, resolved.spec(), resolved.skeleton(), moduleId, version,
+                resolved.specId(), replaced, seeded, probes);
+    }
+
+    /** A spec plus the skeleton generated from it, however it was supplied. */
+    private record Resolved(InterfaceSpec spec, SkeletonBundle skeleton, String specId, String packageName) {
+    }
+
+    /**
+     * Resolves the spec from a draft {@code specId} or from an inline {@code interface}.
+     *
+     * <p>A draft reuses the skeleton the caller was already handed, so the files compared here are provably the
+     * files that call returned. An inline spec is validated and generated from scratch.
+     */
+    private Resolved resolveSpec(JsonNode args, String moduleId) {
+        if (args.hasNonNull("specId")) {
+            String specId = args.get("specId").asText();
+            DraftStore.Draft draft = draftStore.find(specId).orElseThrow(() -> new PreparationException(
+                    "specId '" + specId + "' is unknown or expired. Call amoeba.define_interface again to get a "
+                            + "fresh one (drafts are held in memory and do not survive a restart)."));
+            if (!draft.moduleId().equals(moduleId)) {
+                throw new PreparationException("specId '" + specId + "' was defined for module '"
+                        + draft.moduleId() + "' but this deploy targets '" + moduleId + "'");
+            }
+            return new Resolved(draft.spec(), draft.skeleton(), specId, draft.packageName());
+        }
+
+        if (!args.hasNonNull("interface")) {
+            throw new PreparationException("this deployment requires a declared interface. Either call "
+                    + "amoeba.define_interface first and pass its specId, or pass an inline 'interface' object "
+                    + "together with 'packageName'.");
+        }
+        String packageName = requireText(args, "packageName");
+        InterfaceSpec spec;
+        try {
+            // Strict, for the same reason define_interface is: Spring Boot's ObjectMapper would otherwise drop a
+            // misspelled property and generate a DTO missing that field.
+            spec = mapper.readerFor(InterfaceSpec.class)
+                    .with(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                    .readValue(args.get("interface"));
+        } catch (Exception e) {
+            throw new PreparationException("interface could not be parsed: " + rootMessage(e));
+        }
+        List<String> violations = InterfaceSpecValidator.validate(spec);
+        if (!violations.isEmpty()) {
+            throw new PreparationException("interface spec is invalid:\n  - " + String.join("\n  - ", violations));
+        }
+        try {
+            return new Resolved(spec,
+                    SkeletonGenerator.generate(new SkeletonGenerator.Request(moduleId, packageName, spec)),
+                    null, packageName);
+        } catch (RuntimeException e) {
+            throw new PreparationException("skeleton generation failed: " + rootMessage(e));
+        }
+    }
+
+    /**
+     * Runs the Mapper/XML agreement check on the final file set.
+     *
+     * <p>Deliberately after injection: a caller who omitted the Mapper or the XML gets the seeded skeleton, whose
+     * statements are empty — so the failure reads "write its SQL" instead of "file missing", which is the actual
+     * problem.
+     */
+    private void checkMapper(SkeletonBundle skeleton, Map<String, FileEntry> files) {
+        String mapperFqcn = skeleton.mapperFqcn();
+        String xmlPath = skeleton.mapperXmlPath();
+        String mapperSimpleName = mapperFqcn.substring(mapperFqcn.lastIndexOf('.') + 1) + ".java";
+
+        FileEntry mapperSource = files.get(keyOf(mapperSimpleName, "source"));
+        FileEntry xml = files.get(keyOf(xmlPath, "resource"));
+        List<String> violations = MapperConsistencyChecker.check(mapperFqcn,
+                mapperSource == null ? null : mapperSource.content(),
+                xmlPath, xml == null ? null : xml.content());
+        if (!violations.isEmpty()) {
+            throw new PreparationException("Mapper and mapper XML do not agree:\n  - "
+                    + String.join("\n  - ", violations));
+        }
+    }
+
+    // --- file list handling ---
+
+    /** One {@code files[]} entry. */
+    private record FileEntry(String filename, String content, String kind, boolean base64) {
+        static FileEntry of(GeneratedFile file) {
+            return new FileEntry(file.filename(), file.content(), file.kind().wire(), false);
+        }
+    }
+
+    /**
+     * Reads {@code files[]} into a keyed map, preserving submission order.
+     *
+     * @throws PreparationException on a duplicate key, which would otherwise silently drop one of the two
+     */
+    private Map<String, FileEntry> collectFiles(JsonNode args) {
+        Map<String, FileEntry> files = new LinkedHashMap<>();
+        if (!args.hasNonNull("files") || !args.get("files").isArray()) {
+            return files;
+        }
+        for (JsonNode file : args.get("files")) {
+            String filename = requireText(file, "filename");
+            if (!file.hasNonNull("content")) {
+                throw new PreparationException("files[] entry '" + filename + "' has no content");
+            }
+            String kind = file.path("kind").asText("source").toLowerCase(Locale.ROOT);
+            FileEntry entry = new FileEntry(filename, file.get("content").asText(), kind,
+                    file.path("base64").asBoolean(false));
+            if (files.put(keyOf(filename, kind), entry) != null) {
+                throw new PreparationException("files[] contains two entries for '" + filename + "'");
+            }
+        }
+        return files;
+    }
+
+    private void writeFiles(ObjectNode args, Map<String, FileEntry> files) {
+        ArrayNode array = args.putArray("files");
+        for (FileEntry file : files.values()) {
+            ObjectNode node = array.addObject();
+            node.put("kind", file.kind());
+            node.put("filename", file.filename());
+            node.put("content", file.content());
+            if (file.base64()) {
+                node.put("base64", true);
+            }
+        }
+    }
+
+    /**
+     * Identity for a submitted file.
+     *
+     * <p>Source and test files are keyed by BASENAME, because protean derives the FQCN from the package declaration
+     * plus the filename stem — a caller who writes {@code dto/GetOrderResponse.java} means the same class as
+     * {@code GetOrderResponse.java}, and keying on the raw string would add a duplicate instead of replacing it.
+     * Resources are keyed by their full path, since for a resource the path IS the classpath location.
+     */
+    private static String keyOf(String filename, String kind) {
+        String normalized = filename.replace('\\', '/');
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        if ("resource".equals(kind)) {
+            return "resource:" + normalized;
+        }
+        int slash = normalized.lastIndexOf('/');
+        return kind + ":" + (slash < 0 ? normalized : normalized.substring(slash + 1));
+    }
+
+    private Optional<VerificationPlan> parsePlan(JsonNode node) {
+        try {
+            return Optional.of(mapper.treeToValue(node, VerificationPlan.class));
+        } catch (Exception e) {
+            throw new PreparationException("verification could not be parsed: " + rootMessage(e));
+        }
+    }
+
+    private VerificationPlan existingPlan(JsonNode args) {
+        return args.hasNonNull("verification") ? parsePlan(args.get("verification")).orElse(null) : null;
+    }
+
+    private static String requireText(JsonNode node, String field) {
+        if (node == null || !node.hasNonNull(field) || node.get(field).asText().isBlank()) {
+            throw new PreparationException("missing required field: " + field);
+        }
+        return node.get(field).asText();
+    }
+
+    private static String rootMessage(Throwable e) {
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        return root.getMessage() == null ? root.toString() : root.getMessage();
+    }
+}

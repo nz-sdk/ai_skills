@@ -1,0 +1,342 @@
+// [INTERFACE DEFINITION] dataAccess=MYBATIS -> Mapper interface, mapper XML and the SqlSessionFactory wiring.
+//
+// Three decisions worth stating, because each rules out a more obvious alternative.
+//
+// 1. WIRING: SqlSessionFactoryBean + one explicit MapperFactoryBean per Mapper, NOT @MapperScan. Scanning inside a
+//    module child context is unproven here; an explicit bean needs no scanner and the generator writes it, so the
+//    boilerplate costs the author nothing. The classpath*: mapper-location pattern is the proven part — protean's
+//    MyBatisScanModuleTest shows ProteanResourcePatternResolver enumerating a module's own XML resources.
+//
+//    STILL UNPROVEN, and the first thing end-to-end verification must confirm: binding a TYPED Mapper interface
+//    whose FQCN is the XML namespace, from inside the module ClassLoader. MyBatisScanModuleTest only exercises the
+//    untyped form (namespace "mbs", selectOne("mbs.count")). If FQCN binding fails there, the fallback is that
+//    untyped form — SqlSession plus statement ids — which drops the Mapper interface but keeps the XML.
+//
+// 2. RESULT MAPPING: an explicit <resultMap> with <constructor> args, NOT resultType pointing at the response DTO.
+//    The DTOs are records, and MyBatis auto-mapping wants setters or a no-arg constructor. Constructor args are the
+//    documented, version-stable way to populate an immutable type.
+//
+// 3. A SEPARATE Row RECORD per read operation, rather than selecting straight into the response DTO. A query
+//    returns rows; the response may be a tree. Flattening object nesting into one row is what a JOIN actually
+//    produces, so Row carries the scalar leaves and the service composes them into the response. Array subtrees are
+//    left out on purpose — a nested collection is its own query, and pretending otherwise would generate a resultMap
+//    that cannot work.
+package {{PKG}}.interfacedef.gen;
+
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator.Layout;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator.MethodParam;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator.Signature;
+
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+final class MyBatisSkeletonWriter {
+
+    private MyBatisSkeletonWriter() {
+    }
+
+    /** A flattened row component: the Java side of one selected column. */
+    private record RowComponent(String name, String javaType, String column, String description) {
+    }
+
+    static List<GeneratedFile> write(Layout layout, List<Signature> signatures) {
+        List<GeneratedFile> files = new ArrayList<>();
+        for (Signature sig : signatures) {
+            if (isRead(sig) && sig.responseDto() != null) {
+                files.add(GeneratedFile.ownedSource(rowName(sig) + ".java", rowRecord(layout, sig)));
+            }
+        }
+        files.add(GeneratedFile.authoredSource(layout.mapper() + ".java", mapperInterface(layout, signatures)));
+        files.add(GeneratedFile.authoredResource(layout.mapperXmlPath(), mapperXml(layout, signatures)));
+        files.add(GeneratedFile.ownedSource(layout.config() + ".java", configuration(layout)));
+        return files;
+    }
+
+    /** A read operation selects; everything else mutates and returns an affected-row count. */
+    private static boolean isRead(Signature sig) {
+        return sig.operation().method() == HttpMethod.GET;
+    }
+
+    private static String rowName(Signature sig) {
+        return JavaNames.pascal(sig.operation().operationId()) + "Row";
+    }
+
+    /** The Mapper method's return type: {@code List<XRow>} for a select, {@code int} for a mutation. */
+    private static String mapperReturnType(Signature sig) {
+        return isRead(sig) && sig.responseDto() != null ? "List<" + rowName(sig) + ">" : "int";
+    }
+
+    // --- Row record ---
+
+    private static String rowRecord(Layout layout, Signature sig) {
+        List<RowComponent> components = rowComponents(sig);
+        StringBuilder out = new StringBuilder();
+        out.append("// GENERATED from the module's interface definition. Do not edit.\n")
+                .append("// One selected row for ").append(sig.operation().operationId())
+                .append(". Object nesting in the response is flattened here, the way a JOIN returns it;\n")
+                .append("// array subtrees are NOT included — fetch those with their own query and compose in the ")
+                .append("service.\n")
+                .append("package ").append(layout.dtoPackage()).append(";\n\n")
+                .append("import io.swagger.v3.oas.annotations.media.Schema;\n\n")
+                .append("/** One selected row for ").append(sig.operation().operationId()).append(". */\n")
+                .append("public record ").append(rowName(sig)).append("(\n");
+
+        List<String> rendered = new ArrayList<>(components.size());
+        for (RowComponent c : components) {
+            rendered.add("        @Schema(description = " + JavaNames.literal(c.description()) + ")\n"
+                    + "        " + c.javaType() + " " + c.name());
+        }
+        return out.append(String.join(",\n", rendered)).append("\n) {\n}\n").toString();
+    }
+
+    /**
+     * Flattens the success response body to scalar leaves. Object nesting contributes a camelCase compound name
+     * ({@code customer.name} -> {@code customerName}); arrays are skipped entirely.
+     */
+    private static List<RowComponent> rowComponents(Signature sig) {
+        List<RowComponent> out = new ArrayList<>();
+        collectRow(out, "", sig.operation().successResponse().orElseThrow().body());
+        if (out.isEmpty()) {
+            // Every response body has at least one field (the validator requires object children to be non-empty),
+            // but a body made only of arrays would flatten to nothing and produce an uncompilable empty record.
+            out.add(new RowComponent("placeholder", "String", "placeholder",
+                    "이 응답은 배열만 담고 있어 평탄화할 스칼라 컬럼이 없다 — 직접 수정하라"));
+        }
+        return out;
+    }
+
+    private static void collectRow(List<RowComponent> out, String prefix, List<FieldSpec> fields) {
+        for (FieldSpec f : fields) {
+            String name = prefix.isEmpty() ? f.name() : prefix + JavaNames.pascal(f.name());
+            switch (f.type()) {
+                case OBJECT -> collectRow(out, name, f.children());
+                case ARRAY -> {
+                    // Intentionally skipped — see the class header.
+                }
+                default -> out.add(new RowComponent(name, JavaNames.scalarType(f.type(), f.format()),
+                        snakeCase(name), JavaNames.oneLine(f.description())));
+            }
+        }
+    }
+
+    // --- Mapper interface ---
+
+    private static String mapperInterface(Layout layout, List<Signature> signatures) {
+        Set<String> imports = new LinkedHashSet<>();
+        imports.add("io.swagger.v3.oas.annotations.media.Schema");
+        imports.add("org.apache.ibatis.annotations.Mapper");
+        imports.add(SkeletonGenerator.BASE_MAPPER);
+        boolean anyParams = false;
+        boolean anyList = false;
+        for (Signature sig : signatures) {
+            if (!sig.params().isEmpty() || sig.requestDto() != null) {
+                anyParams = true;
+            }
+            if (mapperReturnType(sig).startsWith("List<")) {
+                anyList = true;
+                imports.add(layout.dtoFqcn(rowName(sig)));
+            }
+            if (sig.requestDto() != null) {
+                imports.add(layout.dtoFqcn(sig.requestDto()));
+            }
+            if (sig.params().stream().anyMatch(p -> p.javaType().startsWith("List<"))) {
+                anyList = true;
+            }
+        }
+        if (anyParams) {
+            imports.add("org.apache.ibatis.annotations.Param");
+        }
+        if (anyList) {
+            imports.add("java.util.List");
+        }
+
+        StringBuilder out = new StringBuilder();
+        out.append("// AUTHORED. Add methods freely — but every method must have a matching statement id in\n")
+                .append("// ").append(layout.mapperXmlPath()).append(" and a @Schema description. The deploy\n")
+                .append("// wrapper checks both, in both directions, before the module is installed.\n")
+                .append("package ").append(layout.basePackage()).append(";\n\n")
+                .append(SkeletonGenerator.imports(imports, layout.basePackage()))
+                .append('\n')
+                .append("/** Data access for this module. Statement ids live in ")
+                .append(layout.mapperXmlPath()).append(". */\n")
+                .append("@Mapper\n")
+                // The common-support seam. BaseMapper is method-free on purpose: MyBatis would demand a statement
+                // id for any inherited abstract method, in every module's XML.
+                .append("public interface ").append(layout.mapper()).append(" extends BaseMapper {\n");
+
+        for (Signature sig : signatures) {
+            List<String> parameters = new ArrayList<>();
+            for (MethodParam p : sig.params()) {
+                parameters.add("@Param(" + JavaNames.literal(p.wireName()) + ") "
+                        + p.javaType() + " " + p.javaName());
+            }
+            if (sig.requestDto() != null) {
+                parameters.add("@Param(" + JavaNames.literal(sig.bodyParam()) + ") "
+                        + sig.requestDto() + " " + sig.bodyParam());
+            }
+            out.append('\n')
+                    .append("    /** ").append(JavaNames.oneLine(sig.operation().summary())).append(" */\n")
+                    .append("    @Schema(description = ")
+                    .append(JavaNames.literal(JavaNames.oneLine(sig.operation().summary()))).append(")\n")
+                    .append("    ").append(mapperReturnType(sig)).append(' ')
+                    .append(sig.operation().operationId()).append('(')
+                    .append(String.join(", ", parameters)).append(");\n");
+        }
+        return out.append("}\n").toString();
+    }
+
+    // --- mapper XML ---
+
+    private static String mapperXml(Layout layout, List<Signature> signatures) {
+        String mapperFqcn = layout.fqcn(layout.mapper());
+        StringBuilder out = new StringBuilder();
+        out.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+                .append("<!DOCTYPE mapper PUBLIC \"-//mybatis.org//DTD Mapper 3.0//EN\"\n")
+                .append("        \"http://mybatis.org/dtd/mybatis-3-mapper.dtd\">\n")
+                .append("<!--\n")
+                .append("  AUTHORED: write the SQL bodies below.\n\n")
+                .append("  The namespace MUST stay equal to the Mapper interface FQCN, and every statement id MUST\n")
+                .append("  stay equal to a Mapper method name. That pairing is how MapperFactoryBean binds a call\n")
+                .append("  to a statement; a mismatch fails at first invocation rather than at startup, so the\n")
+                .append("  deploy wrapper checks it up front instead.\n")
+                .append("-->\n")
+                .append("<mapper namespace=\"").append(mapperFqcn).append("\">\n");
+
+        for (Signature sig : signatures) {
+            if (isRead(sig) && sig.responseDto() != null) {
+                appendResultMap(out, layout, sig);
+            }
+        }
+        for (Signature sig : signatures) {
+            appendStatement(out, sig);
+        }
+        return out.append("</mapper>\n").toString();
+    }
+
+    private static void appendResultMap(StringBuilder out, Layout layout, Signature sig) {
+        String rowFqcn = layout.dtoFqcn(rowName(sig));
+        out.append("\n    <!-- Constructor args, because ").append(rowName(sig))
+                .append(" is a record: MyBatis cannot auto-map an immutable type. -->\n")
+                .append("    <resultMap id=\"").append(resultMapId(sig)).append("\" type=\"")
+                .append(rowFqcn).append("\">\n")
+                .append("        <constructor>\n");
+        for (RowComponent c : rowComponents(sig)) {
+            out.append("            <arg column=\"").append(c.column())
+                    .append("\" javaType=\"").append(c.javaType()).append("\"/>\n");
+        }
+        out.append("        </constructor>\n    </resultMap>\n");
+    }
+
+    private static void appendStatement(StringBuilder out, Signature sig) {
+        String id = sig.operation().operationId();
+        String element = statementElement(sig.operation().method());
+        out.append("\n    <!-- ").append(id).append(" — ")
+                .append(xmlText(JavaNames.oneLine(sig.operation().summary()))).append(" -->\n")
+                .append("    <").append(element).append(" id=\"").append(id).append('"');
+        if ("select".equals(element) && sig.responseDto() != null) {
+            out.append(" resultMap=\"").append(resultMapId(sig)).append('"');
+        }
+        out.append(">\n")
+                .append("        <!-- TODO write the SQL. Bind parameters as #{")
+                .append(sig.params().isEmpty()
+                        ? (sig.bodyParam() == null ? "value" : sig.bodyParam() + ".field")
+                        : sig.params().get(0).wireName())
+                .append("}. -->\n")
+                .append("    </").append(element).append(">\n");
+    }
+
+    private static String resultMapId(Signature sig) {
+        return sig.operation().operationId() + "Result";
+    }
+
+    private static String statementElement(HttpMethod method) {
+        return switch (method) {
+            case GET -> "select";
+            case POST -> "insert";
+            case PUT, PATCH -> "update";
+            case DELETE -> "delete";
+        };
+    }
+
+    // --- SqlSessionFactory / MapperFactoryBean wiring ---
+
+    private static String configuration(Layout layout) {
+        String mapperSimple = layout.mapper();
+        return """
+                // GENERATED from the module's interface definition. Do not edit.
+                //
+                // Per-module SqlSessionFactory over the host DataSource (needsSharedBeans=true), plus one explicit
+                // MapperFactoryBean. The classpath*: pattern reaches this module's own XML because protean serves
+                // module resources through ProteanResourcePatternResolver.
+                package %s;
+
+                import javax.sql.DataSource;
+
+                import org.apache.ibatis.session.SqlSessionFactory;
+                import org.mybatis.spring.SqlSessionFactoryBean;
+                import org.mybatis.spring.mapper.MapperFactoryBean;
+                import org.springframework.context.ApplicationContext;
+                import org.springframework.context.annotation.Bean;
+                import org.springframework.context.annotation.Configuration;
+
+                /** MyBatis wiring for this module. */
+                @Configuration
+                public class %s {
+
+                    @Bean
+                    public SqlSessionFactory sqlSessionFactory(DataSource dataSource, ApplicationContext context)
+                            throws Exception {
+                        SqlSessionFactoryBean factory = new SqlSessionFactoryBean();
+                        factory.setDataSource(dataSource);
+                        factory.setMapperLocations(context.getResources("classpath*:%s"));
+                        factory.afterPropertiesSet();
+                        return factory.getObject();
+                    }
+
+                    /**
+                     * Binds the typed Mapper. The XML namespace must equal {@code %s} for the statement lookup to
+                     * resolve; an explicit factory bean is used rather than @MapperScan so no classpath scanning has
+                     * to work inside the module child context.
+                     */
+                    @Bean
+                    public MapperFactoryBean<%s> %s(SqlSessionFactory sqlSessionFactory) {
+                        MapperFactoryBean<%s> mapper = new MapperFactoryBean<>(%s.class);
+                        mapper.setSqlSessionFactory(sqlSessionFactory);
+                        return mapper;
+                    }
+                }
+                """.formatted(layout.basePackage(), layout.config(),
+                mapperLocationPattern(layout), layout.fqcn(mapperSimple),
+                mapperSimple, JavaNames.camel(mapperSimple), mapperSimple, mapperSimple);
+    }
+
+    /** {@code mapper/orders/OrdersMapper.xml} -> {@code mapper/orders/*.xml}, so added XML files are picked up. */
+    private static String mapperLocationPattern(Layout layout) {
+        String path = layout.mapperXmlPath();
+        return path.substring(0, path.lastIndexOf('/') + 1) + "*.xml";
+    }
+
+    /** {@code customerName} -> {@code customer_name}, the conventional column spelling. */
+    private static String snakeCase(String value) {
+        StringBuilder out = new StringBuilder(value.length() + 4);
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (Character.isUpperCase(c) && i > 0) {
+                out.append('_');
+            }
+            out.append(Character.toLowerCase(c));
+        }
+        return out.toString().toLowerCase(Locale.ROOT);
+    }
+
+    /** Escapes text placed inside an XML comment or element body. */
+    private static String xmlText(String value) {
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("--", "&#45;&#45;");
+    }
+}

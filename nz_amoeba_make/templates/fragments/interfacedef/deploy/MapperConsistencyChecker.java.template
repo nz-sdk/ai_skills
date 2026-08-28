@@ -1,0 +1,140 @@
+// [INTERFACE DEFINITION] Mapper interface <-> mapper XML agreement, checked before install.
+//
+// Why this check has to exist at all: MapperFactoryBean binds a call to a statement by <namespace>.<methodName>, and
+// a mismatch does NOT fail at startup. It fails on the first invocation of that one method, in production, as a
+// runtime exception. So the pairing is verified up front instead.
+//
+// Why it lives HERE and not in the promotion gate: CodeRule receives (className, bytecode). Mapper XML is a resource,
+// not a class, so gate 2 cannot see it. That makes this an L2-only check — and it is exactly why the admin REST write
+// path has to be raised to mcp.admin, since a deploy that skips the wrapper skips this.
+//
+// Source-text parsing, not XML parsing: the content arrives as a string in the deploy arguments, and pulling in a
+// parser to read attribute values off well-formed generated XML would buy nothing. The patterns are anchored to the
+// element names MyBatis defines, and anything unrecognized is reported rather than ignored.
+package {{PKG}}.interfacedef.deploy;
+
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/** Checks that every Mapper method has a statement and every statement has a method. Stateless. */
+public final class MapperConsistencyChecker {
+
+    private static final Pattern NAMESPACE =
+            Pattern.compile("<mapper\\s+namespace\\s*=\\s*\"([^\"]*)\"");
+
+    /** {@code <select id="getOrder" ...> ... </select>} — id plus the body, so an empty statement is detectable. */
+    private static final Pattern STATEMENT = Pattern.compile(
+            "<(select|insert|update|delete)\\b[^>]*\\bid\\s*=\\s*\"([^\"]*)\"[^>]*>(.*?)</\\1\\s*>",
+            Pattern.DOTALL);
+
+    /**
+     * An interface method declaration: a return type, a name, a parameter list, and a semicolon.
+     *
+     * <p>The parameter list is {@code (?:[^()]|\([^()]*\))*} rather than {@code [^)]*} because a Mapper parameter is
+     * normally annotated — {@code @Param("orderId") Long orderId} — and an annotation carries its own parentheses.
+     * A single-level nesting allowance covers every form the generator emits and everything an author would write.
+     *
+     * <p>{@code (?!@)} keeps an annotation line from starting a match, and requiring a terminating semicolon
+     * excludes {@code default} methods, which have a body and need no statement.
+     */
+    private static final Pattern METHOD_DECLARATION = Pattern.compile(
+            "^[ \\t]*(?!@)(?:public\\s+|abstract\\s+)*"
+                    + "[\\w.<>\\[\\],?\\s]+?\\s+(\\w+)\\s*\\((?:[^()]|\\([^()]*\\))*\\)\\s*;",
+            Pattern.MULTILINE);
+
+    /** XML comments are stripped before statement scanning, so a commented-out statement is not counted. */
+    private static final Pattern XML_COMMENT = Pattern.compile("<!--.*?-->", Pattern.DOTALL);
+
+    private MapperConsistencyChecker() {
+    }
+
+    /**
+     * Checks one Mapper interface against its XML.
+     *
+     * @param mapperFqcn   the FQCN the generated configuration binds, which the namespace must equal
+     * @param mapperSource the {@code @Mapper} interface source, or {@code null} when it is absent
+     * @param xmlPath      the resource path, used only in messages
+     * @param xmlContent   the mapper XML, or {@code null} when it is absent
+     * @return violation messages; empty means consistent
+     */
+    public static List<String> check(String mapperFqcn, String mapperSource,
+                                     String xmlPath, String xmlContent) {
+        List<String> violations = new ArrayList<>();
+        if (mapperSource == null) {
+            violations.add("dataAccess=MYBATIS but the Mapper interface " + mapperFqcn + " was not submitted");
+        }
+        if (xmlContent == null) {
+            violations.add("dataAccess=MYBATIS but the mapper XML " + xmlPath + " was not submitted");
+        }
+        if (mapperSource == null || xmlContent == null) {
+            return violations;
+        }
+
+        if (!mapperSource.contains("@Mapper")) {
+            violations.add(mapperFqcn + " must be annotated @Mapper");
+        }
+
+        String withoutComments = XML_COMMENT.matcher(xmlContent).replaceAll("");
+
+        Matcher namespace = NAMESPACE.matcher(withoutComments);
+        if (!namespace.find()) {
+            violations.add(xmlPath + ": no <mapper namespace=\"...\"> found");
+        } else if (!mapperFqcn.equals(namespace.group(1))) {
+            violations.add(xmlPath + ": namespace is \"" + namespace.group(1) + "\" but must equal the Mapper "
+                    + "interface FQCN \"" + mapperFqcn + "\" — MapperFactoryBean resolves statements as "
+                    + "<namespace>.<methodName>, and a mismatch fails at first call, not at startup");
+        }
+
+        Set<String> statementIds = new LinkedHashSet<>();
+        Matcher statements = STATEMENT.matcher(withoutComments);
+        while (statements.find()) {
+            String id = statements.group(2);
+            if (!statementIds.add(id)) {
+                violations.add(xmlPath + ": duplicate statement id \"" + id + "\"");
+            }
+            if (statements.group(3).isBlank()) {
+                // The generated skeleton ships every statement empty on purpose; submitting it unchanged means the
+                // SQL was never written, and the resulting failure would only surface when the route is called.
+                violations.add(xmlPath + ": statement \"" + id + "\" has an empty body — write its SQL");
+            }
+        }
+
+        Set<String> methodNames = methodNames(mapperSource);
+        for (String method : methodNames) {
+            if (!statementIds.contains(method)) {
+                violations.add(mapperFqcn + "." + method + " has no matching statement id in " + xmlPath);
+            }
+        }
+        for (String id : statementIds) {
+            if (!methodNames.contains(id)) {
+                violations.add(xmlPath + ": statement \"" + id + "\" has no matching method on " + mapperFqcn);
+            }
+        }
+        return violations;
+    }
+
+    /**
+     * The abstract method names declared on the interface.
+     *
+     * <p>Annotation lines are skipped by the negative lookahead, and a body-bearing {@code default} method would not
+     * match because the pattern requires a terminating semicolon — which is correct, since a default method needs no
+     * statement.
+     */
+    static Set<String> methodNames(String mapperSource) {
+        Set<String> names = new LinkedHashSet<>();
+        Matcher m = METHOD_DECLARATION.matcher(stripLineComments(mapperSource));
+        while (m.find()) {
+            names.add(m.group(1));
+        }
+        return names;
+    }
+
+    /** Drops {@code //} and block comments so a commented-out method declaration is not picked up. */
+    private static String stripLineComments(String source) {
+        return source.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("(?m)//.*$", "");
+    }
+}

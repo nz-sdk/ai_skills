@@ -1,0 +1,100 @@
+// [INTERFACE DEFINITION] Spec name/type -> Java name/type. One place, because the same mapping has to agree in
+// four emitted artifacts (DTO, controller, service, mapper) and a disagreement between any two of them is a
+// compile error inside a deployed module, which is the most expensive place to find it.
+package {{PKG}}.interfacedef.gen;
+
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+
+import java.util.Locale;
+
+/** Stateless naming and type-mapping helpers for the skeleton generator. */
+public final class JavaNames {
+
+    private JavaNames() {
+    }
+
+    /**
+     * {@code orders} / {@code order-items} / {@code getOrder} -> {@code Orders} / {@code OrderItems} /
+     * {@code GetOrder}. Separators are consumed and each following letter is capitalized; an already-camelCase
+     * name only gets its first letter raised, so {@code operationId} survives recognizably into the DTO name.
+     */
+    public static String pascal(String value) {
+        StringBuilder out = new StringBuilder(value.length());
+        boolean raise = true;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (!Character.isLetterOrDigit(c)) {
+                raise = true;
+                continue;
+            }
+            out.append(raise ? Character.toUpperCase(c) : c);
+            raise = false;
+        }
+        return out.toString();
+    }
+
+    /** {@code X-Request-Id} -> {@code xRequestId}. The Java variable spelling for a wire parameter name. */
+    public static String camel(String value) {
+        String pascal = pascal(value);
+        if (pascal.isEmpty()) {
+            return pascal;
+        }
+        return Character.toLowerCase(pascal.charAt(0)) + pascal.substring(1);
+    }
+
+    /**
+     * The Java type for a scalar field.
+     *
+     * <p>Boxed types throughout: a spec field can be optional, and a primitive cannot express absent. {@code format}
+     * narrows where JSON Schema says it should — {@code integer} defaults to {@code Long} because ids overflow
+     * {@code Integer} and widening later is a breaking change, and {@code number} defaults to {@code BigDecimal}
+     * because {@code Double} silently loses money.
+     *
+     * @throws IllegalArgumentException for a composite type, which has no scalar mapping
+     */
+    public static String scalarType(FieldType type, String format) {
+        String f = format == null ? "" : format.trim().toLowerCase(Locale.ROOT);
+        return switch (type) {
+            case STRING -> "String";
+            case BOOLEAN -> "Boolean";
+            case INTEGER -> "int32".equals(f) ? "Integer" : "Long";
+            case NUMBER -> switch (f) {
+                case "float" -> "Float";
+                case "double" -> "Double";
+                default -> "java.math.BigDecimal";
+            };
+            case OBJECT, ARRAY -> throw new IllegalArgumentException(
+                    "composite type " + type + " has no scalar Java mapping");
+        };
+    }
+
+    /** Renders a Java string literal, including the quotes. Descriptions are free text from the caller. */
+    public static String literal(String value) {
+        StringBuilder out = new StringBuilder(value.length() + 2).append('"');
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '\\' -> out.append("\\\\");
+                case '"' -> out.append("\\\"");
+                case '\n' -> out.append("\\n");
+                case '\r' -> out.append("\\r");
+                case '\t' -> out.append("\\t");
+                default -> {
+                    // Control characters would be a syntax error inside a literal; everything else (Korean
+                    // included) is emitted as-is because the generated file is written as UTF-8.
+                    if (c < 0x20) {
+                        out.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        out.append(c);
+                    }
+                }
+            }
+        }
+        return out.append('"').toString();
+    }
+
+    /** Collapses a multi-line description to one line, for annotation values and single-line Javadoc. */
+    public static String oneLine(String value) {
+        return value == null ? "" : value.trim().replaceAll("\\s+", " ");
+    }
+}

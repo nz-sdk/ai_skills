@@ -1,0 +1,44 @@
+// [INTERFACE DEFINITION] One emitted file, in the shape protean's deploy input already accepts.
+package {{PKG}}.interfacedef.gen;
+
+/**
+ * A generated module file.
+ *
+ * <p>{@code filename} and {@code kind} map straight onto a {@code files[]} entry of
+ * {@code protean.deploy_module}: for {@code SOURCE}/{@code TEST} the FQCN is derived from the {@code package}
+ * declaration plus the filename stem, and for {@code RESOURCE} the filename IS the classpath path.
+ *
+ * @param serverOwned whether the wrapper replaces this file unconditionally at deploy time. Server-owned files are
+ *                    the contract made executable — DTOs, the controller, the service interface, the MyBatis
+ *                    configuration — and hand-editing them is how a module's shape drifts from its declared
+ *                    interface. The rest ({@code false}) are what the module author is expected to fill in: the
+ *                    service implementation, the Mapper interface, mapper SQL and tests. Those are held to rules
+ *                    instead of to a hash.
+ */
+public record GeneratedFile(String filename, String content, Kind kind, boolean serverOwned) {
+
+    public enum Kind {
+        SOURCE, TEST, RESOURCE;
+
+        /** The {@code kind} string protean's {@code files[]} expects. */
+        public String wire() {
+            return name().toLowerCase(java.util.Locale.ROOT);
+        }
+    }
+
+    public static GeneratedFile ownedSource(String filename, String content) {
+        return new GeneratedFile(filename, content, Kind.SOURCE, true);
+    }
+
+    public static GeneratedFile authoredSource(String filename, String content) {
+        return new GeneratedFile(filename, content, Kind.SOURCE, false);
+    }
+
+    public static GeneratedFile authoredTest(String filename, String content) {
+        return new GeneratedFile(filename, content, Kind.TEST, false);
+    }
+
+    public static GeneratedFile authoredResource(String path, String content) {
+        return new GeneratedFile(path, content, Kind.RESOURCE, false);
+    }
+}

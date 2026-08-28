@@ -1,0 +1,6 @@
+# Gradle build outputs
+.gradle/
+build/
+
+# Runtime server log (from `./gradlew run`)
+run.log

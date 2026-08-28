@@ -1,0 +1,80 @@
+// [INTERFACE DEFINITION] Sealing a spec into the module descriptor, and reading it back out.
+//
+// The descriptor's `resources` map is the storage, and that choice buys four things for free:
+//   * signature coverage — ModuleSigning.canonicalBytes already includes `resources`, so a tampered spec invalidates
+//     the module signature with no change to the signing code
+//   * version history — platform.history(id) restores the spec that shipped with v1.2, so "the definition as of that
+//     release" is answerable without a second store
+//   * persistence across both store backends, with zero DDL
+//   * no dependency on a reachable database, which matters because the host's MySQL is not always up
+//
+// The reserved path is under META-INF/protean/ so it is obviously not application content. ModulePlatform's
+// reloadResources bypasses the promotion gates entirely, which would let the spec be swapped on a live module with
+// no verification at all — SpecGuardTool.forReloadResources refuses the prefix for exactly that reason.
+package {{PKG}}.interfacedef.deploy;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import org.htcom.protean.module.ModuleResource;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.Optional;
+
+/** Serializes a spec to its reserved module resource and back. */
+public final class SpecResource {
+
+    /** Reserved classpath path inside the module bundle. */
+    public static final String PATH = "META-INF/protean/interface.json";
+
+    /** Everything under here is platform-owned and must not be writable through reload-resources. */
+    public static final String RESERVED_PREFIX = "META-INF/protean/";
+
+    private SpecResource() {
+    }
+
+    /**
+     * Serializes the spec for storage.
+     *
+     * <p>Nulls are omitted by {@code @JsonInclude(NON_NULL)} on the spec records themselves rather than by
+     * reconfiguring a copy of the mapper here — the inclusion policy belongs to the type, and copying an
+     * ObjectMapper per deploy is not free.
+     *
+     * <p>The same spec always produces the same bytes: record property order is fixed. That matters because this
+     * string lands in the descriptor's {@code resources} map, which {@code ModuleSigning.canonicalBytes} already
+     * covers — so the spec is signed with the module, and a stable encoding keeps the signature stable.
+     */
+    public static String serialize(ObjectMapper mapper, InterfaceSpec spec) {
+        try {
+            return mapper.writeValueAsString(spec);
+        } catch (Exception e) {
+            throw new IllegalStateException("failed to serialize the interface spec", e);
+        }
+    }
+
+    /**
+     * Reads a spec back from a descriptor's resource map. Empty when the module carries no declared interface, or
+     * when what it carries no longer parses — the caller reports "no readable interface" rather than failing, and
+     * the deploy path re-seals from the live spec anyway.
+     */
+    public static Optional<InterfaceSpec> read(ObjectMapper mapper, Map<String, ModuleResource> resources) {
+        if (resources == null) {
+            return Optional.empty();
+        }
+        ModuleResource resource = resources.get(PATH);
+        if (resource == null) {
+            return Optional.empty();
+        }
+        // bytes() handles both storage forms, though this resource is always written as plain text.
+        String json = new String(resource.bytes(), StandardCharsets.UTF_8);
+        if (json.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(mapper.readValue(json, InterfaceSpec.class));
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+}

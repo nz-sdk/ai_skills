@@ -1,0 +1,94 @@
+// [CAPABILITY: override a built-in MCP tool] Installs the L2 wrappers at startup.
+//
+// Why an ApplicationRunner and not four same-name @Component beans: McpDispatcher's constructor fills its tool map
+// with `for (McpTool t : toolBeans) tools.put(t.name(), t)`, so when two beans share a name the winner is whichever
+// Spring injected last. That is not something to rely on for a security boundary. registerTool replaces by key
+// deterministically, and looking the original up in the injected list is also the only way to obtain the delegate
+// this wrapper needs.
+//
+// ObjectProvider<McpDispatcher> because protean registers the dispatcher only when protean.mcp.enabled=true; with
+// MCP off the app must still start, just with nothing to wrap. Pattern taken from the project's own
+// BuiltinToolOverride fragment template.
+package {{PKG}}.interfacedef.deploy;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import {{PKG}}.interfacedef.DraftStore;
+
+import org.htcom.protean.mcp.McpDispatcher;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.module.ModulePlatform;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Function;
+
+@Component
+public class InterfaceToolRegistrar implements ApplicationRunner {
+
+    private static final Logger log = LoggerFactory.getLogger(InterfaceToolRegistrar.class);
+
+    static final String DEPLOY = "protean.deploy_module";
+    static final String UPDATE = "protean.update_module";
+    static final String PATCH = "protean.patch_module";
+    static final String RELOAD_RESOURCES = "protean.reload_module_resources";
+
+    private final ObjectProvider<McpDispatcher> dispatcher;
+    private final List<McpTool> tools;
+    private final ObjectMapper mapper;
+    private final InterfaceDeployPreparer preparer;
+    private final InterfaceVerifier verifier;
+    private final ModulePlatform platform;
+    private final DraftStore draftStore;
+
+    public InterfaceToolRegistrar(ObjectProvider<McpDispatcher> dispatcher, List<McpTool> tools,
+                                  ObjectMapper mapper, InterfaceDeployPreparer preparer,
+                                  InterfaceVerifier verifier, ModulePlatform platform, DraftStore draftStore) {
+        this.dispatcher = dispatcher;
+        this.tools = tools;
+        this.mapper = mapper;
+        this.preparer = preparer;
+        this.verifier = verifier;
+        this.platform = platform;
+        this.draftStore = draftStore;
+    }
+
+    @Override
+    public void run(ApplicationArguments args) {
+        McpDispatcher active = dispatcher.getIfAvailable();
+        if (active == null) {
+            log.info("MCP is disabled — interface-definition tool overrides not installed");
+            return;
+        }
+        wrap(active, DEPLOY, this::specBearing);
+        wrap(active, UPDATE, this::specBearing);
+        wrap(active, PATCH, delegate -> SpecGuardTool.forPatch(delegate, mapper, platform));
+        wrap(active, RELOAD_RESOURCES, delegate -> SpecGuardTool.forReloadResources(delegate, platform));
+    }
+
+    private McpTool specBearing(McpTool delegate) {
+        return new SpecBearingDeployTool(delegate, mapper, preparer, verifier, platform, draftStore);
+    }
+
+    /**
+     * Replaces one built-in with its wrapper.
+     *
+     * <p>A missing target is logged at WARN rather than ignored: it means the protean release renamed or dropped
+     * that tool, and the enforcement this class exists to install is silently not there.
+     */
+    private void wrap(McpDispatcher active, String toolName, Function<McpTool, McpTool> wrapper) {
+        Optional<McpTool> target = tools.stream().filter(t -> toolName.equals(t.name())).findFirst();
+        if (target.isEmpty()) {
+            log.warn("built-in MCP tool '{}' not found — its interface-definition guard is NOT active", toolName);
+            return;
+        }
+        active.registerTool(wrapper.apply(target.get()));
+        log.info("wrapped built-in MCP tool '{}' with its interface-definition guard", toolName);
+    }
+}

@@ -1,0 +1,50 @@
+// [MODULE SOURCE] Descriptor lookup shared by the three source tools, with one wording for "not found".
+//
+// The version branch is the whole point: platform.findVersion keys on the version string the caller actually
+// deployed (backed by <id>.history/*.json), not on protean's internal sequence number, so "the source as of
+// v1.2" is answerable without a second store. Centralizing it also keeps the three tools from disagreeing on
+// whether a missing module and a missing version read the same — they do not, and the distinction is what tells
+// a caller to check the id versus check protean.module_versions.
+package {{PKG}}.source;
+
+import org.htcom.protean.error.ErrorCode;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.Optional;
+
+@Component
+public class ModuleSourceResolver {
+
+    private final ModulePlatform platform;
+
+    public ModuleSourceResolver(ModulePlatform platform) {
+        this.platform = platform;
+    }
+
+    /** The current descriptor, or the one that shipped as {@code version} when it is non-null. */
+    public Optional<ModuleDescriptor> find(String moduleId, String version) {
+        return version == null ? platform.find(moduleId) : platform.findVersion(moduleId, version);
+    }
+
+    /** Every ACTIVE module, for the tools that can operate across all of them. */
+    public List<ModuleDescriptor> listActive() {
+        return platform.list();
+    }
+
+    /**
+     * The not-found error, carrying a stable code so it arrives as an RFC 9457 problem detail in
+     * {@code structuredContent} rather than as bare text. Mirrors {@code protean.get_module_source}.
+     */
+    public McpToolResult notFound(String moduleId, String version) {
+        String detail = version != null
+                ? "module version not found: " + moduleId + "@" + version
+                : ErrorCode.MODULE_NOT_FOUND.format(moduleId);
+        McpToolResult error = McpToolResult.error(ErrorCode.MODULE_NOT_FOUND, detail).with("moduleId", moduleId);
+        return version != null ? error.with("version", version) : error;
+    }
+}

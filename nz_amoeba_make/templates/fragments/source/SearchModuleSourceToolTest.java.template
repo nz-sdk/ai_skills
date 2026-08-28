@@ -1,0 +1,230 @@
+// Covers what a grep has to get right to be usable: correct line numbers, honest truncation flags, and a bad
+// regex coming back as something the caller can fix rather than as a crash.
+package {{PKG}}.source;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+import org.htcom.protean.module.ModuleResource;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class SearchModuleSourceToolTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final ModulePlatform platform = mock(ModulePlatform.class);
+    private final ModuleSourceResolver resolver = new ModuleSourceResolver(platform);
+    private final SearchModuleSourceTool tool = new SearchModuleSourceTool(mapper, resolver);
+
+    @BeforeEach
+    void setUp() {
+        when(platform.find(SourceFixtures.MODULE_ID)).thenReturn(Optional.of(SourceFixtures.helloModule()));
+        when(platform.list()).thenReturn(List.of(
+                SourceFixtures.helloModule(), SourceFixtures.bareModule("emp")));
+    }
+
+    private ObjectNode args(String pattern) {
+        ObjectNode args = mapper.createObjectNode();
+        args.put("pattern", pattern);
+        return args;
+    }
+
+    private ObjectNode scopedArgs(String pattern) {
+        return args(pattern).put("moduleId", SourceFixtures.MODULE_ID);
+    }
+
+    /** Derived from the fixture rather than hardcoded, so this asserts the numbering and not the fixture's shape. */
+    private static int lineOf(String source, String needle) {
+        String[] lines = source.split("\n", -1);
+        for (int i = 0; i < lines.length; i++) {
+            if (lines[i].contains(needle)) {
+                return i + 1;
+            }
+        }
+        throw new AssertionError("fixture no longer contains: " + needle);
+    }
+
+    private static JsonNode firstMatch(McpToolResult result) {
+        return result.structured().path("matches").get(0);
+    }
+
+    @Test
+    void reportsOneBasedLineNumbersThatMatchTheSource() {
+        McpToolResult result = tool.call(scopedArgs("class HelloController"), null);
+
+        assertEquals(1, result.structured().path("matchCount").asInt());
+        JsonNode match = firstMatch(result);
+        assertEquals("src/main/java/module/hello/HelloController.java", match.path("path").asText());
+        assertEquals(lineOf(SourceFixtures.CONTROLLER_SOURCE, "class HelloController"),
+                match.path("lineNumber").asInt());
+        assertTrue(match.path("line").asText().contains("class HelloController"));
+        assertEquals(SourceFixtures.CONTROLLER_FQCN, match.path("fqcn").asText());
+        assertEquals(SourceFixtures.MODULE_ID, match.path("moduleId").asText());
+    }
+
+    /** Resources are in scope, which is the whole reason a mapper's SQL is findable at all. */
+    @Test
+    void searchesMapperXmlResources() {
+        McpToolResult result = tool.call(scopedArgs("SELECT greeting"), null);
+
+        JsonNode match = firstMatch(result);
+        assertEquals("src/main/resources/mapper/hello/HelloMapper.xml", match.path("path").asText());
+        assertEquals(lineOf(SourceFixtures.MAPPER_XML, "SELECT greeting"), match.path("lineNumber").asInt());
+        assertFalse(match.hasNonNull("fqcn"), "a resource has no class name");
+    }
+
+    @Test
+    void matchesNonAsciiContent() {
+        McpToolResult result = tool.call(scopedArgs(SourceFixtures.GREETING), null);
+
+        assertEquals(1, result.structured().path("matchCount").asInt());
+        assertTrue(firstMatch(result).path("line").asText().contains(SourceFixtures.GREETING));
+    }
+
+    /**
+     * A caller-supplied regex that does not compile is an ordinary outcome. It must return isError so the caller
+     * can correct it, not propagate a PatternSyntaxException.
+     */
+    @Test
+    void invalidRegexComesBackAsAToolError() {
+        McpToolResult result = tool.call(args("[unclosed"), null);
+
+        assertTrue(result.isError());
+        assertTrue(result.text().toLowerCase().contains("regular expression"), result.text());
+    }
+
+    /** Base64 text is not the resource's content; grepping it would only produce noise. */
+    @Test
+    void skipsBinaryResources() {
+        // The keystore's Base64 happens to start with "MB8"; matching it would prove the binary was scanned.
+        String base64 = ModuleResource.binary(SourceFixtures.KEYSTORE_BYTES).content();
+        McpToolResult result = tool.call(scopedArgs(java.util.regex.Pattern.quote(base64)), null);
+
+        assertEquals(0, result.structured().path("matchCount").asInt());
+        assertEquals(6, result.structured().path("filesScanned").asInt(),
+                "6 of the 7 files are text; the binary must not be counted as scanned");
+    }
+
+    @Test
+    void scansEveryActiveModuleWhenModuleIdIsOmitted() {
+        McpToolResult result = tool.call(args("class"), null);
+
+        assertEquals(2, result.structured().path("modulesScanned").asInt());
+        List<String> ids = new ArrayList<>();
+        result.structured().path("matches").forEach(m -> ids.add(m.path("moduleId").asText()));
+        assertTrue(ids.contains(SourceFixtures.MODULE_ID), ids.toString());
+        assertTrue(ids.contains("emp"), ids.toString());
+    }
+
+    /** A version identifies a file set inside one module's history, so it is meaningless without a module. */
+    @Test
+    void versionWithoutModuleIdIsRejected() {
+        McpToolResult result = tool.call(args("class").put("version", "1.0.0"), null);
+
+        assertTrue(result.isError());
+        assertTrue(result.text().contains("moduleId"), result.text());
+    }
+
+    @Test
+    void ignoreCaseIsOptIn() {
+        assertEquals(0, tool.call(scopedArgs("HELLOCONTROLLER"), null)
+                .structured().path("matchCount").asInt());
+        assertTrue(tool.call(scopedArgs("HELLOCONTROLLER").put("ignoreCase", true), null)
+                .structured().path("matchCount").asInt() > 0);
+    }
+
+    @Test
+    void perFileCapTruncatesAndSaysSo() {
+        ObjectNode args = scopedArgs("").put("maxMatchesPerFile", 1);
+        args.put("pattern", "^");
+
+        JsonNode structured = tool.call(args, null).structured();
+
+        assertTrue(structured.path("truncated").asBoolean(false), "the cap must be reported");
+        assertTrue(structured.path("matchCount").asInt() <= 6, "at most one match per text file");
+    }
+
+    @Test
+    void totalLimitTruncatesAndSaysSo() {
+        ObjectNode args = scopedArgs("^").put("limit", 2);
+
+        JsonNode structured = tool.call(args, null).structured();
+
+        assertEquals(2, structured.path("matchCount").asInt());
+        assertTrue(structured.path("truncated").asBoolean(false));
+    }
+
+    @Test
+    void truncatesPathologicallyLongLines() {
+        String longLine = "<mapper>" + "x".repeat(2000) + "</mapper>";
+        when(platform.find("wide")).thenReturn(Optional.of(ModuleDescriptor.builder()
+                .id("wide").version("1")
+                .resources(Map.of("mapper/wide.xml", ModuleResource.text(longLine)))
+                .build()));
+
+        McpToolResult result = tool.call(args("mapper").put("moduleId", "wide"), null);
+
+        String line = firstMatch(result).path("line").asText();
+        assertTrue(line.length() < 600, "expected truncation, got " + line.length() + " chars");
+        assertTrue(line.endsWith("…"), "truncation must be visible in the returned line");
+    }
+
+    @Test
+    void noMatchesIsASuccessNotAnError() {
+        McpToolResult result = tool.call(scopedArgs("definitelyNotPresentAnywhere"), null);
+
+        assertFalse(result.isError());
+        assertEquals(0, result.structured().path("matchCount").asInt());
+        assertFalse(result.structured().path("truncated").asBoolean(false));
+    }
+
+    @Test
+    void unknownModuleIsAnError() {
+        when(platform.find("nope")).thenReturn(Optional.empty());
+
+        assertTrue(tool.call(args("x").put("moduleId", "nope"), null).isError());
+    }
+
+    @Test
+    void missingPatternIsRejected() {
+        assertTrue(tool.call(mapper.createObjectNode(), null).isError());
+        assertTrue(tool.call(null, null).isError());
+    }
+
+    @Test
+    void classifiesAsReadSoItStaysOnMcpRead() {
+        assertEquals(ModuleActionAuthorizer.ModuleAction.READ, tool.action());
+        assertEquals(Boolean.TRUE, tool.annotations().readOnlyHint());
+    }
+
+    @Test
+    void satisfiesItsOwnOutputSchema() {
+        SourceToolAssertions.assertSatisfiesOutputSchema(tool, tool.call(scopedArgs("class"), null));
+        SourceToolAssertions.assertSatisfiesOutputSchema(tool, tool.call(scopedArgs("nothing-here"), null));
+    }
+
+    @Test
+    void doesNotRequireConditionalOutputFields() {
+        List<String> required = new ArrayList<>();
+        tool.outputSchema().path("required").forEach(n -> required.add(n.asText()));
+
+        assertFalse(required.contains("truncated"));
+        assertFalse(required.contains("skipped"));
+    }
+}

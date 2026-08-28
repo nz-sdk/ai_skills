@@ -1,0 +1,67 @@
+// Shared valid-spec fixture. Kept in one place so a validator change that breaks the "known good" shape fails
+// every dependent test at once instead of drifting per-test.
+package {{PKG}}.interfacedef;
+
+import {{PKG}}.interfacedef.InterfaceSpec.DataAccess;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+
+import java.util.List;
+
+public final class SpecFixtures {
+
+    private SpecFixtures() {
+    }
+
+    /** A two-operation spec that exercises path params, a request body, nesting and an array of objects. */
+    public static InterfaceSpec orders() {
+        return new InterfaceSpec("주문 API", "주문을 조회하고 생성한다", DataAccess.MYBATIS,
+                List.of(getOrder(), createOrder()));
+    }
+
+    public static OperationSpec getOrder() {
+        return new OperationSpec("getOrder", HttpMethod.GET, "/orders/{orderId}",
+                "주문 단건 조회", "주문 번호로 주문 한 건과 그 상품 목록을 반환한다",
+                List.of(new ParamSpec("orderId", ParamIn.PATH, FieldType.INTEGER, true,
+                        "조회할 주문 번호", "1001")),
+                null,
+                List.of(new ResponseSpec(200, "조회 성공", orderBody())));
+    }
+
+    public static OperationSpec createOrder() {
+        return new OperationSpec("createOrder", HttpMethod.POST, "/orders",
+                "주문 생성", "고객과 상품 목록을 받아 주문 한 건을 만든다",
+                List.of(),
+                List.of(FieldSpec.scalar("customerId", FieldType.INTEGER, true, "주문하는 고객 번호"),
+                        new FieldSpec("items", FieldType.ARRAY, null, true, "주문할 상품 목록", null,
+                                List.of(), itemElement())),
+                List.of(new ResponseSpec(201, "생성 성공", orderBody())));
+    }
+
+    /** Array element: an object, so the flattened document shows {@code items[].sku}. */
+    public static FieldSpec itemElement() {
+        return new FieldSpec("item", FieldType.OBJECT, null, true, "주문 상품 한 건", null,
+                List.of(FieldSpec.scalar("sku", FieldType.STRING, true, "상품 식별 코드"),
+                        FieldSpec.scalar("quantity", FieldType.INTEGER, true, "주문 수량")),
+                null);
+    }
+
+    /** Response body with a nested object and a format-refined scalar. */
+    public static List<FieldSpec> orderBody() {
+        return List.of(
+                FieldSpec.scalar("orderId", FieldType.INTEGER, true, "생성된 주문 번호"),
+                new FieldSpec("orderedAt", FieldType.STRING, "date-time", true,
+                        "주문이 접수된 시각", "2026-08-24T09:30:00Z", List.of(), null),
+                new FieldSpec("customer", FieldType.OBJECT, null, true, "주문한 고객 정보", null,
+                        List.of(FieldSpec.scalar("name", FieldType.STRING, true, "고객 이름"),
+                                FieldSpec.scalar("vip", FieldType.BOOLEAN, false, "우수 고객 여부")),
+                        null),
+                new FieldSpec("tags", FieldType.ARRAY, null, false, "주문에 붙은 태그 목록", null,
+                        List.of(), FieldSpec.scalar("tag", FieldType.STRING, true, "태그 문자열")));
+    }
+}

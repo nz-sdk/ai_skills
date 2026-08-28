@@ -1,0 +1,79 @@
+# Embedded-auth user-store sub-flow — used when the `embedded_auth` capability is selected.
+# Same role for `subflow: authstore` that db-vendors.yaml plays for `subflow: db`.
+#
+# Flow:
+#   1. Store — memory | jdbc
+#        memory → accounts are TYPED by the user (username / password / authorities), written into application.yml.
+#                 No database, nothing to provision.
+#        jdbc   → standard Spring Security users/authorities tables. REQUIRES the `data_access` capability
+#                 (that is what puts a DataSource in the app); generate the DDL script but do NOT run it at boot.
+#   2. Generate: the store fragment + application.yml block + (jdbc) the vendor's DDL script.
+#
+# ── WHY THIS SUB-FLOW EXISTS AT ALL ────────────────────────────────────────────────────────────────────────────
+# `embedded_auth` makes the app sign the tokens it also validates, which puts the signing key inside the MCP RCE
+# surface. protean has no sandbox (docs/guide/12-security calls that an explicit non-goal), so a module deployed
+# with mcp.write can read the key and mint mcp.admin. The store choice does NOT change that; it only decides
+# where usernames live. Say so when asking — a user picking `jdbc` may believe they are picking the safer option.
+# ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+#
+# ★ AUTHORITY NAMING IS A CONTRACT, NOT A STYLE CHOICE. Authorities must be spelled exactly like the OAuth scopes
+#   (mcp.read / mcp.write / mcp.admin). The token customizer issues `requested scopes ∩ the user's mcp.*
+#   authorities`; anything else (ROLE_ADMIN, MCP_WRITE) intersects to the empty set and produces a scope-less
+#   token that ModuleActionAuthorizer then denies everything for — which reads like a broken login, not a typo.
+#   Enforce this when collecting typed accounts: reject an authority that does not start with `mcp.`.
+
+# ── HOW THIS IS GENERATED ───────────────────────────────────────────────────────────────────────────────────────
+# BOTH stores ship in ONE fragment — templates/fragments/auth/UserStoreConfig.java.template, emitted by the
+# embedded_auth fragment_bundle regardless of the choice here. Each store is a @Bean guarded by
+# @ConditionalOnProperty(amoeba.auth.store), so this sub-flow decides:
+#   · the value written to amoeba.auth.store in application.yml
+#   · (memory) the accounts written under amoeba.auth.users
+#   · (jdbc)  whether the DDL script is emitted, and that data_access must be on
+# It does NOT pick between two different Java files. Deliberate: the operator can switch stores with one property
+# on an already-generated project, without coming back to regenerate anything.
+# ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+fragment: UserStoreConfig     # shared by both stores; part of the embedded_auth bundle
+
+stores:
+
+  memory:
+    property: "amoeba.auth.store=memory"
+    title: In-memory accounts declared in application.yml
+    requires: []
+    default: true
+    prompts:
+      # Typed inputs (SKILL.md "Input style": names/identifiers/passwords are free-text, never a selection).
+      - { id: username,    prompt: "Account name", default: admin }
+      - { id: password,    prompt: "Password (dev only — plaintext in application.yml, encoded at boot)", default: admin-pw }
+      - { id: authorities, prompt: "Authorities (comma separated, must be mcp.*)", default: "mcp.read,mcp.write,mcp.admin" }
+    repeatable: true          # offer to add another account; at least one is required
+    test_contract: >-
+      THE BUNDLE'S EmbeddedAuthFlowTest LOGS IN WITH REAL ACCOUNT NAMES. As shipped it expects `admin`/`admin-pw`
+      (all three scopes) and `reader`/`reader-pw` (mcp.read only) — the second one is what proves a read-only user
+      cannot escalate. Offer exactly those two as the default pair. If the user names them anything else, edit the
+      test to match, because a login for an account that does not exist fails at the redirect and reads like a
+      broken filter chain rather than a missing user.
+    note: >-
+      Accounts exist ONLY in application.yml — the generated Java holds none. That is deliberate: emptying the
+      config must actually leave nobody able to log in. Passwords are plaintext at rest in the yml (same standing
+      as the {noop} client secret) and are encoded with the app's PasswordEncoder at startup.
+
+  jdbc:
+    property: "amoeba.auth.store=jdbc"
+    title: Standard Spring Security users / authorities tables
+    requires: [data_access]   # JdbcUserDetailsManager needs the DataSource that capability provides
+    schema_template: templates/db/auth-schema.{{VENDOR}}.sql.template   # → src/main/resources/db/
+    note: >-
+      Emitted as a script under src/main/resources/db/, NOT as schema.sql. Spring Boot auto-runs schema.sql only
+      for an embedded datasource; for a server-backed one, creating login tables as a silent boot side effect on a
+      shared database is the wrong default. The generated README prints the command to apply it.
+    warn: >-
+      Passwords in these tables are ENCODED, not plaintext — every value needs its algorithm prefix
+      ('{bcrypt}$2a$10$...'). A bare plaintext password never matches and the login fails as "Bad credentials",
+      which is easy to misread as a wiring problem. The generated DDL says so at the top and ships a commented
+      seed block rather than live INSERTs.
+
+# Vendors that have a DDL template. h2 is included for a data_access=h2 sample; the tables are identical apart
+# from the AUTO_INCREMENT/BOOLEAN spellings, so keep the three in sync when editing one.
+schema_vendors: [mysql, postgresql, h2]

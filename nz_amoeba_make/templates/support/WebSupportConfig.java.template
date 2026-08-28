@@ -1,0 +1,31 @@
+// [COMMON SUPPORT] Registers CommonInterceptor. An interceptor bean on its own is never consulted — it has to be
+// added through a WebMvcConfigurer, which is all this class does.
+//
+// NEVER add @EnableWebMvc here. That switches off Boot's WebMvcAutoConfiguration, taking with it the message
+// converters, the ObjectMapper wiring and the error handling that protean's admin surface and the deployed
+// modules rely on. A plain WebMvcConfigurer augments the autoconfiguration; @EnableWebMvc replaces it.
+//
+// protean ships no WebMvcConfigurer of its own, so there is nothing to conflict with — this is the app's only one.
+//
+// addPathPatterns is left at the default (everything). Narrow it if a concern should skip the control plane:
+//     .excludePathPatterns("/platform/**", "/.well-known/**")
+package {{PKG}}.support;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+@Configuration
+public class WebSupportConfig implements WebMvcConfigurer {
+
+    private final CommonInterceptor commonInterceptor;
+
+    public WebSupportConfig(CommonInterceptor commonInterceptor) {
+        this.commonInterceptor = commonInterceptor;
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(commonInterceptor).addPathPatterns("/**");
+    }
+}

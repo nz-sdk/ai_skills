@@ -1,0 +1,38 @@
+// [COMMON SUPPORT] Base type for a deployed module's service class. Intentionally EMPTY.
+//
+// It is registered up front so that cross-cutting service logic can be added ONCE, later, without editing modules
+// that are already deployed. Have every module's service extend it:
+//
+//     public class OrdersService extends {{PKG}}.support.BaseService { ... }
+//
+// Anything added here then reaches every module the next time it is (re)deployed, and no module source changes.
+//
+// This lives in the HOST app, not in a module, and it has to. A module deploys as SOURCE and protean's
+// RuntimeCompiler builds its classpath from java.class.path, inherited from this JVM — a supertype the module
+// names must resolve here. That is the same reason the module-facing dependencies sit in build.gradle's
+// [module-facing host classpath] block.
+//   - isolation.mode=in-process / worker(embed) / container(embed): the host classpath is what the module sees, so
+//     this works as written.
+//   - worker.runtime=sidecar: the worker runs an EXTERNAL artifact with a consumer-curated shared-api jar. This
+//     package must be in that jar, or the module fails to compile at its first deploy.
+//
+// WHAT BELONGS HERE: helpers every service may call, protected template methods, shared logging or context
+// accessors. WHAT DOES NOT: mutable state. The class is shared across module ClassLoaders, so a mutable static
+// here leaks between modules and pins them against unload.
+//
+// @Transactional BELONGS ON THE SERVICE — this layer — and nowhere else. Not on the Mapper (a MyBatis Mapper is a
+// proxy from MapperFactoryBean; the annotation there is not honoured, so it reads as a boundary and is not one)
+// and not on the Controller (that would wrap request parsing and serialisation in the transaction).
+//
+// But it does NOT work by default, and it fails SILENTLY: a module lives in a CHILD ApplicationContext, while
+// @EnableTransactionManagement and Boot's transaction autoconfiguration ran in the HOST context — and Spring's
+// BeanPostProcessors are per-context, so the host's transaction advisor never proxies a module bean. The method
+// simply runs with no transaction and no error. Either the module's own @Configuration adds
+// @EnableTransactionManagement + a PlatformTransactionManager, or inject the host's PlatformTransactionManager and
+// use a TransactionTemplate. If you add shared transaction plumbing for every module, here is where it goes.
+//
+// Keep it abstract: it is a seam, never a bean on its own.
+package {{PKG}}.support;
+
+public abstract class BaseService {
+}

@@ -1,0 +1,18 @@
+// [CAPABILITY: module unload hook] in-process only.
+// A bean of this type (in the root context or a deployed module's child context) is invoked JUST BEFORE the
+// module's child context closes — the place to clean up out-of-context resources child.close() cannot reach
+// (ThreadLocals on shared threads, static caches, JMX MBeans, custom clients). Exceptions are swallowed/logged.
+package {{PKG}};
+
+import org.htcom.protean.module.ModuleUnloadCallback;
+import org.springframework.stereotype.Component;
+
+@Component
+public class ExampleUnloadCallback implements ModuleUnloadCallback {
+
+    @Override
+    public void onUnload(String moduleId) {
+        // Release out-of-context resources tied to moduleId here.
+        System.out.println("[{{NAME}}] unloading module: " + moduleId);
+    }
+}

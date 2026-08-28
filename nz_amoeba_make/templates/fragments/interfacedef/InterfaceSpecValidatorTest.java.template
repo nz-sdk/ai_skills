@@ -1,0 +1,269 @@
+// Every test here pins ONE rejection reason, because the validator's job is to be the layer that makes
+// "name / attributes / description" enforceable — a rule that silently stops firing is the failure mode that
+// matters, and a single "invalid spec is rejected" test would not notice.
+package {{PKG}}.interfacedef;
+
+import {{PKG}}.interfacedef.InterfaceSpec.DataAccess;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class InterfaceSpecValidatorTest {
+
+    /** Asserts the spec is rejected and that at least one message mentions the given fragment. */
+    private static void rejects(InterfaceSpec spec, String expectedFragment) {
+        List<String> violations = InterfaceSpecValidator.validate(spec);
+        assertTrue(violations.stream().anyMatch(v -> v.contains(expectedFragment)),
+                () -> "expected a violation containing '" + expectedFragment + "' but got " + violations);
+    }
+
+    private static InterfaceSpec spec(OperationSpec... operations) {
+        return new InterfaceSpec("t", "이 모듈이 하는 일", DataAccess.NONE, List.of(operations));
+    }
+
+    /** A GET on the given path with one declared path parameter per {var} — the minimum valid operation. */
+    private static OperationSpec get(String path, ParamSpec... parameters) {
+        return new OperationSpec("op", HttpMethod.GET, path, "요약", "설명 문장",
+                List.of(parameters), null, List.of(new ResponseSpec(200, "성공", List.of())));
+    }
+
+    private static ParamSpec pathParam(String name) {
+        return new ParamSpec(name, ParamIn.PATH, FieldType.STRING, true, "경로 변수 " + name, "x");
+    }
+
+    @Test
+    void validFixturePasses() {
+        assertEquals(List.of(), InterfaceSpecValidator.validate(SpecFixtures.orders()));
+    }
+
+    @Test
+    void nullSpecAndEmptyOperationsAreRejected() {
+        rejects(null, "spec is required");
+        rejects(new InterfaceSpec("t", "설명 문장", DataAccess.NONE, List.of()),
+                "at least one operation");
+    }
+
+    // --- names become Java identifiers ---
+
+    @Test
+    void operationIdMustBeALegalIdentifier() {
+        rejects(spec(new OperationSpec("get-order", HttpMethod.GET, "/x", "요약", "설명 문장",
+                List.of(), null, List.of(new ResponseSpec(200, "성공", List.of())))), "operationId");
+    }
+
+    @Test
+    void javaReservedWordIsRejectedAsAFieldName() {
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(FieldSpec.scalar("class", FieldType.STRING, true, "클래스 이름")),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "Java reserved word");
+    }
+
+    @Test
+    void duplicateSiblingFieldIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(FieldSpec.scalar("sku", FieldType.STRING, true, "상품 코드"),
+                        FieldSpec.scalar("sku", FieldType.STRING, true, "중복된 상품 코드")),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "duplicate sibling field");
+    }
+
+    // --- description quality: presence alone is not enough ---
+
+    @Test
+    void blankDescriptionIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.GET, "/x", "요약", "  ", List.of(), null,
+                List.of(new ResponseSpec(200, "성공", List.of())))), "description: required");
+    }
+
+    @Test
+    void descriptionThatOnlyRepeatsTheNameIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(FieldSpec.scalar("customerId", FieldType.STRING, true, "customer id")),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "only repeats");
+    }
+
+    @Test
+    void descriptionThatOnlyNamesTheTypeIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(FieldSpec.scalar("sku", FieldType.STRING, true, "string")),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "only names the type");
+    }
+
+    @Test
+    void placeholderDescriptionIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.GET, "/x", "요약", "TODO: 나중에 채운다",
+                List.of(), null, List.of(new ResponseSpec(200, "성공", List.of())))), "placeholder");
+    }
+
+    /**
+     * "n/a" normalizes to "na", which as a substring would reject any word containing it. This pins the
+     * whole-value match so real prose survives.
+     */
+    @Test
+    void shortPlaceholderMarkerDoesNotRejectRealProseContainingIt() {
+        assertEquals(List.of(), InterfaceSpecValidator.validate(spec(new OperationSpec(
+                "op", HttpMethod.GET, "/x", "요약", "financial account number lookup",
+                List.of(), null, List.of(new ResponseSpec(200, "성공", List.of()))))));
+        rejects(spec(new OperationSpec("op", HttpMethod.GET, "/x", "요약", "N/A",
+                List.of(), null, List.of(new ResponseSpec(200, "성공", List.of())))), "placeholder");
+    }
+
+    // --- path <-> parameters cross-check ---
+
+    @Test
+    void pathVariableWithoutAParameterIsRejected() {
+        rejects(spec(get("/orders/{orderId}")), "no parameter with in=path");
+    }
+
+    @Test
+    void pathParameterNotInThePathIsRejected() {
+        rejects(spec(get("/orders", pathParam("orderId"))), "does not appear in path");
+    }
+
+    @Test
+    void pathParameterNeedsAnExampleForProbeGeneration() {
+        rejects(spec(get("/orders/{orderId}",
+                new ParamSpec("orderId", ParamIn.PATH, FieldType.STRING, true, "주문 번호", null))),
+                "example: required for a path parameter");
+    }
+
+    @Test
+    void optionalPathParameterIsRejected() {
+        rejects(spec(get("/orders/{orderId}",
+                new ParamSpec("orderId", ParamIn.PATH, FieldType.STRING, false, "주문 번호", "1"))),
+                "always required");
+    }
+
+    @Test
+    void malformedBracesAreRejected() {
+        rejects(spec(get("/orders/{orderId")), "malformed path variable braces");
+    }
+
+    /** A duplicate variable must report the duplicate, not additionally claim the braces are malformed. */
+    @Test
+    void duplicatePathVariableReportsOnlyTheDuplicate() {
+        List<String> violations = InterfaceSpecValidator.validate(spec(get("/a/{id}/b/{id}", pathParam("id"))));
+        assertTrue(violations.stream().anyMatch(v -> v.contains("duplicate path variable")), () -> "" + violations);
+        assertTrue(violations.stream().noneMatch(v -> v.contains("malformed")), () -> "" + violations);
+    }
+
+    @Test
+    void controlPlanePathIsReserved() {
+        rejects(spec(get("/platform/modules")), "reserved for the protean control plane");
+    }
+
+    @Test
+    void relativePathIsRejected() {
+        rejects(spec(get("orders")), "must start with '/'");
+    }
+
+    // --- routes and responses ---
+
+    @Test
+    void duplicateRouteIsRejected() {
+        rejects(new InterfaceSpec("t", "설명 문장", DataAccess.NONE, List.of(
+                new OperationSpec("a", HttpMethod.GET, "/x", "요약", "설명 문장", List.of(), null,
+                        List.of(new ResponseSpec(200, "성공", List.of()))),
+                new OperationSpec("b", HttpMethod.GET, "/x", "요약", "설명 문장", List.of(), null,
+                        List.of(new ResponseSpec(200, "성공", List.of()))))), "duplicate route");
+    }
+
+    @Test
+    void duplicateOperationIdIsRejected() {
+        rejects(new InterfaceSpec("t", "설명 문장", DataAccess.NONE, List.of(
+                new OperationSpec("same", HttpMethod.GET, "/x", "요약", "설명 문장", List.of(), null,
+                        List.of(new ResponseSpec(200, "성공", List.of()))),
+                new OperationSpec("same", HttpMethod.GET, "/y", "요약", "설명 문장", List.of(), null,
+                        List.of(new ResponseSpec(200, "성공", List.of()))))), "duplicate 'same'");
+    }
+
+    @Test
+    void aSuccessResponseIsRequired() {
+        rejects(spec(new OperationSpec("op", HttpMethod.GET, "/x", "요약", "설명 문장", List.of(), null,
+                List.of(new ResponseSpec(404, "없음이 아니라 실제 설명", List.of())))), "at least one 2xx");
+    }
+
+    @Test
+    void getWithARequestBodyIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.GET, "/x", "요약", "설명 문장", List.of(),
+                List.of(FieldSpec.scalar("sku", FieldType.STRING, true, "상품 코드")),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "must not declare a request body");
+    }
+
+    // --- composite shape rules ---
+
+    @Test
+    void objectWithoutChildrenIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(new FieldSpec("customer", FieldType.OBJECT, null, true, "고객 정보", null,
+                        List.of(), null)),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "children: required for type 'object'");
+    }
+
+    @Test
+    void arrayWithoutItemsIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(new FieldSpec("tags", FieldType.ARRAY, null, true, "태그 목록", null,
+                        List.of(), null)),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "items: required for type 'array'");
+    }
+
+    @Test
+    void arrayUsingChildrenInsteadOfItemsIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(new FieldSpec("tags", FieldType.ARRAY, null, true, "태그 목록", null,
+                        List.of(FieldSpec.scalar("tag", FieldType.STRING, true, "태그 하나")),
+                        FieldSpec.scalar("tag", FieldType.STRING, true, "태그 하나"))),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "use 'items'");
+    }
+
+    @Test
+    void scalarWithChildrenIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(new FieldSpec("sku", FieldType.STRING, null, true, "상품 코드", null,
+                        List.of(FieldSpec.scalar("nested", FieldType.STRING, true, "있을 수 없는 필드")), null)),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "only valid for type 'object'");
+    }
+
+    @Test
+    void compositeParameterIsOnlyAllowedInQuery() {
+        rejects(spec(get("/orders/{orderId}",
+                new ParamSpec("orderId", ParamIn.PATH, FieldType.ARRAY, true, "주문 번호", "1"))),
+                "only valid for in=query");
+        assertEquals(List.of(), InterfaceSpecValidator.validate(spec(get("/orders",
+                new ParamSpec("tags", ParamIn.QUERY, FieldType.ARRAY, false, "태그로 필터", "a")))));
+    }
+
+    @Test
+    void tooDeepNestingIsRejected() {
+        // Nine object levels, one past MAX_FIELD_DEPTH.
+        FieldSpec leaf = FieldSpec.scalar("leaf", FieldType.STRING, true, "마지막 값");
+        FieldSpec node = leaf;
+        for (int i = 0; i < 9; i++) {
+            node = new FieldSpec("n" + i, FieldType.OBJECT, null, true, "중첩 단계 " + i, null,
+                    List.of(node), null);
+        }
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(node), List.of(new ResponseSpec(200, "성공", List.of())))), "maximum depth");
+    }
+
+    // --- throwing wrapper ---
+
+    @Test
+    void validateOrThrowListsEveryViolation() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> InterfaceSpecValidator.validateOrThrow(spec(get("/orders/{orderId}"))));
+        assertTrue(e.getMessage().contains("interface spec is invalid"), e.getMessage());
+        assertTrue(e.getMessage().contains("no parameter with in=path"), e.getMessage());
+    }
+}

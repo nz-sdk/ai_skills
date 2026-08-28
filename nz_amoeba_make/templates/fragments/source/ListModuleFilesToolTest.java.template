@@ -1,0 +1,228 @@
+// Covers the tool as an MCP citizen (READ classification, moduleId targeting, output-schema conformance) and as
+// a browser (no content in the response, resources visible, paging that actually round-trips).
+package {{PKG}}.source;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModulePlatform;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class ListModuleFilesToolTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final ModulePlatform platform = mock(ModulePlatform.class);
+    private final ModuleSourceResolver resolver = new ModuleSourceResolver(platform);
+    private final ListModuleFilesTool tool = new ListModuleFilesTool(mapper, resolver);
+
+    @BeforeEach
+    void setUp() {
+        when(platform.find(SourceFixtures.MODULE_ID)).thenReturn(Optional.of(SourceFixtures.helloModule()));
+        when(platform.find("nope")).thenReturn(Optional.empty());
+    }
+
+    private ObjectNode args() {
+        ObjectNode args = mapper.createObjectNode();
+        args.put("moduleId", SourceFixtures.MODULE_ID);
+        return args;
+    }
+
+    private static List<String> paths(JsonNode structured) {
+        List<String> paths = new ArrayList<>();
+        structured.path("files").forEach(f -> paths.add(f.path("path").asText()));
+        return paths;
+    }
+
+    /** The reason this tool exists: the answer to "what is in this module" must not cost the module. */
+    @Test
+    void returnsNoFileContent() {
+        McpToolResult result = tool.call(args(), null);
+
+        assertFalse(result.isError());
+        for (JsonNode file : result.structured().path("files")) {
+            assertTrue(file.path("content").isMissingNode(),
+                    "listing must not carry content — that is export_module_source's job");
+            assertTrue(file.hasNonNull("bytes"));
+        }
+        assertFalse(result.text().contains("class HelloController"),
+                "the text summary must not inline source either");
+    }
+
+    /** protean.get_module_source cannot see these at all; being able to is the point of the new tool. */
+    @Test
+    void listsMapperXmlAndSealedInterfaceSpec() {
+        McpToolResult result = tool.call(args(), null);
+
+        List<String> paths = paths(result.structured());
+        assertTrue(paths.contains("src/main/resources/mapper/hello/HelloMapper.xml"), paths.toString());
+        assertTrue(paths.contains("src/main/resources/META-INF/protean/interface.json"), paths.toString());
+        assertTrue(paths.contains("src/test/java/module/hello/HelloContractTest.java"), paths.toString());
+    }
+
+    @Test
+    void reportsVersionAndTotalCount() {
+        McpToolResult result = tool.call(args(), null);
+
+        assertEquals(SourceFixtures.VERSION, result.structured().path("version").asText());
+        assertEquals(7, result.structured().path("totalCount").asInt());
+        assertEquals(7, result.structured().path("files").size());
+    }
+
+    @Test
+    void filtersByInclude() {
+        ObjectNode args = args();
+        args.putArray("include").add("resources");
+
+        McpToolResult result = tool.call(args, null);
+
+        assertEquals(3, result.structured().path("totalCount").asInt());
+        assertTrue(paths(result.structured()).stream().allMatch(p -> p.startsWith("src/main/resources/")));
+    }
+
+    @Test
+    void filtersByPathPrefixCaseInsensitively() {
+        ObjectNode args = args();
+        args.put("pathPrefix", "SRC/MAIN/RESOURCES/MAPPER");
+
+        McpToolResult result = tool.call(args, null);
+
+        assertEquals(List.of("src/main/resources/mapper/hello/HelloMapper.xml"), paths(result.structured()));
+    }
+
+    /** Walking the cursor must visit every file exactly once — the property that makes paging trustworthy. */
+    @Test
+    void pagingRoundTripsEveryFileExactlyOnce() {
+        List<String> collected = new ArrayList<>();
+        String cursor = null;
+        int guard = 0;
+
+        do {
+            ObjectNode args = args();
+            args.put("limit", 2);
+            if (cursor != null) {
+                args.put("cursor", cursor);
+            }
+            JsonNode structured = tool.call(args, null).structured();
+            collected.addAll(paths(structured));
+            cursor = structured.path("nextCursor").asText(null);
+            assertTrue(++guard < 20, "cursor did not terminate");
+        } while (cursor != null);
+
+        JsonNode unpaged = tool.call(args(), null).structured();
+        assertEquals(paths(unpaged), collected);
+        assertEquals(7, collected.size());
+    }
+
+    @Test
+    void limitZeroReturnsEverythingAndNoCursor() {
+        ObjectNode args = args();
+        args.put("limit", 0);
+
+        JsonNode structured = tool.call(args, null).structured();
+
+        assertEquals(7, structured.path("files").size());
+        assertNull(structured.path("nextCursor").asText(null));
+    }
+
+    @Test
+    void unknownModuleIsAnErrorNamingTheModule() {
+        ObjectNode args = mapper.createObjectNode();
+        args.put("moduleId", "nope");
+
+        McpToolResult result = tool.call(args, null);
+
+        assertTrue(result.isError());
+        assertTrue(result.text().contains("nope"), result.text());
+    }
+
+    /** "no such module" and "no such version" send the caller to different places, so they must not read alike. */
+    @Test
+    void unknownVersionMentionsTheVersion() {
+        when(platform.findVersion(SourceFixtures.MODULE_ID, "0.9.0")).thenReturn(Optional.empty());
+        ObjectNode args = args();
+        args.put("version", "0.9.0");
+
+        McpToolResult result = tool.call(args, null);
+
+        assertTrue(result.isError());
+        assertTrue(result.text().contains("0.9.0"), result.text());
+        assertNotEquals(tool.call(mapper.createObjectNode().put("moduleId", "nope"), null).text(), result.text());
+    }
+
+    @Test
+    void readsAHistoricalVersionWhenAsked() {
+        when(platform.findVersion(SourceFixtures.MODULE_ID, "0.9.0"))
+                .thenReturn(Optional.of(SourceFixtures.bareModule(SourceFixtures.MODULE_ID)));
+        ObjectNode args = args();
+        args.put("version", "0.9.0");
+
+        JsonNode structured = tool.call(args, null).structured();
+
+        assertEquals("2.0.0", structured.path("version").asText());
+        assertEquals(1, structured.path("totalCount").asInt());
+    }
+
+    @Test
+    void missingModuleIdIsRejected() {
+        assertTrue(tool.call(mapper.createObjectNode(), null).isError());
+        assertTrue(tool.call(null, null).isError());
+    }
+
+    /**
+     * Classification matters: the SPI default is CUSTOM, and the ModuleActionAuthorizer policy (ExampleAuthorizer)
+     * puts CUSTOM behind mcp.admin alongside config.set and deploy_shared_lib. A read tool must not sit there.
+     */
+    @Test
+    void classifiesAsReadSoItStaysOnMcpRead() {
+        assertEquals(ModuleActionAuthorizer.ModuleAction.READ, tool.action());
+        assertNotEquals(ModuleActionAuthorizer.ModuleAction.CUSTOM, tool.action());
+        assertEquals(Boolean.TRUE, tool.annotations().readOnlyHint());
+    }
+
+    /** The SPI default reads `id`; this tool's argument is `moduleId`, so the authorizer would see null. */
+    @Test
+    void targetsModuleIdNotId() {
+        assertEquals(SourceFixtures.MODULE_ID, tool.targetModuleId(args()));
+        assertNull(tool.targetModuleId(mapper.createObjectNode().put("id", "hello")));
+    }
+
+    @Test
+    void satisfiesItsOwnOutputSchema() {
+        SourceToolAssertions.assertSatisfiesOutputSchema(tool, tool.call(args(), null));
+    }
+
+    /** nextCursor and skipped must stay optional, or a normal response becomes a schema violation. */
+    @Test
+    void doesNotRequireConditionalOutputFields() {
+        List<String> required = new ArrayList<>();
+        tool.outputSchema().path("required").forEach(n -> required.add(n.asText()));
+
+        assertFalse(required.contains("nextCursor"));
+        assertFalse(required.contains("skipped"));
+    }
+
+    @Test
+    void declaresClosedInputSchemaWithModuleIdPattern() {
+        JsonNode schema = tool.inputSchema();
+
+        assertFalse(schema.path("additionalProperties").asBoolean(true));
+        assertTrue(schema.path("properties").path("moduleId").hasNonNull("pattern"));
+        assertEquals("moduleId", schema.path("required").get(0).asText());
+    }
+}

@@ -1,0 +1,113 @@
+// TTL and the size cap are the only behaviour here worth testing, and both are about NOT leaking: a draft store
+// that never forgets is an unbounded map an agent can grow by calling define in a loop.
+package {{PKG}}.interfacedef;
+
+import {{PKG}}.interfacedef.gen.SkeletonBundle;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator;
+import org.junit.jupiter.api.Test;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class DraftStoreTest {
+
+    /** A clock the test moves by hand, so expiry is assertable without sleeping. */
+    private static final class MovableClock extends Clock {
+        private Instant now = Instant.parse("2026-08-24T00:00:00Z");
+
+        void advance(Duration by) {
+            now = now.plus(by);
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
+
+        @Override
+        public ZoneOffset getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(java.time.ZoneId zone) {
+            return this;
+        }
+    }
+
+    private static final InterfaceSpec SPEC = SpecFixtures.orders();
+    private static final SkeletonBundle SKELETON = SkeletonGenerator.generate(
+            new SkeletonGenerator.Request("orders", "module.orders", SPEC));
+
+    private static String store(DraftStore draftStore) {
+        return draftStore.put("orders", "1.0.0", "module.orders", SPEC, SKELETON);
+    }
+
+    @Test
+    void roundTripsADraft() {
+        DraftStore draftStore = new DraftStore();
+        String specId = store(draftStore);
+        DraftStore.Draft draft = draftStore.find(specId).orElseThrow();
+        assertEquals(specId, draft.specId());
+        assertEquals("orders", draft.moduleId());
+        assertEquals("1.0.0", draft.version());
+        assertEquals(SKELETON, draft.skeleton());
+    }
+
+    @Test
+    void specIdsAreDistinct() {
+        DraftStore draftStore = new DraftStore();
+        assertNotEquals(store(draftStore), store(draftStore));
+    }
+
+    @Test
+    void unknownAndNullSpecIdsAreAbsent() {
+        DraftStore draftStore = new DraftStore();
+        assertTrue(draftStore.find("nope").isEmpty());
+        assertTrue(draftStore.find(null).isEmpty());
+    }
+
+    @Test
+    void removeDropsTheDraft() {
+        DraftStore draftStore = new DraftStore();
+        String specId = store(draftStore);
+        draftStore.remove(specId);
+        assertTrue(draftStore.find(specId).isEmpty());
+    }
+
+    @Test
+    void anExpiredDraftIsAbsentAndIsNotRetained() {
+        MovableClock clock = new MovableClock();
+        DraftStore draftStore = new DraftStore(clock, Duration.ofMinutes(30));
+        String specId = store(draftStore);
+
+        clock.advance(Duration.ofMinutes(29));
+        assertTrue(draftStore.find(specId).isPresent(), "still inside the TTL");
+
+        clock.advance(Duration.ofMinutes(2));
+        assertFalse(draftStore.find(specId).isPresent(), "past the TTL");
+        // A read must also evict, or an abandoned draft stays resident until the next write.
+        assertEquals(0, draftStore.size());
+    }
+
+    @Test
+    void theStoreIsCappedAndEvictsTheOldestFirst() {
+        MovableClock clock = new MovableClock();
+        DraftStore draftStore = new DraftStore(clock, Duration.ofHours(2));
+
+        String oldest = store(draftStore);
+        for (int i = 0; i < 220; i++) {
+            clock.advance(Duration.ofSeconds(1));
+            store(draftStore);
+        }
+        assertTrue(draftStore.size() <= 200, "size was " + draftStore.size());
+        assertTrue(draftStore.find(oldest).isEmpty(), "the oldest draft should have been evicted first");
+    }
+}

@@ -1,0 +1,153 @@
+// [MODULE SOURCE] Schema fragments and argument parsing shared by the three source tools.
+//
+// Same role as protean's own ModuleToolSchemas: the schemas are hand-built Jackson ObjectNodes, and the shapes
+// that repeat across tools live in one place so the three cannot drift into accepting different spellings of the
+// same argument.
+//
+// MODULE_ID_PATTERN is declared HERE rather than imported. This bundle is self-contained on purpose: the
+// interface_spec_validator bundle is a separate, optional capability, so importing a constant from it would make
+// these three tools fail to compile whenever it was not selected. The duplication is one string; the coupling
+// would be a generation-order dependency between two independent capabilities.
+//
+// With protean.mcp.strict-schema=true these schemas are a real rejection gate — McpDispatcher validates arguments
+// against them server-side before the tool body runs — so a pattern here is enforcement, not documentation.
+package {{PKG}}.source;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.source.ModuleSourceLayout.Kind;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.EnumSet;
+import java.util.Set;
+
+final class SourceToolSchemas {
+
+    /**
+     * Accepted module ids. Kept identical to the pattern protean itself accepts at deploy, so a schema rejection
+     * here never differs from what the platform would have said.
+     */
+    static final String MODULE_ID_PATTERN = "^[a-z0-9][a-z0-9_-]{0,63}$";
+
+    private SourceToolSchemas() {
+    }
+
+    // ---- input fragments ----------------------------------------------------------------------------------
+
+    /**
+     * The {@code moduleId} property. Pattern-constrained on purpose: with strict-schema on, a malformed id is
+     * refused by the dispatcher instead of reaching the platform and coming back as a vaguer "not found".
+     */
+    static void putModuleId(ObjectNode properties, String description) {
+        properties.putObject("moduleId").put("type", "string")
+                .put("pattern", MODULE_ID_PATTERN)
+                .put("description", description);
+    }
+
+    static void putVersion(ObjectNode properties) {
+        properties.putObject("version").put("type", "string")
+                .put("description", "Optional. Reads the source that shipped with this version (from the module's "
+                        + "history) instead of the current one.");
+    }
+
+    /**
+     * The {@code include} property — which of the descriptor's three maps to read.
+     *
+     * <p>No {@code minItems}: an empty array is treated as "all", the same as omitting the field, because
+     * rejecting it would turn a harmless client default into an error.
+     */
+    static void putInclude(ObjectNode properties) {
+        ObjectNode include = properties.putObject("include");
+        include.put("type", "array")
+                .put("description", "Which parts of the module to read: sources (Java), tests (JUnit), resources "
+                        + "(mapper XML, sealed interface.json, and any other classpath resource). Defaults to all.");
+        ObjectNode items = include.putObject("items");
+        items.put("type", "string");
+        ArrayNode enumeration = items.putArray("enum");
+        for (Kind kind : Kind.values()) {
+            enumeration.add(kind.wire());
+        }
+        include.put("uniqueItems", true);
+    }
+
+    // ---- output fragments ---------------------------------------------------------------------------------
+
+    /**
+     * Declares the {@code skipped} array every tool reports.
+     *
+     * <p>Never added to a schema's {@code required}: the dispatcher rewrites a successful result into an
+     * {@code OUTPUT_SCHEMA_VIOLATION} error when {@code structuredContent} misses a required field, so
+     * conditionally-populated fields must stay optional.
+     */
+    static void putSkipped(ObjectNode properties) {
+        ObjectNode skipped = properties.putObject("skipped");
+        skipped.put("type", "array")
+                .put("description", "Resource paths dropped because they escape the classpath root. Normally "
+                        + "absent — a non-empty list means the descriptor bypassed deploy-time path normalization.");
+        skipped.putObject("items").put("type", "string");
+    }
+
+    // ---- argument parsing ---------------------------------------------------------------------------------
+
+    /**
+     * Resolves the {@code include} argument. Absent, empty, or all-unrecognized → every kind.
+     *
+     * <p>Unrecognized entries cannot normally arrive (the schema's enum rejects them first), so they are dropped
+     * rather than reported; the fallback exists for the strict-schema-off case.
+     */
+    static Set<Kind> parseInclude(JsonNode args) {
+        JsonNode node = args.path("include");
+        if (!node.isArray() || node.isEmpty()) {
+            return EnumSet.allOf(Kind.class);
+        }
+        Set<Kind> kinds = EnumSet.noneOf(Kind.class);
+        node.forEach(element -> Kind.fromWire(element.asText(null)).ifPresent(kinds::add));
+        return kinds.isEmpty() ? EnumSet.allOf(Kind.class) : kinds;
+    }
+
+    /** A string argument, or {@code null} when absent or blank. */
+    static String text(JsonNode args, String field) {
+        String value = args.path(field).asText(null);
+        return (value == null || value.isBlank()) ? null : value;
+    }
+
+    /**
+     * Resolves a requested limit the way {@code protean.list_modules} does: absent/non-numeric → {@code def},
+     * {@code 0} → unbounded, negative → {@code def}, positive → capped at {@code max}.
+     */
+    static int clampLimit(JsonNode node, int def, int max) {
+        if (node == null || !node.isNumber()) {
+            return def;
+        }
+        int limit = node.asInt(def);
+        if (limit == 0) {
+            return Integer.MAX_VALUE;
+        }
+        if (limit < 0) {
+            return def;
+        }
+        return Math.min(limit, max);
+    }
+
+    /** Opaque offset cursor, same encoding as {@code protean.list_modules} so clients see one cursor format. */
+    static String encodeCursor(int offset) {
+        return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(String.valueOf(offset).getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** Decodes the cursor back to an offset. Corrupt or missing → 0 (from the start), never an error. */
+    static int decodeCursor(String cursor) {
+        if (cursor == null || cursor.isBlank()) {
+            return 0;
+        }
+        try {
+            return Math.max(Integer.parseInt(
+                    new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8)), 0);
+        } catch (RuntimeException e) {
+            return 0;
+        }
+    }
+}

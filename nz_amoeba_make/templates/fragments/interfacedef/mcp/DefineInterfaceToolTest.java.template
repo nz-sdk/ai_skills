@@ -1,0 +1,354 @@
+// Covers the tool as an MCP citizen (authorization classification, structured result conformance) and as the
+// gatekeeper it is meant to be (a bad spec must come back as an error with actionable text, never a draft).
+package {{PKG}}.interfacedef.mcp;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.InterfaceSpec;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.function.Consumer;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class DefineInterfaceToolTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final DraftStore draftStore = new DraftStore();
+    /** true = the shipped default, so every existing expectation here is about the interface-bearing shape. */
+    private final DefineInterfaceTool tool = new DefineInterfaceTool(mapper, draftStore, true);
+
+    private static final String VALID = """
+            {
+              "moduleId": "orders",
+              "version": "1.0.0",
+              "packageName": "module.orders",
+              "interface": {
+                "title": "주문 API",
+                "description": "주문을 조회하고 생성한다",
+                "dataAccess": "mybatis",
+                "operations": [
+                  {
+                    "operationId": "getOrder",
+                    "method": "GET",
+                    "path": "/orders/{orderId}",
+                    "summary": "주문 단건 조회",
+                    "description": "주문 번호로 주문 한 건을 반환한다",
+                    "parameters": [
+                      {"name": "orderId", "in": "path", "type": "integer", "required": true,
+                       "description": "조회할 주문 번호", "example": "1001"}
+                    ],
+                    "responses": [
+                      {"status": 200, "description": "조회 성공", "body": [
+                        {"name": "orderId", "type": "integer", "required": true, "description": "주문 번호"},
+                        {"name": "note", "type": "string", "required": false, "description": "주문 메모"}
+                      ]}
+                    ]
+                  },
+                  {
+                    "operationId": "createOrder",
+                    "method": "POST",
+                    "path": "/orders",
+                    "summary": "주문 생성",
+                    "description": "고객 번호를 받아 주문 한 건을 만든다",
+                    "requestBody": [
+                      {"name": "customerId", "type": "integer", "required": true, "description": "고객 번호"},
+                      {"name": "memo", "type": "string", "required": false, "description": "주문 시 남기는 메모"}
+                    ],
+                    "responses": [
+                      {"status": 201, "description": "생성 성공", "body": [
+                        {"name": "orderId", "type": "integer", "required": true, "description": "생성된 주문 번호"}
+                      ]}
+                    ]
+                  }
+                ]
+              }
+            }
+            """;
+
+    private McpToolResult call(String json) {
+        try {
+            return tool.call(mapper.readTree(json), null);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * Calls the tool with {@link #VALID} altered in place.
+     *
+     * <p>Tree mutation rather than string replacement: a replacement whose whitespace does not match the text block
+     * silently leaves the JSON valid, and the test then passes for the wrong reason (or fails confusingly). A
+     * mutation that misses a path throws instead.
+     */
+    private McpToolResult callMutated(Consumer<ObjectNode> mutation) {
+        try {
+            ObjectNode root = (ObjectNode) mapper.readTree(VALID);
+            mutation.accept(root);
+            return tool.call(root, null);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static ObjectNode operation(ObjectNode root, int index) {
+        return (ObjectNode) root.required("interface").required("operations").required(index);
+    }
+
+    private static List<String> texts(JsonNode array) {
+        return array.valueStream().map(JsonNode::asText).toList();
+    }
+
+    // --- MCP citizenship ---
+
+    /**
+     * The SPI default is CUSTOM, which ApiModuleActionAuthorizer maps to mcp.admin — the config.set /
+     * deploy_shared_lib bucket. A drafting tool must not sit there, or the deploying agent needs admin rights.
+     */
+    @Test
+    void isClassifiedAsUpdateSoItSitsOnMcpWrite() {
+        assertEquals(ModuleActionAuthorizer.ModuleAction.UPDATE, tool.action());
+    }
+
+    /** The SPI default reads `id`; this tool names its module argument `moduleId`. */
+    @Test
+    void targetModuleIdReadsModuleId() throws Exception {
+        assertEquals("orders", tool.targetModuleId(mapper.readTree(VALID)));
+        assertEquals(null, tool.targetModuleId(mapper.readTree("{}")));
+    }
+
+    /** McpDispatcher blocks a result whose structuredContent misses a top-level required key. */
+    @Test
+    void structuredResultSatisfiesItsOwnOutputSchema() {
+        McpToolResult result = call(VALID);
+        assertFalse(result.isError(), result::text);
+        JsonNode structured = result.structured();
+        for (JsonNode required : tool.outputSchema().withArray("required")) {
+            assertTrue(structured.hasNonNull(required.asText()),
+                    () -> "structured result is missing required key " + required.asText());
+        }
+    }
+
+    // --- happy path ---
+
+    @Test
+    void returnsSkeletonAndDeployParameters() {
+        JsonNode out = call(VALID).structured();
+        assertEquals("module.orders.OrdersController", out.get("controllerFqcn").asText());
+        assertEquals(List.of("module.orders.OrdersController", "module.orders.OrdersServiceImpl",
+                "module.orders.OrdersMyBatisConfig"), texts(out.get("componentFqcns")));
+        assertTrue(out.get("needsSharedBeans").asBoolean());
+        assertTrue(out.get("document").asText().startsWith("# 주문 API"));
+    }
+
+    @Test
+    void everyFileDeclaresItsKindAndOwnership() {
+        JsonNode files = call(VALID).structured().get("files");
+        assertTrue(files.size() > 5, files::toString);
+        for (JsonNode file : files) {
+            assertTrue(List.of("source", "test", "resource").contains(file.get("kind").asText()),
+                    file::toString);
+            assertTrue(file.get("content").asText().length() > 10, file::toString);
+        }
+        // The mapper XML is the one resource, and it is the author's to fill in.
+        JsonNode xml = files.valueStream()
+                .filter(f -> f.get("filename").asText().endsWith(".xml")).findFirst().orElseThrow();
+        assertEquals("resource", xml.get("kind").asText());
+        assertFalse(xml.get("serverOwned").asBoolean());
+    }
+
+    @Test
+    void draftIsStoredUnderTheReturnedSpecId() {
+        String specId = call(VALID).structured().get("specId").asText();
+        DraftStore.Draft draft = draftStore.find(specId).orElseThrow();
+        assertEquals("orders", draft.moduleId());
+        assertEquals("1.0.0", draft.version());
+        assertEquals("module.orders", draft.packageName());
+        assertEquals(InterfaceSpec.DataAccess.MYBATIS, draft.spec().dataAccess());
+        assertEquals("module.orders.OrdersController", draft.skeleton().controllerFqcn());
+    }
+
+    // --- warnings name what the caller cannot see from the spec ---
+
+    @Test
+    void warnsAboutTheMyBatisDatabasePrerequisiteAndProbeCoverage() {
+        List<String> warnings = texts(call(VALID).structured().get("warnings"));
+        assertTrue(warnings.stream().anyMatch(w -> w.contains("REACHABLE at deploy time")), () -> "" + warnings);
+        assertTrue(warnings.stream().anyMatch(w -> w.contains("namespace")), () -> "" + warnings);
+        // createOrder has a body, so no probe can be generated for it — the caller needs to know that.
+        assertTrue(warnings.stream().anyMatch(w -> w.contains("createOrder") && w.contains("probe")),
+                () -> "" + warnings);
+        assertTrue(warnings.stream().anyMatch(w -> w.contains("required is documentation")), () -> "" + warnings);
+    }
+
+    @Test
+    void noSpuriousWarningsForASimpleModule() {
+        McpToolResult result = callMutated(root -> {
+            ((ObjectNode) root.required("interface")).put("dataAccess", "none");
+            // Make every body field required so the documentation-only note does not apply either.
+            operation(root, 1).required("requestBody")
+                    .forEach(f -> ((ObjectNode) f).put("required", true));
+        });
+        List<String> warnings = texts(result.structured().get("warnings"));
+        assertTrue(warnings.stream().noneMatch(w -> w.contains("REACHABLE")), () -> "" + warnings);
+        assertTrue(warnings.stream().noneMatch(w -> w.contains("required is documentation")), () -> "" + warnings);
+    }
+
+    // --- rejection paths ---
+
+    @Test
+    void semanticViolationsComeBackAsAnActionableError() {
+        // The path still declares {orderId}, but the parameter that backed it is gone.
+        McpToolResult result = callMutated(root -> operation(root, 0).remove("parameters"));
+        assertTrue(result.isError(), result::text);
+        assertTrue(result.text().contains("no parameter with in=path"), result::text);
+        assertEquals(0, draftStore.size(), "a rejected spec must not leave a draft behind");
+    }
+
+    /**
+     * Spring Boot's default ObjectMapper ignores unknown properties, so without the strict reader a misspelled
+     * field name would be dropped and the DTO generated without it.
+     */
+    @Test
+    void misspelledPropertyIsRejectedEvenWithoutStrictSchema() {
+        McpToolResult result = callMutated(root -> {
+            ObjectNode field = (ObjectNode) operation(root, 1).required("requestBody").required(0);
+            field.remove("description");
+            field.put("descripton", "고객 번호");
+        });
+        assertTrue(result.isError(), result::text);
+        assertTrue(result.text().contains("could not be parsed"), result::text);
+    }
+
+    @Test
+    void unknownEnumValueNamesTheAllowedSpellings() {
+        McpToolResult result = callMutated(root ->
+                ((ObjectNode) operation(root, 0).required("parameters").required(0)).put("type", "str"));
+        assertTrue(result.isError(), result::text);
+        // Jackson's own wording spells the Java constants; the @JsonCreator message spells the wire values.
+        assertTrue(result.text().contains("'string'"), result::text);
+    }
+
+    @Test
+    void missingTopLevelArgumentsAreReported() {
+        assertTrue(call("{}").isError());
+        assertTrue(call("""
+                {"moduleId": "orders", "version": "1", "packageName": "module.orders"}
+                """).text().contains("interface is required"));
+    }
+
+    @Test
+    void illegalPackageNameIsRejectedBeforeGeneration() {
+        McpToolResult result = callMutated(root -> root.put("packageName", "Module.Orders"));
+        assertTrue(result.isError(), result::text);
+        assertTrue(result.text().contains("skeleton generation failed"), result::text);
+    }
+
+    /** The declared input schema must itself be a well-formed object schema the dispatcher can hand to networknt. */
+    @Test
+    void inputSchemaDeclaresItsDefinitionsAtTheRoot() {
+        ObjectNode schema = tool.inputSchema();
+        assertEquals("object", schema.get("type").asText());
+        assertTrue(schema.has("$defs"), schema::toString);
+        assertEquals("#/$defs/interfaceSpec", schema.at("/properties/interface/$ref").asText());
+    }
+
+    // --- the service-layer choice ---
+
+    /** The skeleton in the response is what the caller deploys, so the choice has to show up there. */
+    @Test
+    void serviceInterfaceFalseEmitsOneServiceClass() {
+        McpToolResult result = callMutated(root ->
+                ((ObjectNode) root.required("interface")).put("serviceInterface", false));
+
+        assertFalse(result.isError(), result::text);
+        List<String> filenames = result.structured().required("files").valueStream()
+                .map(f -> f.required("filename").asText()).toList();
+        assertTrue(filenames.contains("OrdersService.java"), filenames::toString);
+        assertFalse(filenames.contains("OrdersServiceImpl.java"), filenames::toString);
+        assertTrue(texts(result.structured().required("componentFqcns")).contains("module.orders.OrdersService"),
+                result.structured().required("componentFqcns")::toString);
+    }
+
+    @Test
+    void serviceInterfaceDefaultsToTheProjectSettingWhenOmitted() {
+        // The tool under test was built with the default true; a tool built with false must generate the other
+        // shape from the very same request JSON.
+        DefineInterfaceTool interfaceLess = new DefineInterfaceTool(mapper, new DraftStore(), false);
+        McpToolResult result;
+        try {
+            result = interfaceLess.call(mapper.readTree(VALID), null);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+
+        assertFalse(result.isError(), result::text);
+        List<String> filenames = result.structured().required("files").valueStream()
+                .map(f -> f.required("filename").asText()).toList();
+        assertFalse(filenames.contains("OrdersServiceImpl.java"), filenames::toString);
+
+        // ...while the default-true tool still emits both from the same input.
+        List<String> withDefault = call(VALID).structured().required("files").valueStream()
+                .map(f -> f.required("filename").asText()).toList();
+        assertTrue(withDefault.contains("OrdersServiceImpl.java"), withDefault::toString);
+    }
+
+    /** An explicit value must beat the project default, in the direction the default does not point. */
+    @Test
+    void explicitChoiceOverridesTheProjectDefault() {
+        DefineInterfaceTool interfaceLess = new DefineInterfaceTool(mapper, new DraftStore(), false);
+        McpToolResult result;
+        try {
+            ObjectNode root = (ObjectNode) mapper.readTree(VALID);
+            ((ObjectNode) root.required("interface")).put("serviceInterface", true);
+            result = interfaceLess.call(root, null);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+
+        assertFalse(result.isError(), result::text);
+        List<String> filenames = result.structured().required("files").valueStream()
+                .map(f -> f.required("filename").asText()).toList();
+        assertTrue(filenames.contains("OrdersServiceImpl.java"), filenames::toString);
+    }
+
+    /**
+     * The resolved value must be PINNED IN THE STORED SPEC, not left unstated. Otherwise a redeploy would resolve
+     * it again against whatever the project default says at that moment, silently restructuring the module.
+     */
+    @Test
+    void theResolvedChoiceIsSealedIntoTheStoredDraft() {
+        DraftStore store = new DraftStore();
+        DefineInterfaceTool interfaceLess = new DefineInterfaceTool(mapper, store, false);
+        McpToolResult result;
+        try {
+            result = interfaceLess.call(mapper.readTree(VALID), null);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+
+        String specId = result.structured().required("specId").asText();
+        InterfaceSpec stored = store.find(specId).orElseThrow().spec();
+        assertEquals(Boolean.FALSE, stored.serviceInterface(),
+                "an unstated preference must be resolved to an explicit value before it is stored");
+        assertFalse(stored.generatesServiceInterface());
+    }
+
+    /** The document travels with the response, so it has to describe the shape that was actually generated. */
+    @Test
+    void theRenderedDocumentNamesTheServiceLayer() {
+        String document = callMutated(root ->
+                ((ObjectNode) root.required("interface")).put("serviceInterface", false))
+                .structured().required("document").asText();
+
+        assertTrue(document.contains("구현 클래스만"), document);
+    }
+}

@@ -1,0 +1,87 @@
+// [ALWAYS GENERATED] Written to src/test/java/{{PKG_PATH}}/ConfigMatchesSelectionTest.java.
+// Verifies the generated application.yml matches the capabilities selected when this sample was scaffolded.
+// It loads application.yml from the classpath and asserts the chosen protean.* keys — it does NOT start the
+// server (no port bind, no DB), so it is safe to run anywhere with `./gradlew test`.
+// The generator fills the <<assertions>> block: one assertEquals per selected protean.* key, plus a class-presence
+// check for each selected code fragment. Requires testImplementation 'org.springframework.boot:spring-boot-starter-test'.
+package {{PKG}};
+
+import org.junit.jupiter.api.Test;
+import org.yaml.snakeyaml.Yaml;
+
+import java.io.InputStream;
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+
+class ConfigMatchesSelectionTest {
+
+    /** Loads application.yml and flattens it to dotted keys (e.g. protean.mcp.enabled → value). */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> config() {
+        try (InputStream in = ConfigMatchesSelectionTest.class.getResourceAsStream("/application.yml")) {
+            assertNotNull(in, "application.yml must be on the classpath");
+            Map<String, Object> root = new Yaml().load(in);
+            Map<String, Object> flat = new HashMap<>();
+            flatten("", root, flat);
+            return flat;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void flatten(String prefix, Map<String, Object> node, Map<String, Object> out) {
+        for (Map.Entry<String, Object> e : node.entrySet()) {
+            String key = prefix.isEmpty() ? e.getKey() : prefix + "." + e.getKey();
+            if (e.getValue() instanceof Map) {
+                flatten(key, (Map<String, Object>) e.getValue(), out);
+            } else {
+                out.put(key, e.getValue());
+            }
+        }
+    }
+
+    @Test
+    void configMatchesSelection() {
+        Map<String, Object> cfg = config();
+        // <<assertions>> — generator writes one line per selected protean.* key, e.g.:
+        //   assertEquals(true, cfg.get("protean.mcp.enabled"));
+        //   assertEquals(false, cfg.get("protean.gate.review-enabled"));
+        //   assertEquals(200, cfg.get("protean.trace.capacity"));
+        //   assertEquals("in-process", cfg.get("protean.isolation.mode"));
+    }
+
+    @Test
+    void selectedFragmentsPresent() {
+        // <<fragment-checks>> — generator writes one line per selected code fragment, e.g.:
+        //   assertDoesNotThrow(() -> Class.forName("{{PKG}}.ExampleTool"));   // custom MCP tool
+        // (no fragments selected → this test is a no-op assertion below)
+        assertDoesNotThrow(() -> {});
+    }
+
+    /**
+     * Module-facing host classpath. A module deploys as SOURCE and RuntimeCompiler builds its classpath from
+     * java.class.path, so anything a module imports must resolve on the HOST classpath. Without this test a missing
+     * jar is invisible until the FIRST DEPLOY, where it surfaces as a module compile error long after the app
+     * started cleanly.
+     *
+     * <p>{@code Class.forName} rather than a ClassLoader walk on purpose: it resolves against this test's runtime
+     * classpath, which is the same axis the runtime module compiler will see.
+     */
+    @Test
+    void moduleFacingDependenciesResolvable() {
+        // <<module-classpath-checks>> — generator writes one line per selected module_classpath entry:
+        //   assertDoesNotThrow(() -> Class.forName("org.springframework.web.bind.annotation.RestController"));
+        //                                                                                   // rest_mvc
+        //   assertDoesNotThrow(() -> Class.forName("io.swagger.v3.oas.annotations.media.Schema"));
+        //                                                                                   // swagger_annotations
+        //   assertDoesNotThrow(() -> Class.forName("org.apache.ibatis.session.SqlSessionFactory"));  // mybatis
+        //   assertDoesNotThrow(() -> Class.forName("org.mybatis.spring.SqlSessionFactoryBean"));     // mybatis
+        // (nothing selected → the no-op assertion below)
+        assertDoesNotThrow(() -> {});
+    }
+}

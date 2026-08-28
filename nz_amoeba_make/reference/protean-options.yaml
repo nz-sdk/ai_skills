@@ -1,0 +1,1035 @@
+# Protean option spec — the machine-usable catalog the skill walks to configure a generated sample.
+#
+# SSOT: org/htcom/protean/autoconfigure/ProteanProperties.java (@ConfigurationProperties "protean") plus a few
+# auxiliary keys read via @Value / @ConditionalOnProperty (mcp.session.*). Human narrative + rationale:
+# protean-capabilities.md. Full key/tier reference: protean/docs/guide/03-configuration.md.
+#
+# Record fields:
+#   key         full property (protean.*)             type     one of: boolean|enum|int|long|duration|string|string-list|map
+#   default     library default                       allowed  (enum) permitted values
+#   tier        live|future|restart (mutability)      desc     one-line explanation for a protean-novice
+#   security    note surfaced when enabling            requires other keys forced on (dependency rules)
+#   build_deps  gradle deps added when enabled         fragment code fragment triggered (templates/fragments/*)
+#   advanced    true → only ask in Advanced tier
+#   fragment_bundle  a MULTI-FILE fragment: a whole templates/fragments/<dir>/ emitted into a SUB-PACKAGE.
+#                  {dir, package, rename: false, files: [{src, to: main|test, when: <k=v, optional>}]}
+#                  `src` MAY CARRY A RELATIVE PATH (e.g. `deploy/SpecResource.java.template`). The template
+#                  directory then mirrors the emitted package tree, and the destination package is `package` plus
+#                  that directory: {{PKG}}.interfacedef.deploy. Written this way so the sub-package a file lands in
+#                  is visible from its path instead of living in a lookup table — a bundle with five sub-packages
+#                  is otherwise impossible to review.
+#                  Differs from `fragment` in three ways, all required by members that reference each other:
+#                    - classes are NOT renamed (a rename breaks the cross-references and imports)
+#                    - files land in `package`, not flat in {{PKG_PATH}}
+#                    - a member may target the TEST source set (`to: test`)
+#                  A member whose `when` is unmet is skipped; the remaining members still emit.
+#   requires_when  conditional requirement: [{when: [k=v, ...], needs: <key>, why: <reason>}] — when EVERY `when`
+#                  condition holds, `needs` must be set to a non-empty value or generation blocks. Unlike
+#                  `requires` (which forces a companion on), this cannot be auto-filled: the value is an
+#                  environment-specific path/identifier, so the user must supply it.
+#                  A `when` entry written as a BARE KEY (no `=`) means "that key is set to a non-empty value",
+#                  matching how `requires` reads a bare key.
+#                  `needs` is NOT always a `protean.*` key — when it names another namespace (e.g.
+#                  `spring.security.…`), inject it into THAT top-level block of application.yml, never under
+#                  `protean:`.
+#   options      A CAPABILITY MAY CARRY ITS OWN `options:` LIST, in exactly the record shape a group's options use
+#                  (key / type / default / desc / advanced / note / requires_when). It is for a capability that owns
+#                  a configuration namespace of its own rather than a single flag — `embedded_auth` owns
+#                  `amoeba.auth.*`, nine keys that belong to the fragment bundle it emits, not to protean.
+#                  Two consequences, both load-bearing:
+#                    - THE KEYS ARE NOT `protean.*`, so they are injected into their OWN top-level block of
+#                      application.yml (`amoeba:`), never under `protean:` — the same rule `requires_when.needs`
+#                      already follows for another namespace.
+#                    - THEY ARE ASKED IN STEP 5, with the capability that owns them, NOT in step 6's group walk.
+#                      Step 6 walks `groups:`, and these are not in a group.
+#                  Written this way so the walker needs no special case: same record, same "show the full property
+#                  key + default", same 4-per-question split.
+#
+# The skill: walk groups in order, ask each option (typed vs selection per its type), apply `requires` and
+# `requires_when`, add `build_deps`, drop `fragment`s, then inject set values into application.yml. Unset =
+# library default, left as a commented edit-point.
+#
+# TOP-LEVEL SECTIONS: `groups:` (protean.* config keys) · `capabilities:` (code-adding / gate entries) ·
+# `module_classpath:` (host jars that exist FOR THE MODULES — dependencies only, never an application.yml key).
+# Walk all three. `module_classpath` entries are keyed by `id`, NOT by `key`, precisely so they are never mistaken
+# for config to inject into yml.
+
+groups:
+
+  admin:
+    title: Admin REST surface
+    options:
+      - key: protean.admin.enabled
+        type: boolean
+        default: true
+        desc: Expose the management REST surface (GET /platform/modules, /platform/trace/*, PATCH /platform/config).
+
+  mcp:
+    title: MCP adapter (deploy entry point)
+    options:
+      - key: protean.mcp.enabled
+        type: boolean
+        default: false
+        security: >-
+          RCE surface — it compiles and hot-loads submitted sources. Off by default. Enabling with no auth is a
+          LOCAL demo only; production needs Bearer/OAuth (Spring Security) + a ModuleActionAuthorizer policy.
+        desc: Register the MCP server (POST/GET /platform/mcp + stdio) so an agent can deploy modules.
+      - key: protean.mcp.stdio
+        type: boolean
+        default: false
+        requires: [protean.mcp.enabled=true]
+        advanced: true
+        desc: Enable the stdio transport (newline-delimited JSON-RPC) for locally-spawned agents.
+      - key: protean.mcp.capture-test-output
+        type: boolean
+        default: false
+        requires: [protean.mcp.enabled=true]
+        advanced: true
+        desc: Capture stdout/stderr during gate-1 test execution and include it in failure diagnostics.
+      - key: protean.mcp.strict-schema
+        type: boolean
+        default: false
+        requires: [protean.mcp.enabled=true]
+        build_deps: ["runtimeOnly 'com.networknt:json-schema-validator:1.5.9'"]
+        advanced: true
+        desc: Full JSON-Schema validation of tool args + structured results at dispatch (degrades to a zero-dep guard if the validator jar is absent).
+      - key: protean.mcp.debug.enabled
+        type: boolean
+        default: false
+        requires: [protean.mcp.enabled=true]
+        advanced: true
+        desc: Wire the debug.* tools (JDI launch/breakpoint/evaluate/redefine, Level 3). Modules must be compiled with -g.
+      - key: protean.mcp.debug.session-idle-timeout
+        type: duration
+        default: 30m
+        advanced: true
+        desc: Auto-reclaim idle debug sessions after this duration (0/negative disables).
+      - key: protean.mcp.session.enabled
+        type: boolean
+        default: true
+        requires: [protean.mcp.enabled=true]
+        advanced: true
+        desc: Server→client notifications over SSE (tools/list_changed, message logs, resources/updated).
+      - key: protean.mcp.session.timeout
+        type: duration
+        default: 30m
+        advanced: true
+        desc: Idle timeout for an MCP streaming session.
+      - key: protean.mcp.session.replay-buffer
+        type: int
+        default: "(see guide 03)"
+        advanced: true
+        desc: Per-session replay buffer size for resumable SSE streams.
+      - key: protean.mcp.session.stream-timeout
+        type: duration
+        default: "(see guide 03)"
+        advanced: true
+        desc: Max lifetime of a single GET SSE stream before the client must reconnect.
+      - key: protean.mcp.authorization.resource
+        type: string
+        default: ""
+        requires: [protean.mcp.enabled=true]
+        fragment: SecurityConfig
+        build_deps:
+          - "implementation 'org.springframework.boot:spring-boot-starter-security'"
+          - "implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'"
+        requires_when:
+          - when: [protean.mcp.authorization.resource]
+            needs: spring.security.oauth2.resourceserver.jwt.issuer-uri
+            why: >-
+              This key drops the SecurityConfig fragment, which turns on an OAuth2 Resource Server
+              (.oauth2ResourceServer(oauth -> oauth.jwt(...))). Without a JWT decoder setting the app DOES NOT
+              START: Boot's jwtDecoderByIssuerUri resolves issuer-uri through the Environment during condition
+              evaluation and rejects the unresolvable placeholder. An empty or non-http value gets past Spring, so
+              it must be a real issuer identifier — the exact `iss` claim string the Authorization Server mints.
+              jwk-set-uri is the equivalent alternative. It is environment-specific, so ASK for it (typed) and
+              block generation if still empty; offer dropping the whole authorization block as the other way out.
+        advanced: true
+        desc: RFC 9728 protected-resource identifier (usually the MCP URL). When set, the metadata endpoint activates; the consumer's Security must permitAll it.
+        note: >-
+          protean emits this string VERBATIM in the discovery response, so it must be the EXTERNALLY visible
+          address, not a hardcoded localhost — write it as
+          http://${SERVER_HOST:localhost}:${SERVER_PORT:8080}/platform/mcp. And the metadata endpoint is registered
+          under @ConditionalOnProperty on this key, so an EMPTY value makes discovery SILENTLY DISAPPEAR instead of
+          failing loudly — keep a fallback on every placeholder here.
+      - key: protean.mcp.authorization.authorization-servers
+        type: string-list
+        default: "[]"
+        advanced: true
+        desc: Authorization Server issuer URLs that issue tokens for this resource.
+        note: >-
+          Advertised to MCP clients as WHERE TO GET A TOKEN, so this address must be reachable from BOTH sides —
+          the server (token validation) and the client (token acquisition). An internal-only hostname starts the
+          app and validates tokens fine while leaving every client unable to obtain one. Normally the same value
+          as spring.security.oauth2.resourceserver.jwt.issuer-uri: the two planes are separated by SCOPE, not by
+          issuer.
+      - key: protean.mcp.authorization.scopes-supported
+        type: string-list
+        default: "[]"
+        advanced: true
+        desc: Supported OAuth scopes (optional).
+        note: >-
+          These are **OAuth scopes** — unrelated to protean.worker.db.scopes, which names DB tenants. Two different
+          meanings of "scope" live in this file; do not cross them. When the `authorizer` capability is also
+          selected, propose [mcp.read, mcp.write, mcp.admin] so the advertised names match the fragment's mapping
+          (read→READ, write→DEPLOY/UPDATE/DELETE/APPROVE, admin→CUSTOM).
+      - key: protean.mcp.authorization.bearer-methods-supported
+        type: string-list
+        default: "[header]"
+        advanced: true
+        desc: Bearer token delivery methods (RFC 9728 bearer_methods_supported).
+
+  bridge:
+    title: Worker→main RPC bridge
+    options:
+      - key: protean.bridge.url
+        type: string
+        default: ""
+        desc: Main bridge URL a worker forwards shared-bean calls to (injected into workers).
+        advanced: true
+      - key: protean.bridge.auth-enabled
+        type: boolean
+        default: false
+        advanced: true
+        desc: Require a shared-secret bearer token on /__bridge/* (unauthenticated calls → 401).
+      - key: protean.bridge.secret
+        type: string
+        default: ""
+        advanced: true
+        desc: Shared secret for bridge auth. Blank + enabled → auto-generated per JVM and injected into workers.
+      - key: protean.bridge.auth-mode
+        type: enum
+        allowed: [token, hmac]
+        default: token
+        advanced: true
+        desc: token = static bearer; hmac = per-request HMAC-SHA256 over timestamp+nonce+body (replay/tamper defense).
+      - key: protean.bridge.hmac-window-ms
+        type: long
+        default: 30000
+        requires: [protean.bridge.auth-mode=hmac]
+        advanced: true
+        desc: HMAC mode — max accepted clock skew (ms) between worker timestamp and main clock.
+
+  gate:
+    title: Promotion gates
+    options:
+      - key: protean.gate.tests-enabled
+        type: boolean
+        default: true
+        desc: Gate ① — require the bundled JUnit test and enforce it passes (false → passes even with no tests).
+      - key: protean.gate.review-enabled
+        type: boolean
+        default: true
+        desc: Gate ② — bytecode review (built-in ForbiddenApiRule + any CodeRule beans).
+      - key: protean.gate.approval.required
+        type: boolean
+        default: false
+        advanced: true
+        desc: Human approval gate — passing installs land PENDING_APPROVAL and need POST /{id}/approve?approver= (unapproved stays unserved across restart).
+      - key: protean.gate.signature.required
+        type: boolean
+        default: false
+        requires: [protean.gate.signature.keys]
+        advanced: true
+        desc: Ed25519 signature gate — every install must be signed by a trusted key (runs first in the chain).
+      - key: protean.gate.signature.shared-lib-required
+        type: boolean
+        default: false
+        requires: [protean.gate.signature.keys]
+        advanced: true
+        desc: Require valid Ed25519 signatures on live shared-lib (put-jar) uploads.
+      - key: protean.gate.signature.keys
+        type: map
+        default: "{}"
+        advanced: true
+        desc: Trusted public keys keyId → Base64(X.509 Ed25519). Generate with ModuleSigning.generateKeyPair().
+
+  isolation:
+    title: Isolation mode (execution shape)
+    options:
+      - key: protean.isolation.mode
+        type: enum
+        allowed: [in-process, worker, container]
+        default: in-process
+        desc: >-
+          in-process = same JVM (supports data-access/shared beans/library modules); worker = separate JVM,
+          crash-isolated (needs bootJar); container = one hardened Docker container per module (needs Docker + bootJar).
+        # worker/container CANNOT inject host beans → data-access forces in-process.
+
+  module:
+    title: Module execution & shared-lib
+    options:
+      - key: protean.module.request-timeout-ms
+        type: long
+        default: 0
+        advanced: true
+        desc: Per-request module timeout in ms (0 = unlimited).
+      - key: protean.module.shared-lib-dir
+        type: string
+        default: ""
+        requires: [protean.isolation.mode=in-process]
+        advanced: true
+        desc: Static seed dir — *.jar here become an app-lifetime parent classloader for modules + compile classpath.
+      - key: protean.module.shared-lib-store-dir
+        type: string
+        default: "(tmpdir/protean-shared-libs)"
+        advanced: true
+        desc: Live put-jar store dir — runtime-uploaded jars (deploy_shared_lib) persisted here, folded onto the seed.
+      - key: protean.module.eager-shared-lib-invalidation
+        type: boolean
+        default: true
+        advanced: true
+        desc: Eagerly rebind ACTIVE modules onto a new shared-lib generation when a jar changes (false = lazy).
+      - key: protean.module.eager-shared-module-invalidation
+        type: boolean
+        default: true
+        advanced: true
+        desc: Eagerly propagate a republished LIBRARY module generation to ACTIVE dependents (false = lazy).
+      - key: protean.module.executor.pool-size
+        type: int
+        default: 2
+        advanced: true
+        desc: Per-module ProteanTaskExecutor thread-pool size (sanctioned background-work executor).
+
+  reconcile:
+    title: Startup reconcile (restart recovery)
+    options:
+      - key: protean.reconcile.compile-parallelism
+        type: int
+        default: 0
+        advanced: true
+        desc: Threads for the parallel pre-compile phase on boot (0 = auto/availableProcessors, 1 = serial).
+      - key: protean.reconcile.reuse-file-manager
+        type: boolean
+        default: true
+        advanced: true
+        desc: Reuse one javac file manager per worker thread across the parallel pre-compile (kill switch = false).
+
+  module-store:
+    title: Durable module descriptor store
+    options:
+      - key: protean.module-store.backend
+        type: enum
+        allowed: [filesystem, jdbc]
+        default: filesystem
+        desc: Where module descriptors persist (jdbc needs a DataSource). Restart reconcile reads listActive().
+        note: >-
+          jdbc DDL is vendor-adaptive via the ModuleStoreDialect SPI — built-in h2/mysql/postgresql work out of
+          the box (auto-detected, or forced with module-store.dialect). A startup self-check rejects a
+          VARCHAR-truncating dialect. Other vendors (e.g. Oracle): register a ModuleStoreDialect bean.
+      - key: protean.module-store.dialect
+        type: string
+        default: "(auto-detected from DB product name)"
+        requires: [protean.module-store.backend=jdbc]
+        advanced: true
+        desc: Force the jdbc module-store dialect id (h2 | mysql | postgresql | <custom bean id>) instead of auto-detecting.
+      - key: protean.module-store.dir
+        type: string
+        default: "(tmpdir/protean-modules)"
+        desc: Storage directory for the filesystem backend. Delete to reset deployments.
+
+  trace:
+    title: Runtime trace & metrics
+    options:
+      - key: protean.trace.enabled
+        type: boolean
+        default: true
+        advanced: true
+        desc: Record recent request traces into a ring buffer.
+      - key: protean.trace.capacity
+        type: int
+        default: 200
+        advanced: true
+        desc: Ring buffer capacity (most recent N requests).
+      - key: protean.trace.summary-window-ms
+        type: long
+        default: 60000
+        advanced: true
+        desc: Rolling window (ms) for the console SSE summary aggregate + trend.
+      - key: protean.trace.metrics.enabled
+        type: boolean
+        default: false
+        desc: Per-module aggregated request metrics (count/error-rate/latency percentiles); GET /platform/trace/metrics.
+      - key: protean.trace.metrics.latency-buckets
+        type: int
+        default: 20
+        advanced: true
+        desc: Latency histogram buckets per module (more = finer percentiles, more memory).
+      - key: protean.trace.metrics.max-modules
+        type: int
+        default: 512
+        advanced: true
+        desc: Max distinct modules tracked (least-recently-seen evicted past this).
+
+  worker:
+    title: External worker (worker/container modes)
+    # Whole group applies only when isolation.mode is worker or container.
+    requires_group: [protean.isolation.mode=worker, protean.isolation.mode=container]
+    options:
+      - key: protean.worker.modules-per-worker
+        type: int
+        default: 128
+        advanced: true
+        desc: >-
+          Packing capacity per worker/container. Same-SCOPE modules pack into a shared worker up to this many
+          (isolation boundary = scope, not module). 1 = strict one-module-per-worker. (NOTE: the old
+          "auto-provision forces this to 1" no longer holds under the scope model.)
+      - key: protean.worker.jvm-args
+        type: string-list
+        default: "[]"
+        advanced: true
+        desc: Extra JVM args prepended to each worker spawn (process/embed/sidecar tracks; e.g. -Xmx heap sizing).
+      - key: protean.worker.min-warm
+        type: int
+        default: 0
+        advanced: true
+        desc: Empty workers kept warm for reuse.
+      - key: protean.worker.auto-restart
+        type: boolean
+        default: false
+        advanced: true
+        desc: Restart a crashed worker's modules (process track).
+      - key: protean.worker.shutdown-grace-ms
+        type: long
+        default: 5000
+        advanced: true
+        desc: Grace period (ms) each worker gets to shut down (SIGTERM) before force-kill (0 = immediate).
+      - key: protean.worker.rpc-bridge
+        type: boolean
+        default: false
+        requires: [protean.bridge.url]
+        advanced: true
+        desc: Let workers call host shared beans over the RPC bridge (declare bridgedInterfaces per module).
+      - key: protean.worker.runtime
+        type: enum
+        allowed: [embed, sidecar]
+        default: embed
+        advanced: true
+        requires_when:
+          - when: [protean.worker.runtime=sidecar, protean.isolation.mode=worker]
+            needs: protean.worker.sidecar.jar
+            why: >-
+              The process track builds its launch prefix from worker.sidecar.jar at the first worker spawn
+              (SidecarWorkerRuntime.processLaunchPrefix) and throws IllegalStateException when it is blank —
+              the sample would fail on its first deploy, not at startup. sidecar.image is unused here.
+          - when: [protean.worker.runtime=sidecar, protean.isolation.mode=container]
+            needs: protean.worker.sidecar.image
+            why: >-
+              The container track needs worker.sidecar.image (SidecarWorkerRuntime.containerLaunchSpec throws
+              when blank); the image bundles app + shared-api, so no host bootJar is exploded and
+              sidecar.jar is unused here.
+        desc: embed = explode this app's bootJar; sidecar = launch an external worker artifact.
+      - key: protean.worker.datasource.url
+        type: string
+        default: ""
+        advanced: true
+        desc: Worker-wide manual DB scope (used when db.auto-provision is off).
+      # --- container track ---
+      - key: protean.worker.container.image
+        type: string
+        default: eclipse-temurin:21-jdk
+        requires: [protean.isolation.mode=container]
+        advanced: true
+        desc: Base image for module containers.
+      - key: protean.worker.container.jar
+        type: string
+        default: ""
+        requires: [protean.isolation.mode=container]
+        advanced: true
+        desc: Explicit worker jar path (empty = auto-detect the -boot.jar in build/libs).
+      - key: protean.worker.container.memory
+        type: string
+        default: 512m
+        requires: [protean.isolation.mode=container]
+        advanced: true
+        desc: cgroup memory cap per container (container workers launch with -XX:MaxRAMPercentage=75.0).
+      - key: protean.worker.container.pids-limit
+        type: long
+        default: 1024
+        requires: [protean.isolation.mode=container]
+        advanced: true
+        desc: PID limit (fork-bomb protection).
+      - key: protean.worker.container.network
+        type: string
+        default: ""
+        requires: [protean.isolation.mode=container]
+        advanced: true
+        desc: Network for egress isolation (empty = Docker default).
+      - key: protean.worker.container.seccomp
+        type: string
+        default: ""
+        requires: [protean.isolation.mode=container]
+        advanced: true
+        desc: seccomp profile path (empty = Docker default).
+      - key: protean.worker.container.auto-restart
+        type: boolean
+        default: false
+        requires: [protean.isolation.mode=container]
+        advanced: true
+        desc: Restart a crashed container's modules.
+      - key: protean.worker.container.db-host
+        type: string
+        default: host.docker.internal
+        requires: [protean.isolation.mode=container]
+        advanced: true
+        desc: Hostname rewrite target so a container reaches the host DB.
+      # --- DB auto-provisioning (SCOPE model) ---
+      - key: protean.worker.db.auto-provision
+        type: boolean
+        default: false
+        requires: [protean.isolation.mode=worker|container, protean.worker.db.dialect, protean.worker.db.admin-url, protean.worker.db.admin-username, protean.worker.db.admin-password]
+        advanced: true
+        desc: >-
+          Turn deploy into "select a SCOPE" (a tenant/domain grouping = the unit of DB provisioning AND
+          worker/container packing). Same-scope modules SHARE one provisioned DB and pack together; scopes are
+          mutually isolated. WORKER/CONTAINER ONLY (in-process rejects a scoped module). Each deployed module MUST
+          declare a `scope` (see the scope contract in protean-capabilities.md).
+        warn: >-
+          Admin account (admin-url/username/password) needs CREATE DATABASE/USER + GRANT (MySQL) or
+          CREATE SCHEMA/ROLE (Postgres); docker DB → generate that admin in an init SQL. A module with no scope
+          (or an unknown/closed scope) is REJECTED at deploy/reconcile. Provisioning does NOT force capacity=1 —
+          packing is by scope up to modules-per-worker (default 128).
+      - key: protean.worker.db.scopes
+        type: string-list
+        default: "[]"
+        advanced: true
+        desc: >-
+          Startup seed allowlist of scope names (tenants) created at boot. Empty → a single implicit "default"
+          scope (still must be named explicitly at deploy). Operators add more via the scope admin API; deployers
+          only select. A module's `scope` must be one of the known ACTIVE scopes.
+        note: >-
+          These are **DB tenants** — unrelated to protean.mcp.authorization.scopes-supported, which names OAuth
+          scopes. Two different meanings of "scope" live in this file; do not cross them.
+      - key: protean.worker.db.allow-destroy
+        type: boolean
+        default: false
+        advanced: true
+        desc: Must be true to permit the irreversible scope destroy (DROP DATABASE/SCHEMA CASCADE); detach is data-safe and always allowed.
+      - key: protean.worker.db.dialect
+        type: enum
+        allowed: [mysql, postgresql]
+        default: ""
+        advanced: true
+        desc: Vendor for scope provisioning (or register a custom DbDialect bean, see fragment).
+        fragment: DbDialect
+      - key: protean.worker.db.admin-url
+        type: string
+        default: ""
+        advanced: true
+        desc: Admin JDBC URL used to create/drop scopes.
+      - key: protean.worker.db.admin-username
+        type: string
+        default: ""
+        advanced: true
+        desc: Admin DB username.
+      - key: protean.worker.db.admin-password
+        type: string
+        default: ""
+        advanced: true
+        desc: Admin DB password.
+      # (no deprovision-on-undeploy key — removed from protean; undeploy never tears down a scope,
+      #  teardown is operator-driven via the scope admin API: detach (data-safe) / destroy.)
+      # --- sidecar runtime ---
+      - key: protean.worker.sidecar.jar
+        type: string
+        default: ""
+        requires: [protean.worker.runtime=sidecar]
+        advanced: true
+        desc: Sidecar worker jar (GitHub Packages -worker classifier).
+      - key: protean.worker.sidecar.image
+        type: string
+        default: ""
+        requires: [protean.worker.runtime=sidecar]
+        advanced: true
+        desc: Sidecar worker OCI image (GHCR protean-worker).
+      - key: protean.worker.sidecar.shared-api
+        type: string
+        default: ""
+        requires: [protean.worker.runtime=sidecar]
+        advanced: true
+        desc: Consumer-curated shared-type jar for worker compilation.
+      # --- worker admin control-plane auth ---
+      - key: protean.worker.admin-auth.enabled
+        type: boolean
+        default: false
+        advanced: true
+        desc: Require auth on mutating /__admin/* worker calls (hardens the container track).
+      - key: protean.worker.admin-auth.secret
+        type: string
+        default: ""
+        advanced: true
+        desc: Shared secret. Blank + enabled → auto-generated per JVM and injected into workers.
+      - key: protean.worker.admin-auth.mode
+        type: enum
+        allowed: [hmac, token]
+        default: hmac
+        advanced: true
+        desc: hmac (per-request HMAC, replay/tamper defense) or token (static bearer).
+      - key: protean.worker.admin-auth.hmac-window-ms
+        type: long
+        default: 30000
+        advanced: true
+        desc: hmac mode — max accepted clock skew (ms).
+
+# Capabilities that are NOT a single config key — they add code (a bean) and/or drive a sub-flow.
+capabilities:
+  - id: data_access
+    title: Data-access (host DataSource injected into modules)
+    requires: [protean.isolation.mode=in-process]
+    subflow: db          # see db-vendors.yaml (vendor + existing-server/docker)
+    desc: A deployed module @Autowires the host JdbcTemplate/DataSource (in-process only). Drives the DB sub-flow.
+  - id: custom_mcp_tool
+    title: Custom MCP tool (McpTool SPI)
+    requires: [protean.mcp.enabled=true]
+    fragment: CustomMcpTool
+    name_input: true     # ask the user to TYPE the tool name (e.g. myapp.query)
+    desc: A @Component McpTool listed alongside built-ins in tools/list.
+  - id: builtin_tool_override
+    title: Override a built-in MCP tool
+    requires: [protean.mcp.enabled=true]
+    fragment: BuiltinToolOverride
+    desc: Replace a protean.* built-in via registerTool while delegating to the original.
+  - id: module_source_tools
+    title: Module source read-back tools (amoeba.list_module_files / search_module_source / export_module_source)
+    requires: [protean.mcp.enabled=true]
+    fragment_bundle:
+      dir: source
+      package: "{{PKG}}.source"
+      rename: false
+      files:
+        - { src: ModuleSourceLayout.java.template,        to: main }
+        - { src: ModuleSourceResolver.java.template,      to: main }
+        - { src: SourceToolSchemas.java.template,         to: main }
+        - { src: BuildFileWriter.java.template,           to: main }
+        - { src: ListModuleFilesTool.java.template,       to: main }
+        - { src: SearchModuleSourceTool.java.template,    to: main }
+        - { src: ExportModuleSourceTool.java.template,    to: main }
+        - { src: SourceFixtures.java.template,            to: test }
+        - { src: SourceToolAssertions.java.template,      to: test }
+        - { src: ModuleSourceLayoutTest.java.template,    to: test }
+        - { src: ListModuleFilesToolTest.java.template,   to: test }
+        - { src: SearchModuleSourceToolTest.java.template, to: test }
+        - { src: ExportModuleSourceToolTest.java.template, to: test }
+        - { src: SourceToolRegistrationTest.java.template, to: test }
+        - { src: ExportedTreeCompilesTest.java.template,  to: test }
+        - { src: RealDescriptorLayoutTest.java.template,  to: test }
+    desc: >-
+      Three @Component McpTools that make a DEPLOYED module readable again. protean's built-in
+      protean.get_module_source can only return the descriptor's flat FQCN-to-text maps, and it omits the
+      `resources` map entirely — which is where mapper XML and the sealed META-INF/protean/interface.json live, so
+      those had no read path at all. These add: amoeba.list_module_files (paths + sizes, NO contents, so asking
+      "what is in this module" stops costing the whole module), amoeba.search_module_source (server-side regex,
+      returning only matching lines), and amoeba.export_module_source (the same files keyed by the path they would
+      occupy in a Gradle/Java project, so writing the map to disk yields a tree that compiles and opens in an IDE).
+    note: >-
+      SELF-CONTAINED BY DESIGN. It shares no code with the interface_spec_validator bundle even though both hold
+      hand-built Jackson schemas: SourceToolSchemas declares its own MODULE_ID_PATTERN rather than importing one,
+      because that bundle is a separate optional capability and an import would make these tools fail to compile
+      whenever it was not selected. One duplicated string is cheaper than a generation-order dependency between two
+      independent capabilities.
+
+      ONE LAYOUT, THREE TOOLS. ModuleSourceLayout is the single place mapping the descriptor's three source maps
+      onto src/main/java · src/test/java · src/main/resources. Keep it that way: the paths list emits are exactly
+      the paths export accepts in its `paths` argument, and duplicating the mapping per tool would let those drift
+      and silently break that flow.
+
+      AUTHORIZATION IS ALREADY HANDLED, and that is load-bearing. A consumer McpTool's default action() is CUSTOM,
+      which the `authorizer` capability's policy puts behind mcp.admin — the same bucket as config.set and
+      deploy_shared_lib. All three tools therefore OVERRIDE action() to return READ (and annotations() to
+      readOnly()), so listing a file needs mcp.read rather than admin rights. Two tests pin this
+      (SourceToolRegistrationTest#everyToolClassifiesAsReadNotCustom,
+      ListModuleFilesToolTest#classifiesAsReadSoItStaysOnMcpRead) — do not drop the override, or read-only browsing
+      silently starts demanding admin.
+
+      TESTS — ALL PURE UNIT TESTS. Not one @SpringBootTest, so `./gradlew test` stays offline: no context, no
+      DataSource, no port. Two of the sixteen self-skip rather than fail, and both skips are deliberate:
+        · RealDescriptorLayoutTest and ExportedTreeCompilesTest read a descriptor a REAL deploy produced, committed
+          OUTSIDE the Gradle project at ../../document/testProject/generated-sample. Absent → skipped, because the
+          generated project must stay buildable on its own.
+        · ExportedTreeCompilesTest additionally skips when swagger-annotations is missing. The committed sample
+          module annotates its DTOs with @Schema, so its exported tree only compiles when the `swagger_annotations`
+          module_classpath entry is selected. This is NOT expressed as a `requires` on the capability: the three
+          tools have no Swagger dependency whatsoever — one test FIXTURE does. Making the capability require it
+          would force an unrelated jar onto every consumer's module classpath. The test probes
+          io.swagger.v3.oas.annotations.media.Schema by name (Class.forName, never an import) so the source
+          compiles either way.
+      The bundle adds no build_deps at all: Jackson comes with spring-boot-starter-web and Mockito with
+      spring-boot-starter-test; javac comes from the JDK the sample already requires.
+  - id: code_rule
+    title: Custom code-review rule (CodeRule SPI)
+    requires: [protean.gate.review-enabled=true]
+    fragment: CodeRule
+    desc: A @Component CodeRule that runs at gate ② alongside ForbiddenApiRule.
+  - id: secured_mcp
+    title: Secured MCP control plane (Spring Security OAuth2 Resource Server)
+    requires: [protean.mcp.enabled=true, protean.mcp.authorization.resource]
+    desc: >-
+      The user-facing GATE for "protect the MCP surface" — without it the only way in is stumbling onto the
+      advanced protean.mcp.authorization.resource key in step 6. Offer it in step 5 right after mcp.enabled=true.
+      It declares NO fragment on purpose: the wiring all hangs off that option key (fragment SecurityConfig +
+      the two security starters in its build_deps + the issuer-uri requires_when). Re-declaring the fragment here
+      would emit SecurityConfig.java twice. Selecting this asks for the resource identifier, which in turn forces
+      the JWT issuer prompt. Pair it with the `authorizer` capability for per-action policy on top.
+  - id: embedded_auth
+    title: Embedded Authorization Server — this app issues its own mcp.* tokens (DEV / standalone)
+    requires: [protean.mcp.enabled=true, protean.mcp.authorization.resource, secured_mcp]
+    subflow: authstore        # see auth-stores.yaml (memory | jdbc)
+    default: false            # ★ OFF unless explicitly chosen — see `security` below
+    build_deps:
+      - "implementation 'org.springframework.boot:spring-boot-starter-oauth2-authorization-server'"
+      # spring-jdbc is needed even for store=memory. UserStoreConfig deliberately carries BOTH stores in one file
+      # so an operator can switch with one property, and the jdbc half references JdbcUserDetailsManager ->
+      # JdbcDaoSupport. Without this a memory-store project does not compile at all (verified on a generated
+      # sample: "cannot access JdbcDaoSupport"). data_access brings the same starter, so this is a no-op then.
+      - "implementation 'org.springframework.boot:spring-boot-starter-jdbc'"
+    # The amoeba.auth.* surface this capability owns. `enabled` is implied by selecting the capability and `store`
+    # + `users` come from the authstore sub-flow, so the six here are the rest — ASK THEM IN STEP 5, right after the
+    # store, and inject them into the TOP-LEVEL `amoeba:` block (they are not protean.* keys).
+    options:
+      - key: amoeba.auth.access-token-ttl
+        type: duration
+        default: 1h
+        desc: How long an issued mcp.* token stays valid.
+        note: >-
+          THIS IS ALSO THE RE-LOGIN INTERVAL, because there is no refresh token to renew with. The MCP client is
+          registered public + PKCE (ClientAuthenticationMethod.NONE, authorization_code only), and Spring
+          Authorization Server refuses refresh tokens to public clients — OAuth2RefreshTokenGenerator returns null,
+          and the REFRESH_TOKEN grant is not registered at all. The service client uses client_credentials, which
+          has no refresh token by specification. So when this expires a human logs in through the browser again.
+          Raising it buys convenience and extends exactly as far the window in which a stolen token still works;
+          there is no revocation endpoint here either. Unrelated to protean.mcp.session.timeout and
+          protean.mcp.debug.session-idle-timeout, which time out MCP STREAMING SESSIONS, not tokens.
+      - key: amoeba.auth.jwks-path
+        type: string
+        default: data/amoeba-auth-jwks.json
+        desc: File holding the RSA key pair this app signs its tokens with. Created on first start if absent.
+        security: >-
+          CONTAINS THE PRIVATE KEY. Anyone who can read this file can mint an mcp.admin token for this app — which
+          is precisely why embedded auth is dev/standalone only: a deployed module runs in the same JVM with no
+          sandbox and can read it. The generated .gitignore covers `data/`; keep whatever path you choose inside a
+          gitignored directory, and never bake it into an image.
+        note: >-
+          Persisted rather than generated per boot on purpose: a fresh key invalidates every token already issued,
+          so a restart would log everyone out. Deleting the file is therefore the closest thing to a revoke-all.
+      - key: amoeba.auth.mcp-client-id
+        type: string
+        default: nz-mcp-agent
+        desc: client_id of the public client MCP clients (Claude Code, mcp-remote) authenticate as.
+        note: >-
+          A fixed literal, NOT interpolated from the sample name — the client is registered in this app's own
+          RegisteredClientRepository, so the id only has to match what the MCP client is configured to send.
+      - key: amoeba.auth.mcp-redirect-uris
+        type: string-list
+        default: "[http://127.0.0.1:3334/oauth/callback]"
+        desc: Callback URLs the authorization_code flow is allowed to return to.
+        note: >-
+          COMPARED BYTE FOR BYTE. Spring Authorization Server does not implement RFC 8252 loopback port
+          wildcarding, so the client's callback port has to be pinned to a value listed here — a mismatch fails at
+          /oauth2/authorize, before any login form appears, which reads like a broken server rather than a
+          misconfigured client. Change this and the client's configured port together, or not at all.
+      - key: amoeba.auth.service-client-id
+        type: string
+        default: ""
+        advanced: true
+        desc: client_id of an optional confidential client for scripts/CI (client_credentials). Empty = not registered.
+        note: >-
+          Machine callers only. Give it mcp.write and CI can deploy modules, which is worth deciding deliberately
+          rather than by default — hence empty.
+        requires_when:
+          - when: [amoeba.auth.service-client-id]
+            needs: amoeba.auth.service-client-secret
+            why: >-
+              EmbeddedAuthServerConfig registers this client only when BOTH id and secret are non-blank
+              (`if (!serviceClientId.isBlank() && !serviceClientSecret.isBlank())`). Half-configured, it registers
+              NOTHING and says nothing — deliberate, since credentials nobody can authenticate as would be worse,
+              but from the outside it looks like the client vanished. So the pair is completed at generation time
+              instead of discovered when CI first gets a 401.
+      - key: amoeba.auth.service-client-secret
+        type: string
+        default: ""
+        advanced: true
+        desc: Secret for the service client. Stored as {noop} in application.yml, so treat the file as a credential.
+    fragment_bundle:
+      dir: auth
+      package: "{{PKG}}.auth"
+      rename: false
+      files:
+        - { src: EmbeddedAuthProperties.java.template,   to: main }
+        - { src: EmbeddedAuthServerConfig.java.template, to: main }
+        # Carries BOTH user stores, each behind @ConditionalOnProperty(amoeba.auth.store). Emitted whichever
+        # store the authstore sub-flow picks, so an operator can switch with one property instead of
+        # regenerating. See auth-stores.yaml.
+        - { src: UserStoreConfig.java.template,          to: main }
+        - { src: LoginSuccessHandler.java.template,      to: main }
+        - { src: EmbeddedAuthFlowTest.java.template,     to: test }
+        - { src: EmbeddedAuthDisabledTest.java.template, to: test }
+    security: >-
+      ★ THE SIGNING KEY MOVES INSIDE THE MCP RCE SURFACE. protean provides no sandbox and documents that as an
+      explicit non-goal (docs/guide/12-security: module code holds every permission the host JVM has —
+      filesystem, network, other beans; ForbiddenApiRule only blocks accidental APIs like System.exit). So a
+      module deployed with mcp.write can read the key and mint itself mcp.admin, bypassing the scope separation
+      SecurityConfig and ModuleActionAuthorizer enforce. Two things bound the damage and both are generated
+      deliberately: only mcp.* scopes are ever registered, and every token is audience-locked to this app's
+      resource identifier. It stops being bounded the moment another service trusts this issuer. Surface this
+      verbatim when offering the capability — do not summarise it away.
+    desc: >-
+      Makes the app its own Authorization Server as well as a Resource Server: browser login + authorization_code
+      /PKCE, so it runs STANDALONE before a shared IdP exists. Answers "we cannot stand up a group auth server
+      yet". Generates a chain at @Order(0) matching only the AS endpoints, leaving secured_mcp's @Order(1)/@Order(2)
+      numbering untouched (renumbering them would also reorder the load-bearing /platform/** rules), and adds the
+      login form to the @Order(2) chain, which already matches /login.
+    note: >-
+      Two interactions the generator must handle. (1) OAUTH_ISSUER_URI becomes THIS app's own base URL — fill it
+      in rather than asking again, and pin it: the AS must not derive the issuer per-request or the 'iss' varies
+      by the URL a caller used while the Resource Server half checks one fixed string. (2) The generated config
+      declares a local JwtDecoder bean, which backs off Boot's issuer-uri auto-configuration wholesale (its
+      JwtDecoderConfiguration is @ConditionalOnMissingBean(JwtDecoder) at class level) — that is what avoids the
+      app HTTP-fetching its own discovery document. Attach JwtValidators.createDefaultWithIssuer explicitly,
+      because OAuth2AuthorizationServerConfiguration.jwtDecoder validates the signature only.
+    verify: >-
+      The generated EmbeddedAuthFlowTest logs in, completes PKCE, and then calls /platform/mcp with the resulting
+      token. That last hop is the point: issuing and validating are separate halves here, and a test that stopped
+      at the token endpoint would still pass if the Resource Server rejected every token. EmbeddedAuthDisabledTest
+      is its counterpart — it asserts the OFF default really is off (no beans, no endpoints, no login form, and
+      the control plane still 401s), because an untested default is a default that drifts.
+  - id: authorizer
+    title: MCP authorization policy (ModuleActionAuthorizer SPI)
+    requires: [protean.mcp.enabled=true]
+    fragment: ModuleActionAuthorizer
+    build_deps:
+      - "implementation 'org.springframework.boot:spring-boot-starter-security'"
+    desc: >-
+      Replace the permissive default with a per-action policy (@ConditionalOnMissingBean). Decides all seven
+      ModuleAction values explicitly — CUSTOM (config.set / deploy_shared_lib / scope.*) and DEBUG included, which
+      the permissive default lets through. Decides on OAuth SCOPES read off the Authentication (SCOPE_mcp.*), so it
+      needs spring-security-core on the classpath — hence the build_dep. It does NOT require
+      oauth2-resource-server: bring `secured_mcp` for the supported chain, or wire your own authenticating filter
+      chain. With no chain at all every caller is scope-less and the policy denies everything (see the step 7
+      "authorizer needs authentication" check).
+    note: >-
+      Guards the MCP surface ONLY. protean calls authorize() from exactly one place (McpDispatcher), so the
+      /platform/** admin REST controllers are a SECOND deploy path that never reaches this bean — gate those in
+      the security filter chain itself (secured_mcp's SecurityConfig does, by HTTP method).
+  - id: interface_spec_validator
+    title: Interface-driven module authoring (declare the contract, generate the skeleton, enforce it everywhere)
+    requires: [swagger_annotations]
+    build_deps:
+      - "implementation 'com.networknt:json-schema-validator:1.5.9'"
+    fragment_bundle:
+      dir: interfacedef
+      package: "{{PKG}}.interfacedef"
+      rename: false
+      files:
+        # -- the contract itself: plain library code, no Spring, no protean, no MCP -----------------------
+        - { src: InterfaceSpec.java.template,                       to: main }
+        - { src: InterfaceSpecValidator.java.template,              to: main }
+        - { src: DraftStore.java.template,                          to: main }
+        - { src: InterfaceSpecValidatorTest.java.template,          to: test }
+        - { src: DraftStoreTest.java.template,                      to: test }
+        - { src: SpecFixtures.java.template,                        to: test }
+        # -- generator: spec -> the module's Java skeleton -----------------------------------------------
+        - { src: gen/JavaNames.java.template,                       to: main }
+        - { src: gen/GeneratedFile.java.template,                   to: main }
+        - { src: gen/SkeletonBundle.java.template,                  to: main }
+        - { src: gen/DtoWriter.java.template,                       to: main }
+        - { src: gen/ControllerWriter.java.template,                to: main }
+        - { src: gen/ServiceWriter.java.template,                   to: main }
+        - { src: gen/MyBatisSkeletonWriter.java.template,           to: main }
+        - { src: gen/ContractTestWriter.java.template,              to: main }
+        - { src: gen/SkeletonGenerator.java.template,               to: main }
+        - { src: gen/GeneratedSourceCompiler.java.template,         to: test }
+        - { src: gen/SkeletonGeneratorTest.java.template,           to: test }
+        - { src: gen/ServiceLayerOptionTest.java.template,          to: test }
+        # -- renderers: spec -> human doc / OpenAPI ------------------------------------------------------
+        - { src: render/MarkdownRenderer.java.template,             to: main }
+        - { src: render/OpenApiRenderer.java.template,              to: main }
+        - { src: render/MarkdownRendererTest.java.template,         to: test }
+        - { src: render/OpenApiRendererTest.java.template,          to: test }
+        # -- L3: promotion gate 2. The only layer no deploy path can bypass ------------------------------
+        - { src: gate/InterfaceContractRule.java.template,          to: main, when: protean.gate.review-enabled=true }
+        - { src: gate/BytecodeCompiler.java.template,               to: test, when: protean.gate.review-enabled=true }
+        - { src: gate/InterfaceContractRuleTest.java.template,      to: test, when: protean.gate.review-enabled=true }
+        # -- L1 + the agent-facing tools ----------------------------------------------------------------
+        - { src: mcp/InterfaceSpecSchema.java.template,             to: main, when: protean.mcp.enabled=true }
+        - { src: mcp/DefineInterfaceTool.java.template,             to: main, when: protean.mcp.enabled=true }
+        - { src: mcp/GetInterfaceDocumentTool.java.template,        to: main, when: protean.mcp.enabled=true }
+        - { src: mcp/InterfaceSpecSchemaTest.java.template,         to: test, when: protean.mcp.enabled=true }
+        - { src: mcp/DefineInterfaceToolTest.java.template,         to: test, when: protean.mcp.enabled=true }
+        # -- L2: deploy-time enforcement, installed over the built-in tools ------------------------------
+        - { src: deploy/SpecResource.java.template,                 to: main, when: protean.mcp.enabled=true }
+        - { src: deploy/ProbeGenerator.java.template,               to: main, when: protean.mcp.enabled=true }
+        - { src: deploy/MapperConsistencyChecker.java.template,     to: main, when: protean.mcp.enabled=true }
+        - { src: deploy/InterfaceVerifier.java.template,            to: main, when: protean.mcp.enabled=true }
+        - { src: deploy/InterfaceDeployPreparer.java.template,      to: main, when: protean.mcp.enabled=true }
+        - { src: deploy/SpecBearingDeployTool.java.template,        to: main, when: protean.mcp.enabled=true }
+        - { src: deploy/SpecGuardTool.java.template,                to: main, when: protean.mcp.enabled=true }
+        - { src: deploy/InterfaceToolRegistrar.java.template,       to: main, when: protean.mcp.enabled=true }
+        - { src: deploy/ProbeGeneratorTest.java.template,           to: test, when: protean.mcp.enabled=true }
+        - { src: deploy/MapperConsistencyCheckerTest.java.template, to: test, when: protean.mcp.enabled=true }
+        - { src: deploy/InterfaceVerifierTest.java.template,        to: test, when: protean.mcp.enabled=true }
+        - { src: deploy/InterfaceDeployPreparerTest.java.template,  to: test, when: protean.mcp.enabled=true }
+        - { src: deploy/SpecBearingDeployToolTest.java.template,    to: test, when: protean.mcp.enabled=true }
+        - { src: deploy/SpecGuardToolTest.java.template,            to: test, when: protean.mcp.enabled=true }
+    desc: >-
+      Turns module authoring around. Instead of an agent writing free-form Java and the platform reconstructing the
+      contract afterwards, a module DECLARES an InterfaceSpec first and the server GENERATES the DTO / controller /
+      service / Mapper skeleton from it; the author then fills in one file, the service implementation. Because the
+      skeleton is a function of the spec, its routes and types cannot drift from what was declared. Three
+      enforcement layers, each catching what the one before it cannot — L1 (mcp/InterfaceSpecSchema + networknt)
+      rejects the wrong SHAPE, a misspelled type or a missing property. L2 (InterfaceSpecValidator + deploy/*)
+      rejects the wrong MEANING: a path variable with no matching parameter, a Mapper whose XML does not match its
+      interface, a declared route the installed module does not actually serve. L3 (gate/InterfaceContractRule at
+      promotion gate 2) rejects the wrong BYTECODE and is the ONLY layer no deploy path can bypass, the admin REST
+      surface included. Also renders the spec to a markdown contract document and to OpenAPI 3.0.3, both pure
+      functions of the spec, so neither can disagree with what was deployed.
+    note: >-
+      ★ requires swagger_annotations, AND THAT IS A PRODUCT REQUIREMENT, NOT A TEST DETAIL. The generator emits the
+      annotations UNCONDITIONALLY — gen/DtoWriter writes `import io.swagger.v3.oas.annotations.media.Schema` into
+      every DTO, gen/ControllerWriter adds @Operation/@Parameter to every handler, gen/MyBatisSkeletonWriter
+      annotates every row type — and gate/InterfaceContractRule then REJECTS a field that carries no @Schema. So the
+      description channel is the annotations: without that jar on the module-facing host classpath, every module
+      deployed through amoeba.define_interface fails to compile at its FIRST DEPLOY, long after the app started
+      cleanly. This is the coupling the mybatis entry warns about, seen from the other side — here it is not
+      optional, so it is a hard `requires` rather than a prompt. Selecting this capability must force
+      module_classpath `swagger_annotations` on.
+
+      SUPERSEDES THE OLD 5-FILE BUNDLE. This capability used to emit only InterfaceSpec + InterfaceSpecValidator +
+      a ValidateInterfaceTool worked example. That tool is GONE: amoeba.define_interface performs the same
+      validation and then keeps the draft, so shipping both would list two tools differing only in whether the
+      result is stored. A regenerated project loses <name>.validate_interface and gains amoeba.define_interface.
+
+      TOOL NAMES ARE PREFIXED "amoeba.", NOT "{{NAME}}." — the same convention module_source_tools follows. These
+      are one product's tools rather than one project's, so the prefix stays stable across generated samples.
+
+      networknt IS A build_dep HERE AT implementation SCOPE, WHICH IS NOT WHAT strict-schema GIVES YOU.
+      protean.mcp.strict-schema adds the same jar as runtimeOnly — enough for protean to validate tool arguments at
+      dispatch, NOT enough to compile mcp/InterfaceSpecSchemaTest, which imports com.networknt.schema.* to check the
+      L1 schema with the very engine the server uses. When both are selected emit ONE line at implementation; the
+      wider scope wins and a second declaration is noise.
+
+      MEMBER GATING IS BY LAYER. The root contract classes, gen/ and render/ are plain library code and always
+      emit. gate/* needs review-enabled, since a CodeRule bean with the gate off is dead weight. mcp/* and deploy/*
+      need mcp.enabled, because L2 exists to be INSTALLED OVER the built-in deploy tools —
+      deploy/InterfaceToolRegistrar is an ApplicationRunner calling registerTool, and with no MCP server there is
+      nothing to register onto.
+
+      WHY InterfaceToolRegistrar IS A RUNNER AND NOT FOUR BEANS: McpDispatcher builds its map with
+      "for (McpTool t : beans) tools.put(t.name(), t)", so two beans sharing a name leave the winner to bean
+      ordering. Registering explicitly at startup makes the override deterministic. Do not simplify it back.
+  - id: unload_callback
+    title: Module unload hook (ModuleUnloadCallback SPI)
+    requires: [protean.isolation.mode=in-process]
+    fragment: ModuleUnloadCallback
+    desc: Clean up out-of-context resources just before a module's context closes.
+  - id: db_dialect
+    title: Custom DB dialect (DbDialect SPI)
+    requires: [protean.worker.db.auto-provision=true]
+    fragment: DbDialect
+    desc: >-
+      Add/override a per-vendor SCOPE provisioning strategy (createScope/dropScope/detachScope/destroyScope/
+      scopedUrl); id() overrides a built-in (mysql/postgresql). Not the module store (that's module_store_dialect).
+  - id: scope_admin
+    title: Scope lifecycle admin (protean.scope_* MCP tools + /platform/scopes REST)
+    requires: [protean.worker.db.auto-provision=true]
+    desc: >-
+      NOT a code fragment — a runtime surface active under auto-provision. MCP tools protean.scope_{list,get,
+      create,open,close,detach,destroy} (always listed under mcp.enabled, gated at call time) + REST
+      /platform/scopes/*. Operators create/close/reopen scopes, detach (data-safe) or destroy (needs allow-destroy
+      + confirm=<name>). Document in README, don't generate code.
+  - id: module_store_dialect
+    title: Custom module-store dialect (ModuleStoreDialect SPI)
+    requires: [protean.module-store.backend=jdbc]
+    fragment: ModuleStoreDialect
+    desc: >-
+      Add/override the jdbc module-store's per-vendor DDL (large-text column + auto-increment). Built-in
+      h2/mysql/postgresql already work; register this for another vendor (e.g. Oracle) or to override a built-in
+      by returning its id. Distinct from db_dialect (that provisions per-module DBs; this shapes the store schema).
+
+# ---------------------------------------------------------------------------------------------------------------
+# Host jars that exist FOR THE DEPLOYED MODULES, not for this app.
+#
+# WHY THE HOST: a module deploys as SOURCE and RuntimeCompiler builds its classpath from java.class.path, which it
+# inherits from the host JVM. So every package a module's source imports must resolve on the HOST classpath — there
+# is no per-module dependency declaration. Getting this wrong surfaces late: the app starts fine and the FIRST
+# DEPLOY fails with a compile error.
+#
+# NOT protean.* config: these entries add gradle dependencies and NEVER write an application.yml key. They are
+# keyed by `id` (like capabilities), not by `key`.
+#
+# NO ENTRY HERE RESTRICTS WHAT A MODULE MAY CONTAIN. Nothing in this section creates a gate rule or a forbidden
+# API; leaving an entry off is not a prohibition, it only means that jar is absent. So e.g. selecting `rest_mvc`
+# does not forbid streaming (SSE works — see rest_mvc's note), and NOT selecting an entry never blocks a shape of
+# API. The only enforcement in protean is promotion gate 2, whose built-in ForbiddenApiRule bans exactly four
+# calls (System.exit, Runtime.{halt,exec,addShutdownHook}, ProcessBuilder.start). See protean-capabilities.md
+# "Streaming & long-lived endpoints".
+#
+# MUST be `implementation`. `compileOnly` never reaches java.class.path, and `runtimeOnly` is fine for a jar only
+# the HOST calls but is misleading here — write them all as `implementation` so the intent reads correctly.
+#
+# The generated build.gradle keeps these in their own commented block so a reader can tell them apart from the
+# host app's own dependencies. See templates/build.gradle.template.
+# ---------------------------------------------------------------------------------------------------------------
+module_classpath:
+  title: Module-facing host classpath (what deployed module sources may import)
+  entries:
+    - id: rest_mvc
+      title: Modules are REST controllers (Spring MVC)
+      type: boolean
+      default: true
+      build_deps:
+        - "implementation 'org.springframework.boot:spring-boot-starter-web'"
+      desc: >-
+        Module sources carry @RestController / @GetMapping and friends. protean's whole job is registering those
+        routes at runtime (DynamicEndpointRegistrar), so turning this OFF is exceptional — only for a sample whose
+        modules expose no HTTP surface at all. Already added unconditionally by build.gradle.template; the entry
+        exists so the choice is visible rather than implicit.
+      note: >-
+        This does NOT restrict a module to plain request/response. **SSE works**: SseEmitter ships in
+        spring-boot-starter-web, protean itself streams with it (MCP session stream, /platform/traces/stream), the
+        dynamic registrar keys off the mapping and never looks at the return type, and module.request-timeout-ms
+        does not kill an async stream. **WebSocket/STOMP is NOT supported** for module routes — and not because of
+        this entry: the registrar can only register a RequestMappingInfo, while WS handlers live in a different
+        registry, so there is no dynamic-registration path at all. Adding spring-boot-starter-websocket changes
+        nothing; put a WS endpoint in the HOST app instead. Full detail + the four SSE pitfalls (proxy buffering
+        under worker/container, the verify-probe hang, unload leaks, executor pool size) live in
+        protean-capabilities.md "Streaming & long-lived endpoints" — surface them when a user asks for streaming.
+    - id: swagger_annotations
+      title: Module sources carry Swagger/OpenAPI descriptions
+      type: boolean
+      default: false
+      build_deps:
+        - "implementation 'io.swagger.core.v3:swagger-annotations:2.2.22'"
+      desc: >-
+        Needed when a module's source uses @Schema / @Operation to describe its I/O. Pick this whenever a generator
+        writes module skeletons that annotate DTOs and controllers.
+      note: >-
+        NOT a protean requirement — protean itself does not depend on swagger. Without this jar an annotated module
+        fails to compile at deploy time, which is the whole reason the entry exists.
+        ENFORCEMENT DOES NOT COME FOR FREE. The only rule shipped by default is protean's ForbiddenApiRule, which
+        bans exactly four calls and says nothing about documentation. Annotations beat Javadoc only because a rule
+        can SEE them: CodeRule's signature is check(String className, byte[] bytecode), and comments are gone by
+        then while RUNTIME-retained annotations are still descriptors in the constant pool. To actually require
+        them you must write that rule yourself — select the `code_rule` capability. And note the natural shape of
+        such a rule checks PRESENCE, not text: it can require an @Schema on every field, but it cannot tell you the
+        description still matches whatever separate document the interface is published as.
+    - id: mybatis
+      title: Modules use MyBatis for data access
+      type: boolean
+      default: false
+      requires: [data_access]
+      build_deps:
+        - "implementation 'org.mybatis:mybatis:3.5.19'"
+        - "implementation 'org.mybatis:mybatis-spring:3.0.4'"
+      desc: >-
+        Module sources declare a Mapper interface + mapper XML instead of using JdbcTemplate directly. Requires the
+        data_access capability — MyBatis binds to the host DataSource, so there must be one.
+      note: >-
+        VERSIONS COME FROM protean's own end-to-end tests (proteanSrc/build.gradle: mybatis 3.5.19 +
+        mybatis-spring 3.0.4), NOT from docs/guide/07-data-access.md — that guide pins 3.5.16 and omits
+        mybatis-spring entirely, which leaves a skeleton unable to compile. mybatis-spring is what supplies
+        SqlSessionFactoryBean and MapperFactoryBean; inside a module's child ApplicationContext, @MapperScan is
+        unproven, so a module must wire one explicit MapperFactoryBean per Mapper.
+        DELIBERATELY NOT COUPLED TO swagger_annotations: MyBatis does not require swagger, so there is no
+        `requires` between them. But if your Mapper interfaces and row types carry @Schema descriptions — the shape
+        a skeleton generator typically emits — you have to select BOTH, or the Mapper will not compile at its first
+        deploy. Ask about that when data access and MyBatis are both on.

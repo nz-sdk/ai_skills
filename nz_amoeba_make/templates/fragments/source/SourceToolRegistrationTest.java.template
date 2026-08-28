@@ -1,0 +1,131 @@
+// Guards the wiring that has no other failure signal.
+//
+// McpDispatcher discovers tools by collecting every McpTool BEAN, so a tool missing @Component compiles, unit
+// tests fine, and is simply absent from tools/list — a failure that otherwise surfaces only after starting the
+// server. Same for a duplicated name: the dispatcher fills its map with put(), so the loser vanishes silently.
+package {{PKG}}.source;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModulePlatform;
+import org.junit.jupiter.api.Test;
+import org.springframework.stereotype.Component;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+
+class SourceToolRegistrationTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final ModuleSourceResolver resolver = new ModuleSourceResolver(mock(ModulePlatform.class));
+
+    private List<McpTool> tools() {
+        return List.of(
+                new ListModuleFilesTool(mapper, resolver),
+                new SearchModuleSourceTool(mapper, resolver),
+                new ExportModuleSourceTool(mapper, resolver));
+    }
+
+    @Test
+    void everyToolIsAComponentSoTheDispatcherCollectsIt() {
+        for (McpTool tool : tools()) {
+            assertNotNull(tool.getClass().getAnnotation(Component.class),
+                    () -> tool.getClass().getSimpleName()
+                            + " is not a @Component — it would never reach tools/list");
+        }
+        assertNotNull(ModuleSourceResolver.class.getAnnotation(Component.class),
+                "the resolver must be injectable into the tools");
+    }
+
+    @Test
+    void namesAreUniqueAndNamespaced() {
+        Set<String> names = new HashSet<>();
+        for (McpTool tool : tools()) {
+            assertTrue(tool.name().startsWith("amoeba."),
+                    () -> tool.name() + " should sit in this project's namespace, not protean's");
+            assertTrue(names.add(tool.name()), () -> "duplicate tool name: " + tool.name());
+        }
+        assertEquals(3, names.size());
+    }
+
+    /**
+     * The classification that matters on this host: the ModuleActionAuthorizer policy (ExampleAuthorizer, when the
+     * `authorizer` capability is selected) maps CUSTOM — the SPI default — to mcp.admin, the same bucket as
+     * config.set and deploy_shared_lib. A read-only tool left at that default would demand admin rights to list
+     * a file, so each tool overrides action() to READ. This test is what keeps that true.
+     */
+    @Test
+    void everyToolClassifiesAsReadNotCustom() {
+        for (McpTool tool : tools()) {
+            assertEquals(ModuleActionAuthorizer.ModuleAction.READ, tool.action(),
+                    () -> tool.name() + " must be READ so it stays on the mcp.read scope");
+        }
+    }
+
+    @Test
+    void everyToolDeclaresItselfReadOnlyAndDescribesItself() {
+        for (McpTool tool : tools()) {
+            assertEquals(Boolean.TRUE, tool.annotations().readOnlyHint(), tool.name());
+            assertNotNull(tool.title(), tool.name());
+            assertTrue(tool.description().length() > 40,
+                    () -> tool.name() + " needs a description an agent can choose it from");
+        }
+    }
+
+    /**
+     * With protean.mcp.strict-schema=true these schemas are validated server-side, so a malformed one turns every
+     * call into a rejection. Checking the shape here beats discovering it at the first call.
+     */
+    @Test
+    void inputSchemasAreClosedObjectsWithRequiredFields() {
+        for (McpTool tool : tools()) {
+            JsonNode schema = tool.inputSchema();
+            assertEquals("object", schema.path("type").asText(), tool.name());
+            assertFalse(schema.path("additionalProperties").asBoolean(true),
+                    () -> tool.name() + " should reject unknown arguments so typos fail loudly");
+            assertTrue(schema.path("required").isArray() && !schema.path("required").isEmpty(), tool.name());
+            assertTrue(schema.path("properties").isObject(), tool.name());
+        }
+    }
+
+    /** Every declared required output field must be one the happy path actually populates. */
+    @Test
+    void outputSchemasDeclareRequiredFieldsAsObjects() {
+        for (McpTool tool : tools()) {
+            JsonNode schema = tool.outputSchema();
+            assertNotNull(schema, tool.name());
+            assertEquals("object", schema.path("type").asText(), tool.name());
+            for (JsonNode required : schema.path("required")) {
+                assertTrue(schema.path("properties").hasNonNull(required.asText()),
+                        () -> tool.name() + " requires '" + required.asText()
+                                + "' without declaring it in properties");
+            }
+        }
+    }
+
+    /** The tools cross-reference each other in their descriptions; those names must be real. */
+    @Test
+    void crossReferencedToolNamesExist() {
+        Set<String> names = new HashSet<>();
+        tools().forEach(t -> names.add(t.name()));
+
+        for (McpTool tool : tools()) {
+            for (String referenced : List.of("amoeba.list_module_files", "amoeba.export_module_source")) {
+                if (tool.description().contains(referenced)) {
+                    assertTrue(names.contains(referenced),
+                            () -> tool.name() + " points at a tool that does not exist: " + referenced);
+                }
+            }
+        }
+    }
+}

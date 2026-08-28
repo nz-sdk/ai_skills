@@ -1,0 +1,56 @@
+// [INTERFACE DEFINITION] What the generator hands back: the files plus the deploy parameters that go with them.
+package {{PKG}}.interfacedef.gen;
+
+import java.util.List;
+
+/**
+ * The generated skeleton for one module version, together with the deploy parameters it implies.
+ *
+ * <p>The deploy parameters travel with the files on purpose. {@code componentFqcns} defaults to
+ * {@code [controller]} when omitted, and a Controller/Service module that relies on that default fails to wire —
+ * {@code test/nz_amoeba/healthcheck-preflight.md} calls it the most common failure point for an MVC-shaped module.
+ * Since the generator is what decided the class layout, it is also what knows the complete list, so the caller
+ * never has to assemble it.
+ *
+ * @param controllerFqcn   value for the deploy call's {@code controller}
+ * @param componentFqcns   value for {@code components} — every class the module child context must register
+ *                         (controller, service implementation, MyBatis configuration). DTOs and the Mapper
+ *                         interface are deliberately absent: DTOs are not beans, and the Mapper is produced by a
+ *                         {@code MapperFactoryBean} declared inside the configuration.
+ * @param needsSharedBeans value for {@code needsSharedBeans} — true exactly when the module injects a host bean,
+ *                         which today means the {@code DataSource} behind a MyBatis skeleton
+ * @param mapperFqcn       the Mapper interface FQCN, or {@code null} for a non-MyBatis module. Carried explicitly
+ *                         because the deploy-time consistency check needs the exact string the XML namespace must
+ *                         equal, and re-deriving it from a class name is guesswork.
+ * @param mapperXmlPath    the mapper XML resource path, or {@code null} for a non-MyBatis module
+ * @param files            every emitted file, server-owned and author-owned alike
+ */
+public record SkeletonBundle(
+        String controllerFqcn,
+        List<String> componentFqcns,
+        boolean needsSharedBeans,
+        String mapperFqcn,
+        String mapperXmlPath,
+        List<GeneratedFile> files
+) {
+
+    public SkeletonBundle {
+        componentFqcns = List.copyOf(componentFqcns);
+        files = List.copyOf(files);
+    }
+
+    /** True when this skeleton includes MyBatis artifacts. */
+    public boolean hasMapper() {
+        return mapperFqcn != null;
+    }
+
+    /** The files the wrapper replaces unconditionally at deploy time. */
+    public List<GeneratedFile> serverOwned() {
+        return files.stream().filter(GeneratedFile::serverOwned).toList();
+    }
+
+    /** The files the module author is expected to fill in. */
+    public List<GeneratedFile> authored() {
+        return files.stream().filter(f -> !f.serverOwned()).toList();
+    }
+}

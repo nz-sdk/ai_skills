@@ -1,0 +1,86 @@
+// [CAPABILITY: authorization policy] Replaces the permissive default (@ConditionalOnMissingBean).
+// protean delegates AUTHENTICATION to your Spring Security; this bean supplies only the POLICY (who can do what).
+// One bean per app. Needs spring-boot-starter-security on the classpath for Authentication/GrantedAuthority.
+//
+// SCOPE MAPPING — advertise these names in protean.mcp.authorization.scopes-supported so clients can request them.
+// (These are OAUTH scopes. Nothing to do with protean.worker.db.scopes, which names DB tenants — same word, two
+// unrelated meanings.)
+//   mcp.read   READ
+//   mcp.write  DEPLOY, UPDATE, DELETE, APPROVE   (implies read)
+//   mcp.admin  CUSTOM
+//   (none)     DEBUG — always refused here
+//
+// EVERY ModuleAction IS DECIDED EXPLICITLY, with no default branch — so when a future protean release adds an enum
+// constant this file FAILS TO COMPILE instead of silently permitting the new action. Do not reintroduce a
+// `default ->` or an EnumSet "mutating" shortcut: the two actions such shortcuts always miss are the dangerous ones.
+//   CUSTOM — config.set, deploy_shared_lib, remove_shared_lib, scope.*, AND every consumer-written McpTool (its
+//            default action() is CUSTOM). deploy_shared_lib puts jars on the module PARENT classloader, so this
+//            bucket must sit ABOVE plain deploy rights. authorize() only receives (caller, action, moduleId) and
+//            the CUSTOM built-ins pass moduleId=null, so the policy cannot tell config.set from deploy_shared_lib
+//            — per-tool granularity needs a registerTool wrapper, not this SPI.
+//   DEBUG  — the debug.* tools attach a live JDI debugger (evaluate/redefine). Refused outright because
+//            protean.mcp.debug.enabled is off by default; open it only if you deliberately turned it on.
+//
+// SCOPE OF THIS BEAN: the MCP surface only. protean calls authorize() from exactly one place (McpDispatcher), so
+// the /platform/** admin REST controllers never reach it — that second deploy path has to be gated in the security
+// filter chain itself, which is what SecurityConfig's method rules do.
+//
+// PRECONDITION — authentication must exist. With no authenticating filter chain every caller arrives scope-less and
+// EVERYTHING below is denied: module deployment simply stops working, and it reads as a bug rather than as policy.
+// Either pair this with SecurityConfig (= set protean.mcp.authorization.resource), bring your own chain that
+// populates the same SCOPE_mcp.* authorities, or — for a local demo only — return Decision.allow() for the actions
+// you want open.
+package {{PKG}};
+
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.stereotype.Component;
+
+import java.security.Principal;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+@Component
+public class ExampleAuthorizer implements ModuleActionAuthorizer {
+
+    private static final String READ = "SCOPE_mcp.read";
+    private static final String WRITE = "SCOPE_mcp.write";
+    private static final String ADMIN = "SCOPE_mcp.admin";
+
+    @Override
+    public Decision authorize(Principal caller, ModuleAction action, String moduleId) {
+        Set<String> scopes = scopesOf(caller);
+        if (scopes.isEmpty()) {
+            // No Principal, or a Principal carrying no mcp.* scope. Covers the stdio transport too (caller=null).
+            return Decision.deny("authentication with an mcp.* scope is required for " + action);
+        }
+
+        boolean canAdmin = scopes.contains(ADMIN);
+        boolean canWrite = scopes.contains(WRITE);
+        boolean canRead = canWrite || scopes.contains(READ);
+
+        return switch (action) {
+            case READ -> canRead ? Decision.allow()
+                    : Decision.deny("READ requires the mcp.read scope");
+            case DEPLOY, UPDATE, DELETE, APPROVE -> canWrite ? Decision.allow()
+                    : Decision.deny(action + " requires the mcp.write scope");
+            case CUSTOM -> canAdmin ? Decision.allow()
+                    : Decision.deny("CUSTOM (config / shared-lib / scope writes, consumer tools) requires the "
+                            + "mcp.admin scope");
+            case DEBUG -> Decision.deny(
+                    "DEBUG is disabled on this deployment (protean.mcp.debug.enabled=false)");
+        };
+    }
+
+    /** Bearer scopes arrive as SCOPE_* authorities on the JwtAuthenticationToken the filter chain injects. */
+    private static Set<String> scopesOf(Principal caller) {
+        if (caller instanceof Authentication auth && auth.isAuthenticated()) {
+            return auth.getAuthorities().stream()
+                    .map(GrantedAuthority::getAuthority)
+                    .filter(a -> a.startsWith("SCOPE_mcp."))
+                    .collect(Collectors.toSet());
+        }
+        return Set.of();
+    }
+}

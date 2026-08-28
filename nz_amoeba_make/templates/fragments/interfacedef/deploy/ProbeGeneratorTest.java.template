@@ -1,0 +1,125 @@
+// Probes are the cheapest enforcement in the design (protean rolls a failing deploy back on its own), so what
+// matters is that they are generated for exactly the operations that CAN be probed — and that the ones that cannot
+// are reported rather than silently dropped.
+package {{PKG}}.interfacedef.deploy;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DataAccess;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+import {{PKG}}.interfacedef.SpecFixtures;
+import org.htcom.protean.module.VerificationPlan;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+
+class ProbeGeneratorTest {
+
+    private static InterfaceSpec spec(OperationSpec... operations) {
+        return new InterfaceSpec("t", "설명 문장", DataAccess.NONE, List.of(operations));
+    }
+
+    private static List<String> rendered(List<VerificationPlan.Probe> probes) {
+        return probes.stream().map(p -> p.method() + " " + p.path() + " -> " + p.expectedStatus()).toList();
+    }
+
+    /** The path example is substituted, so the probe requests a URL that actually resolves. */
+    @Test
+    void pathVariablesAreSubstitutedFromExamples() {
+        assertEquals(List.of("GET /orders/1001 -> 200"),
+                rendered(ProbeGenerator.probesFor(spec(SpecFixtures.getOrder()))));
+    }
+
+    /** VerificationPlan.Probe has no body field, so an operation with a request body cannot be probed at all. */
+    @Test
+    void operationsWithARequestBodyGetNoProbeAndAreReported() {
+        InterfaceSpec spec = SpecFixtures.orders();
+        assertEquals(List.of("GET /orders/1001 -> 200"), rendered(ProbeGenerator.probesFor(spec)));
+        assertEquals(List.of("createOrder"), ProbeGenerator.unprobeable(spec));
+    }
+
+    @Test
+    void theLowestSuccessStatusIsExpected() {
+        OperationSpec op = new OperationSpec("op", HttpMethod.GET, "/x", "요약", "설명 문장", List.of(), null,
+                List.of(new ResponseSpec(299, "늦은 성공", List.of()),
+                        new ResponseSpec(201, "이른 성공", List.of()),
+                        new ResponseSpec(404, "찾지 못함", List.of())));
+        assertEquals(List.of("GET /x -> 201"), rendered(ProbeGenerator.probesFor(spec(op))));
+    }
+
+    /** bodyContains stays unset: the spec declares a response SHAPE, not any particular value. */
+    @Test
+    void noBodyAssertionIsInvented() {
+        assertNull(ProbeGenerator.probesFor(spec(SpecFixtures.getOrder())).get(0).bodyContains());
+    }
+
+    @Test
+    void deleteAndOtherBodylessMethodsAreProbed() {
+        OperationSpec op = new OperationSpec("remove", HttpMethod.DELETE, "/things/{id}", "삭제",
+                "대상을 삭제한다",
+                List.of(new ParamSpec("id", ParamIn.PATH, FieldType.STRING, true, "대상 식별자", "abc")),
+                null, List.of(new ResponseSpec(204, "본문 없이 성공", List.of())));
+        assertEquals(List.of("DELETE /things/abc -> 204"), rendered(ProbeGenerator.probesFor(spec(op))));
+    }
+
+    /** A PUT with a body is unprobeable even though PUT itself is otherwise fine. */
+    @Test
+    void putWithABodyIsUnprobeable() {
+        OperationSpec op = new OperationSpec("replace", HttpMethod.PUT, "/things/{id}", "교체",
+                "대상을 교체한다",
+                List.of(new ParamSpec("id", ParamIn.PATH, FieldType.STRING, true, "대상 식별자", "abc")),
+                List.of(FieldSpec.scalar("name", FieldType.STRING, true, "새 이름")),
+                List.of(new ResponseSpec(200, "교체 성공", List.of())));
+        assertEquals(List.of(), ProbeGenerator.probesFor(spec(op)));
+        assertEquals(List.of("replace"), ProbeGenerator.unprobeable(spec(op)));
+    }
+
+    // --- merge ---
+
+    @Test
+    void mergeWithNoExistingPlanCreatesOne() {
+        VerificationPlan merged = ProbeGenerator.merge(null,
+                ProbeGenerator.probesFor(spec(SpecFixtures.getOrder())));
+        assertEquals(List.of("GET /orders/1001 -> 200"), rendered(merged.integration()));
+        assertNull(merged.loadPath());
+    }
+
+    @Test
+    void mergeWithNothingGeneratedLeavesThePlanAlone() {
+        VerificationPlan existing = new VerificationPlan(List.of(), "/x", 2, 3, 4L, 5L);
+        assertEquals(existing, ProbeGenerator.merge(existing, List.of()));
+    }
+
+    /** A caller's probe is more specific (it can assert bodyContains), so it wins on a method+path collision. */
+    @Test
+    void aCallerSuppliedProbeIsNotDuplicatedOrOverwritten() {
+        VerificationPlan existing = new VerificationPlan(
+                List.of(new VerificationPlan.Probe("GET", "/orders/1001", 200, "orderId")),
+                null, null, null, null, null);
+        VerificationPlan merged = ProbeGenerator.merge(existing,
+                ProbeGenerator.probesFor(spec(SpecFixtures.getOrder())));
+        assertEquals(1, merged.integration().size());
+        assertEquals("orderId", merged.integration().get(0).bodyContains());
+    }
+
+    @Test
+    void loadSettingsPassThroughUntouched() {
+        VerificationPlan existing = new VerificationPlan(List.of(), "/load", 4, 10, 250L, 1024L);
+        VerificationPlan merged = ProbeGenerator.merge(existing,
+                ProbeGenerator.probesFor(spec(SpecFixtures.getOrder())));
+        assertEquals("/load", merged.loadPath());
+        assertEquals(4, merged.concurrency());
+        assertEquals(10, merged.requestsPerThread());
+        assertEquals(250L, merged.maxAvgLatencyMs());
+        assertEquals(1024L, merged.maxHeapGrowthBytes());
+        assertEquals(1, merged.integration().size());
+    }
+}

@@ -1,0 +1,122 @@
+// [INTERFACE DEFINITION] Short-lived storage for a spec between "define" and "deploy".
+//
+// In memory on purpose, and NOT a database table. The authoritative copy of a spec is the resource the deploy
+// wrapper seals into the module descriptor (META-INF/protean/interface.json), which gets version history, signature
+// coverage and store persistence for free. What lives here is only the pre-deploy draft: a value that exists for one
+// agent's round trip and is worthless once the module is installed.
+//
+// Consequences that make this the right trade rather than a shortcut:
+//   * no DDL, and no coupling to a reachable database — a draft still works when MySQL is down
+//   * a restart drops drafts, which is correct: the skeleton is deterministic, so re-running define reproduces it
+//   * the review document's module_interface table stays available as a later search/index cache, not a prerequisite
+package {{PKG}}.interfacedef;
+
+import {{PKG}}.interfacedef.gen.SkeletonBundle;
+import org.springframework.stereotype.Component;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Comparator;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+/** Draft specs keyed by {@code specId}. Thread-safe; entries expire and the map is capped. */
+@Component
+public class DraftStore {
+
+    /** Long enough for an agent to write the service body and the SQL, short enough to not accumulate. */
+    private static final Duration DEFAULT_TTL = Duration.ofHours(2);
+
+    /** Backstop against an agent that calls define in a loop. Oldest entries are evicted first. */
+    private static final int MAX_DRAFTS = 200;
+
+    private final Map<String, Draft> drafts = new ConcurrentHashMap<>();
+    private final Clock clock;
+    private final Duration ttl;
+
+    public DraftStore() {
+        this(Clock.systemUTC(), DEFAULT_TTL);
+    }
+
+    /** Test seam: a fixed clock and a short TTL make expiry assertable without sleeping. */
+    DraftStore(Clock clock, Duration ttl) {
+        this.clock = clock;
+        this.ttl = ttl;
+    }
+
+    /**
+     * A validated spec and the skeleton generated from it.
+     *
+     * @param skeleton kept alongside the spec so deploy does not regenerate it. Regeneration would produce the same
+     *                 bytes (the generator is deterministic), but holding it means the files the agent was handed
+     *                 are provably the files the wrapper compares against.
+     */
+    public record Draft(
+            String specId,
+            String moduleId,
+            String version,
+            String packageName,
+            InterfaceSpec spec,
+            SkeletonBundle skeleton,
+            Instant createdAt
+    ) {
+    }
+
+    /** Stores a draft and returns its {@code specId}. */
+    public String put(String moduleId, String version, String packageName,
+                      InterfaceSpec spec, SkeletonBundle skeleton) {
+        purge();
+        String specId = UUID.randomUUID().toString();
+        drafts.put(specId, new Draft(specId, moduleId, version, packageName, spec, skeleton, clock.instant()));
+        return specId;
+    }
+
+    /** Looks up a live draft. An expired entry is treated as absent and removed. */
+    public Optional<Draft> find(String specId) {
+        if (specId == null) {
+            return Optional.empty();
+        }
+        Draft draft = drafts.get(specId);
+        if (draft == null) {
+            return Optional.empty();
+        }
+        if (isExpired(draft)) {
+            drafts.remove(specId, draft);
+            return Optional.empty();
+        }
+        return Optional.of(draft);
+    }
+
+    /** Drops a draft once it has been consumed by a deploy. */
+    public void remove(String specId) {
+        drafts.remove(specId);
+    }
+
+    /** Live draft count. Bounded by {@code MAX_DRAFTS}; useful for asserting nothing leaked and for diagnostics. */
+    public int size() {
+        return drafts.size();
+    }
+
+    private boolean isExpired(Draft draft) {
+        return draft.createdAt().plus(ttl).isBefore(clock.instant());
+    }
+
+    /**
+     * Removes expired entries, then the oldest remaining ones if the cap is still exceeded. Called on write only:
+     * reads already treat an expired entry as absent, so a lazy sweep is enough and keeps lookups allocation-free.
+     */
+    private void purge() {
+        drafts.values().removeIf(this::isExpired);
+        if (drafts.size() < MAX_DRAFTS) {
+            return;
+        }
+        drafts.entrySet().stream()
+                .sorted(Comparator.comparing(e -> e.getValue().createdAt()))
+                .limit(Math.max(1, drafts.size() - MAX_DRAFTS + 1))
+                .map(Map.Entry::getKey)
+                .forEach(drafts::remove);
+    }
+}

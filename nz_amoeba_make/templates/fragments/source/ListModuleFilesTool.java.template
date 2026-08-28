@@ -1,0 +1,225 @@
+// [CAPABILITY: custom MCP tool] amoeba.list_module_files — browse a deployed module's file tree.
+//
+// The point of this tool is what it does NOT return: no file contents. protean.get_module_source can only hand
+// back whole sources, so answering "what is in this module" costs the entire module. Here the answer is a list of
+// paths and sizes, and the caller then asks for only the files it wants — which is also why the paths emitted
+// here are exactly the paths amoeba.export_module_source accepts in its `paths` argument.
+//
+// It also surfaces the descriptor's `resources` map, which protean.get_module_source ignores entirely — mapper
+// XML and the sealed META-INF/protean/interface.json had no read path before this.
+package {{PKG}}.source;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.source.ModuleSourceLayout.Kind;
+import {{PKG}}.source.ModuleSourceLayout.Layout;
+import {{PKG}}.source.ModuleSourceLayout.SourceFile;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolAnnotations;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.Set;
+
+@Component
+public class ListModuleFilesTool implements McpTool {
+
+    private static final int DEFAULT_LIMIT = 50;
+    private static final int MAX_LIMIT = 200;
+
+    private final ObjectMapper mapper;
+    private final ModuleSourceResolver resolver;
+
+    public ListModuleFilesTool(ObjectMapper mapper, ModuleSourceResolver resolver) {
+        this.mapper = mapper;
+        this.resolver = resolver;
+    }
+
+    @Override
+    public String name() {
+        return "amoeba.list_module_files";
+    }
+
+    @Override
+    public String title() {
+        return "List Module Files";
+    }
+
+    @Override
+    public String description() {
+        return "Lists the files of a deployed module at their project-layout paths (src/main/java, src/test/java, "
+                + "src/main/resources) with size and line counts, without returning any content. Includes mapper "
+                + "XML and other classpath resources. Use it to find what to fetch with "
+                + "amoeba.export_module_source, whose 'paths' argument takes the paths listed here.";
+    }
+
+    /** A pure read of stored state. Leaving this at the SPI's CUSTOM default would demand mcp.admin. */
+    @Override
+    public ModuleActionAuthorizer.ModuleAction action() {
+        return ModuleActionAuthorizer.ModuleAction.READ;
+    }
+
+    /** The default implementation reads {@code id}; this tool's module argument is {@code moduleId}. */
+    @Override
+    public String targetModuleId(JsonNode arguments) {
+        return arguments != null && arguments.hasNonNull("moduleId") ? arguments.get("moduleId").asText() : null;
+    }
+
+    @Override
+    public McpToolAnnotations annotations() {
+        return McpToolAnnotations.readOnly();
+    }
+
+    @Override
+    public ObjectNode inputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        schema.put("additionalProperties", false);
+        ObjectNode p = schema.putObject("properties");
+        SourceToolSchemas.putModuleId(p, "Deployed module id.");
+        SourceToolSchemas.putVersion(p);
+        SourceToolSchemas.putInclude(p);
+        p.putObject("pathPrefix").put("type", "string")
+                .put("description", "Optional. Keeps only files whose project-layout path starts with this "
+                        + "(case-insensitive), e.g. 'src/main/resources' for resources only.");
+        p.putObject("limit").put("type", "integer")
+                .put("description", "Maximum files to return (default " + DEFAULT_LIMIT + ", max " + MAX_LIMIT
+                        + ", 0 = all).");
+        p.putObject("cursor").put("type", "string")
+                .put("description", "nextCursor from a previous response, to continue listing.");
+        schema.putArray("required").add("moduleId");
+        return schema;
+    }
+
+    @Override
+    public ObjectNode outputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        ObjectNode p = schema.putObject("properties");
+        p.putObject("moduleId").put("type", "string");
+        p.putObject("version").put("type", "string");
+        p.putObject("totalCount").put("type", "integer")
+                .put("description", "Files matching the filters, before paging.");
+
+        ObjectNode files = p.putObject("files");
+        files.put("type", "array");
+        ObjectNode item = files.putObject("items");
+        item.put("type", "object");
+        ObjectNode ip = item.putObject("properties");
+        ip.putObject("path").put("type", "string");
+        ip.putObject("fqcn").put("type", "string")
+                .put("description", "Class name for a Java source or test; absent for a resource.");
+        ip.putObject("kind").put("type", "string");
+        ip.putObject("bytes").put("type", "integer");
+        ip.putObject("lines").put("type", "integer").put("description", "0 for a binary resource.");
+        ip.putObject("binary").put("type", "boolean");
+        item.putArray("required").add("path").add("kind").add("bytes");
+
+        p.putObject("nextCursor").put("type", "string");
+        SourceToolSchemas.putSkipped(p);
+
+        // nextCursor and skipped are deliberately absent from required — see SourceToolSchemas.putSkipped.
+        schema.putArray("required").add("moduleId").add("version").add("files").add("totalCount");
+        return schema;
+    }
+
+    @Override
+    public McpToolResult call(JsonNode arguments, McpCallContext ctx) {
+        JsonNode args = arguments == null ? mapper.missingNode() : arguments;
+        String moduleId = SourceToolSchemas.text(args, "moduleId");
+        if (moduleId == null) {
+            return McpToolResult.error("moduleId is required");
+        }
+        String version = SourceToolSchemas.text(args, "version");
+        Set<Kind> include = SourceToolSchemas.parseInclude(args);
+        String pathPrefix = SourceToolSchemas.text(args, "pathPrefix");
+        int limit = SourceToolSchemas.clampLimit(args.path("limit"), DEFAULT_LIMIT, MAX_LIMIT);
+        int offset = SourceToolSchemas.decodeCursor(args.path("cursor").asText(null));
+
+        Optional<ModuleDescriptor> found = resolver.find(moduleId, version);
+        if (found.isEmpty()) {
+            return resolver.notFound(moduleId, version);
+        }
+        ModuleDescriptor descriptor = found.get();
+        Layout layout = ModuleSourceLayout.of(descriptor, include);
+
+        List<SourceFile> matched = layout.files().stream()
+                .filter(f -> matchesPrefix(f, pathPrefix))
+                .toList();
+
+        int total = matched.size();
+        int from = Math.min(offset, total);
+        int to = limit >= total ? total : Math.min(from + limit, total);
+        List<SourceFile> page = matched.subList(from, to);
+
+        ObjectNode out = mapper.createObjectNode();
+        out.put("moduleId", moduleId);
+        out.put("version", descriptor.version());
+        out.put("totalCount", total);
+        ArrayNode files = out.putArray("files");
+        for (SourceFile file : page) {
+            ObjectNode node = files.addObject();
+            node.put("path", file.path());
+            if (file.fqcn() != null) {
+                node.put("fqcn", file.fqcn());
+            }
+            node.put("kind", file.kind().wire());
+            node.put("bytes", file.bytes());
+            node.put("lines", file.lines());
+            node.put("binary", file.binary());
+        }
+        if (to < total) {
+            out.put("nextCursor", SourceToolSchemas.encodeCursor(to));
+        }
+        if (!layout.skipped().isEmpty()) {
+            ArrayNode skipped = out.putArray("skipped");
+            layout.skipped().forEach(skipped::add);
+        }
+
+        return McpToolResult.ok(renderText(moduleId, descriptor.version(), page, total, to < total,
+                layout.skipped()), out);
+    }
+
+    private static boolean matchesPrefix(SourceFile file, String prefix) {
+        return prefix == null
+                || file.path().toLowerCase(Locale.ROOT).startsWith(prefix.toLowerCase(Locale.ROOT));
+    }
+
+    private String renderText(String moduleId, String version, List<SourceFile> page, int total,
+                              boolean more, List<String> skipped) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Module ").append(moduleId).append(" v").append(version).append(" — ")
+                .append(page.size()).append(" of ").append(total).append(" file(s)");
+        if (more) {
+            sb.append(", more available");
+        }
+        sb.append('\n');
+        for (SourceFile file : page) {
+            sb.append("  ").append(file.path())
+                    .append("  [").append(file.kind().wire()).append(", ").append(file.bytes()).append(" B");
+            if (!file.binary()) {
+                sb.append(", ").append(file.lines()).append(" line(s)");
+            } else {
+                sb.append(", binary");
+            }
+            sb.append("]\n");
+        }
+        if (!skipped.isEmpty()) {
+            sb.append("\nSkipped ").append(skipped.size())
+                    .append(" resource(s) whose path escapes the classpath root: ")
+                    .append(String.join(", ", skipped)).append('\n');
+        }
+        return sb.toString();
+    }
+}

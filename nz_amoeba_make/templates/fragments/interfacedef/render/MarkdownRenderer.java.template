@@ -1,0 +1,210 @@
+// [INTERFACE DEFINITION] InterfaceSpec -> markdown interface definition document.
+//
+// A pure function, deliberately: the spec is the single source of truth, so the document is derived and never
+// edited. Nothing here parses Java or inspects a running route — if the rendered document and the deployed module
+// disagree, that is the wrapper's route comparison to catch, not the renderer's.
+//
+// Table skeleton follows the convention already used across document/proteanSrc/docs/guide: overview -> operation
+// list -> one `| 명칭 | 타입 | 필수 | 설명 |` table per operation section.
+package {{PKG}}.interfacedef.render;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+/** Renders the interface definition document. Stateless. */
+public final class MarkdownRenderer {
+
+    private static final String NO_BODY = "_바디 없음_";
+
+    private MarkdownRenderer() {
+    }
+
+    /**
+     * Renders the document for one module version.
+     *
+     * @param moduleId module id, used as the title fallback and shown in the header line
+     * @param version  module version; may be null when rendering a draft that is not deployed yet
+     */
+    public static String render(String moduleId, String version, InterfaceSpec spec) {
+        StringBuilder out = new StringBuilder();
+
+        String title = spec.title() == null || spec.title().isBlank() ? moduleId : spec.title();
+        out.append("# ").append(title).append("\n\n");
+
+        out.append("> 모듈 `").append(moduleId).append('`');
+        if (version != null && !version.isBlank()) {
+            out.append(" · 버전 `").append(version).append('`');
+        }
+        out.append(" · 데이터 접근 `").append(spec.dataAccess().wire()).append('`');
+        // The service layer decides which files exist, so the document has to say which shape shipped — otherwise
+        // it describes a structure the module does not have.
+        out.append(" · 서비스 계층 `")
+                .append(spec.generatesServiceInterface() ? "인터페이스 + 구현" : "구현 클래스만")
+                .append("`\n\n");
+
+        if (spec.description() != null && !spec.description().isBlank()) {
+            out.append(spec.description().trim()).append("\n\n");
+        }
+
+        appendOperationList(out, spec.operations());
+        for (OperationSpec op : spec.operations()) {
+            appendOperation(out, op);
+        }
+        return out.toString();
+    }
+
+    private static void appendOperationList(StringBuilder out, List<OperationSpec> operations) {
+        out.append("## 오퍼레이션 목록\n\n");
+        out.append("| operationId | 메서드 | 경로 | 요약 |\n|---|---|---|---|\n");
+        for (OperationSpec op : operations) {
+            out.append("| [").append(cell(op.operationId())).append("](#")
+                    .append(anchor(op.operationId())).append(") | ")
+                    .append(op.method()).append(" | `").append(cell(op.path())).append("` | ")
+                    .append(cell(op.summary())).append(" |\n");
+        }
+        out.append('\n');
+    }
+
+    private static void appendOperation(StringBuilder out, OperationSpec op) {
+        out.append("---\n\n## ").append(op.operationId()).append("\n\n");
+        out.append('`').append(op.method()).append(' ').append(op.path()).append("`\n\n");
+        if (op.summary() != null && !op.summary().isBlank()) {
+            out.append("**").append(op.summary().trim()).append("**\n\n");
+        }
+        if (op.description() != null && !op.description().isBlank()) {
+            out.append(op.description().trim()).append("\n\n");
+        }
+
+        out.append("### 요청 파라미터\n\n");
+        if (op.parameters().isEmpty()) {
+            out.append("_파라미터 없음_\n\n");
+        } else {
+            out.append("| 명칭 | 위치 | 타입 | 필수 | 설명 |\n|---|---|---|---|---|\n");
+            for (ParamSpec p : op.parameters()) {
+                out.append("| `").append(cell(p.name())).append("` | ")
+                        .append(p.in() == null ? "" : p.in().wire()).append(" | ")
+                        .append(typeOf(p.type() == null ? null : p.type().wire(), null)).append(" | ")
+                        .append(required(p.required())).append(" | ")
+                        .append(cell(p.description())).append(" |\n");
+            }
+            out.append('\n');
+        }
+
+        out.append("### 요청 바디\n\n");
+        appendFieldTable(out, op.requestBody());
+
+        out.append("### 응답\n\n");
+        for (ResponseSpec r : op.responses()) {
+            out.append("#### ").append(r.status());
+            if (r.description() != null && !r.description().isBlank()) {
+                out.append(" — ").append(r.description().trim());
+            }
+            out.append("\n\n");
+            appendFieldTable(out, r.body());
+        }
+    }
+
+    private static void appendFieldTable(StringBuilder out, List<FieldSpec> fields) {
+        if (fields.isEmpty()) {
+            out.append(NO_BODY).append("\n\n");
+            return;
+        }
+        out.append("| 명칭 | 타입 | 필수 | 설명 |\n|---|---|---|---|\n");
+        for (Row row : flatten(fields)) {
+            out.append("| `").append(cell(row.path())).append("` | ")
+                    .append(typeOf(row.type(), row.format())).append(" | ")
+                    .append(required(row.required())).append(" | ")
+                    .append(cell(row.description())).append(" |\n");
+        }
+        out.append('\n');
+    }
+
+    /** One rendered table line, after the field tree is flattened to dotted paths. */
+    private record Row(String path, String type, String format, boolean required, String description) {
+    }
+
+    /**
+     * Flattens the field tree to dotted paths so nesting survives a flat markdown table:
+     * {@code customer.name} for an object field, {@code items[]} for an array of scalars and
+     * {@code items[].sku} for an array of objects.
+     */
+    private static List<Row> flatten(List<FieldSpec> fields) {
+        List<Row> rows = new ArrayList<>();
+        flattenInto(rows, "", fields);
+        return rows;
+    }
+
+    private static void flattenInto(List<Row> rows, String prefix, List<FieldSpec> fields) {
+        for (FieldSpec f : fields) {
+            String path = prefix + f.name();
+            rows.add(row(path, f));
+            expand(rows, path, f);
+        }
+    }
+
+    /** Emits the nested rows under an already-emitted field, whatever its composite kind. */
+    private static void expand(List<Row> rows, String path, FieldSpec f) {
+        if (f.type() == null) {
+            return;
+        }
+        switch (f.type()) {
+            case OBJECT -> flattenInto(rows, path + ".", f.children());
+            case ARRAY -> {
+                FieldSpec item = f.items();
+                if (item != null) {
+                    // An array element has no name of its own, so the `[]` row IS the element — it carries the
+                    // element's own type and description, then expands the same way any field does. This also
+                    // makes array-of-array fall out for free instead of needing its own branch.
+                    rows.add(row(path + "[]", item));
+                    expand(rows, path + "[]", item);
+                }
+            }
+            default -> {
+            }
+        }
+    }
+
+    private static Row row(String path, FieldSpec f) {
+        return new Row(path, f.type() == null ? null : f.type().wire(), f.format(),
+                f.required(), f.description());
+    }
+
+    /** {@code string (date-time)} when a format refines the type, otherwise just the type. */
+    private static String typeOf(String type, String format) {
+        String base = type == null ? "" : "`" + type + "`";
+        if (format == null || format.isBlank()) {
+            return base;
+        }
+        return base + " (" + cell(format) + ")";
+    }
+
+    private static String required(boolean required) {
+        return required ? "✅" : "";
+    }
+
+    /**
+     * Escapes a value for a markdown table cell. A raw {@code |} would split the row and a raw newline would end
+     * the table, so both are neutralized rather than trusted — descriptions are free text from the caller.
+     */
+    private static String cell(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.trim()
+                .replace("\\", "\\\\")
+                .replace("|", "\\|")
+                .replaceAll("\\R", "<br>");
+    }
+
+    /** GitHub-style heading anchor. operationId is already restricted to letters, digits and underscore. */
+    private static String anchor(String operationId) {
+        return operationId == null ? "" : operationId.toLowerCase(Locale.ROOT);
+    }
+}

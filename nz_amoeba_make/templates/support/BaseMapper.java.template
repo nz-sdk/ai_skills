@@ -1,0 +1,21 @@
+// [COMMON SUPPORT] Base type for a deployed module's MyBatis Mapper. Intentionally EMPTY.
+//
+// Same purpose as BaseService — a seam for data-access concerns that should apply to every module without editing
+// each Mapper. Have every module's Mapper extend it:
+//
+//     @Mapper
+//     public interface OrdersMapper extends {{PKG}}.support.BaseMapper { ... }
+//
+// MUST STAY METHOD-FREE. MyBatis resolves every Mapper method against a statement id in the mapper XML, and an
+// inherited method is no exception — declaring one abstract method here would demand that statement in EVERY
+// module's XML. Add a `default` method with a Java body if you need shared behaviour; add an abstract method only
+// if you genuinely intend to require that statement everywhere.
+//
+// Being an interface is forced, not chosen: a Mapper is an interface, so this cannot be a class.
+//
+// Only useful with the `mybatis` module_classpath entry selected — that is what puts mybatis + mybatis-spring on
+// the host classpath for the module to compile against.
+package {{PKG}}.support;
+
+public interface BaseMapper {
+}

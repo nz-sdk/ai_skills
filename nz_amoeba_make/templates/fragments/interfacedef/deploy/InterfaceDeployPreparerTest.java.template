@@ -1,0 +1,460 @@
+// The rewriting logic is where drift is actually prevented, so this is the densest test class in the feature. The
+// cases that matter are the ones where a caller could sneak something past: a hand-edited DTO, a shadowing spec
+// resource, a path-prefixed filename that dodges replacement, a manifest that skips every check.
+package {{PKG}}.interfacedef.deploy;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.SpecFixtures;
+import {{PKG}}.interfacedef.gen.GeneratedFile;
+import {{PKG}}.interfacedef.gen.SkeletonBundle;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class InterfaceDeployPreparerTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final DraftStore draftStore = new DraftStore();
+    /** No module deployed: the mock's Optional.empty() means every test here is a first deploy. */
+    private final ModulePlatform platform = mock(ModulePlatform.class);
+    private final InterfaceDeployPreparer preparer = new InterfaceDeployPreparer(mapper, draftStore, platform);
+
+    private static final InterfaceSpec SPEC = SpecFixtures.orders();
+    private static final SkeletonBundle SKELETON = SkeletonGenerator.generate(
+            new SkeletonGenerator.Request("orders", "module.orders", SPEC));
+
+    /** A caller submitting exactly the authored files, as a well-behaved agent would. */
+    private ObjectNode args(Consumer<ArrayNode> extraFiles) {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("id", "orders");
+        root.put("version", "1.0.0");
+        root.put("specId", draftStore.put("orders", "1.0.0", "module.orders", SPEC, SKELETON));
+        ArrayNode files = root.putArray("files");
+        for (GeneratedFile file : SKELETON.authored()) {
+            // The mapper XML is seeded with empty statements; give it real SQL so the consistency check passes.
+            String content = file.filename().endsWith(".xml") ? filledXml(file.content()) : file.content();
+            addFile(files, file.filename(), content, file.kind().wire());
+        }
+        extraFiles.accept(files);
+        return root;
+    }
+
+    private static void addFile(ArrayNode files, String filename, String content, String kind) {
+        ObjectNode node = files.addObject();
+        node.put("kind", kind);
+        node.put("filename", filename);
+        node.put("content", content);
+    }
+
+    /** Replaces the generated empty statement bodies with SQL, which is what an author would do. */
+    private static String filledXml(String xml) {
+        return xml.replaceAll("(?s)(<(select|insert|update|delete)\\b[^>]*>)\\s*(<!--.*?-->)?\\s*(</\\2\\s*>)",
+                "$1SELECT 1$4");
+    }
+
+    private static Map<String, String> filesOf(ObjectNode prepared) {
+        return prepared.get("files").valueStream().collect(Collectors.toMap(
+                f -> f.get("filename").asText(), f -> f.get("content").asText(), (a, b) -> a));
+    }
+
+    private static List<String> filenames(ObjectNode prepared) {
+        return prepared.get("files").valueStream().map(f -> f.get("filename").asText()).toList();
+    }
+
+    private static String contentOf(SkeletonBundle skeleton, String filename) {
+        return skeleton.files().stream().filter(f -> f.filename().equals(filename))
+                .map(GeneratedFile::content).findFirst().orElseThrow();
+    }
+
+    private InterfaceDeployPreparer.PreparationException rejects(JsonNode args) {
+        return assertThrows(InterfaceDeployPreparer.PreparationException.class, () -> preparer.prepare(args));
+    }
+
+    // --- the happy path ---
+
+    @Test
+    void aWellBehavedCallGoesThroughUnchanged() {
+        InterfaceDeployPreparer.Prepared prepared = preparer.prepare(args(files -> {
+        }));
+        assertEquals(List.of(), prepared.replaced());
+        assertEquals(List.of(), prepared.seeded());
+        assertEquals("orders", prepared.moduleId());
+        assertEquals("1.0.0", prepared.version());
+    }
+
+    /** The caller no longer has to supply these, and components defaulting to [controller] is the classic failure. */
+    @Test
+    void deployParametersAreFilledInFromTheSkeleton() {
+        ObjectNode prepared = preparer.prepare(args(files -> {
+        })).args();
+        assertEquals("module.orders.OrdersController", prepared.get("controller").asText());
+        assertEquals(List.of("module.orders.OrdersController", "module.orders.OrdersServiceImpl",
+                        "module.orders.OrdersMyBatisConfig"),
+                prepared.get("components").valueStream().map(JsonNode::asText).toList());
+        assertTrue(prepared.get("needsSharedBeans").asBoolean());
+    }
+
+    /** A caller-supplied controller value must not survive — it is not the caller's to decide. */
+    @Test
+    void aCallerSuppliedControllerIsOverwritten() {
+        ObjectNode args = args(files -> {
+        });
+        args.put("controller", "module.orders.SomethingElse");
+        assertEquals("module.orders.OrdersController",
+                preparer.prepare(args).args().get("controller").asText());
+    }
+
+    @Test
+    void everyServerOwnedFileIsPresentAfterPreparation() {
+        ObjectNode prepared = preparer.prepare(args(files -> {
+        })).args();
+        List<String> names = filenames(prepared);
+        for (GeneratedFile file : SKELETON.serverOwned()) {
+            assertTrue(names.contains(file.filename()), () -> file.filename() + " missing from " + names);
+        }
+    }
+
+    /** Arguments that only existed to reach this class must not leak into the built-in's input. */
+    @Test
+    void interfaceArgumentsAreStrippedBeforeDelegation() {
+        ObjectNode prepared = preparer.prepare(args(files -> {
+        })).args();
+        assertFalse(prepared.has("specId"));
+        assertFalse(prepared.has("interface"));
+        assertFalse(prepared.has("packageName"));
+    }
+
+    // --- the drift-prevention core ---
+
+    /** A hand-edited DTO is discarded, and the caller is told rather than left believing the edit took. */
+    @Test
+    void aHandEditedServerOwnedFileIsReplacedAndReported() {
+        InterfaceDeployPreparer.Prepared prepared = preparer.prepare(args(files ->
+                addFile(files, "GetOrderResponse.java",
+                        "package module.orders.dto;\npublic record GetOrderResponse(String tampered) {}\n",
+                        "source")));
+        assertEquals(List.of("GetOrderResponse.java"), prepared.replaced());
+        assertEquals(contentOf(SKELETON, "GetOrderResponse.java"),
+                filesOf(prepared.args()).get("GetOrderResponse.java"));
+    }
+
+    /** Submitting the generated content verbatim is not an edit, so it is not reported as one. */
+    @Test
+    void resubmittingIdenticalServerOwnedContentIsNotReported() {
+        InterfaceDeployPreparer.Prepared prepared = preparer.prepare(args(files ->
+                addFile(files, "OrdersController.java", contentOf(SKELETON, "OrdersController.java"), "source")));
+        assertEquals(List.of(), prepared.replaced());
+    }
+
+    /**
+     * A path-prefixed filename means the same class, since protean derives the FQCN from the package declaration
+     * plus the stem. Keying on the raw string would add a duplicate instead of replacing it.
+     */
+    @Test
+    void aPathPrefixedFilenameStillMatchesTheGeneratedFile() {
+        InterfaceDeployPreparer.Prepared prepared = preparer.prepare(args(files ->
+                addFile(files, "dto/GetOrderResponse.java",
+                        "package module.orders.dto;\npublic record GetOrderResponse(String tampered) {}\n",
+                        "source")));
+        assertEquals(List.of("GetOrderResponse.java"), prepared.replaced());
+        assertEquals(1, filenames(prepared.args()).stream()
+                .filter(n -> n.endsWith("GetOrderResponse.java")).count());
+    }
+
+    /** An omitted authored file is seeded so the module compiles and fails for the real reason. */
+    @Test
+    void anOmittedAuthoredFileIsSeededAndReported() {
+        ObjectNode args = args(files -> {
+        });
+        ArrayNode files = (ArrayNode) args.get("files");
+        for (int i = files.size() - 1; i >= 0; i--) {
+            if (files.get(i).get("filename").asText().equals("OrdersServiceImpl.java")) {
+                files.remove(i);
+            }
+        }
+        InterfaceDeployPreparer.Prepared prepared = preparer.prepare(args);
+        assertEquals(List.of("OrdersServiceImpl.java"), prepared.seeded());
+        assertTrue(filesOf(prepared.args()).get("OrdersServiceImpl.java")
+                .contains("UnsupportedOperationException"));
+    }
+
+    /** The author's own implementation must survive — authored files are never replaced. */
+    @Test
+    void anAuthoredFileThatWasSubmittedIsKept() {
+        String implementation = """
+                package module.orders;
+                import org.springframework.stereotype.Service;
+                @Service
+                public class OrdersServiceImpl implements OrdersService {
+                    // real implementation
+                }
+                """;
+        ObjectNode args = args(files -> {
+        });
+        ArrayNode files = (ArrayNode) args.get("files");
+        for (int i = 0; i < files.size(); i++) {
+            if (files.get(i).get("filename").asText().equals("OrdersServiceImpl.java")) {
+                ((ObjectNode) files.get(i)).put("content", implementation);
+            }
+        }
+        InterfaceDeployPreparer.Prepared prepared = preparer.prepare(args);
+        assertEquals(List.of(), prepared.seeded());
+        assertEquals(implementation, filesOf(prepared.args()).get("OrdersServiceImpl.java"));
+    }
+
+    // --- sealing and probes ---
+
+    @Test
+    void theSpecIsSealedAsAReservedResource() {
+        ObjectNode prepared = preparer.prepare(args(files -> {
+        })).args();
+        JsonNode sealed = prepared.get("files").valueStream()
+                .filter(f -> SpecResource.PATH.equals(f.get("filename").asText()))
+                .findFirst().orElseThrow();
+        assertEquals("resource", sealed.get("kind").asText());
+        InterfaceSpec roundTripped = assertDoesNotThrowSpec(sealed.get("content").asText());
+        assertEquals(SPEC.operations().size(), roundTripped.operations().size());
+        assertEquals(InterfaceSpec.DataAccess.MYBATIS, roundTripped.dataAccess());
+    }
+
+    private InterfaceSpec assertDoesNotThrowSpec(String json) {
+        try {
+            return mapper.readValue(json, InterfaceSpec.class);
+        } catch (Exception e) {
+            throw new AssertionError("sealed spec did not round-trip: " + json, e);
+        }
+    }
+
+    /** A caller must not be able to shadow the sealed spec with their own resource at that path. */
+    @Test
+    void aCallerSuppliedSpecResourceCannotShadowTheSealedOne() {
+        InterfaceDeployPreparer.Prepared prepared = preparer.prepare(args(files ->
+                addFile(files, SpecResource.PATH, "{\"description\":\"lies\"}", "resource")));
+        String sealed = filesOf(prepared.args()).get(SpecResource.PATH);
+        assertFalse(sealed.contains("lies"), sealed);
+        assertTrue(sealed.contains("getOrder"), sealed);
+    }
+
+    @Test
+    void probesAreGeneratedIntoTheVerificationPlan() {
+        InterfaceDeployPreparer.Prepared prepared = preparer.prepare(args(files -> {
+        }));
+        assertEquals(1, prepared.probes().size());
+        JsonNode integration = prepared.args().at("/verification/integration");
+        assertEquals(1, integration.size());
+        assertEquals("GET", integration.get(0).get("method").asText());
+        assertEquals("/orders/1001", integration.get(0).get("path").asText());
+        assertEquals(200, integration.get(0).get("expectedStatus").asInt());
+    }
+
+    @Test
+    void aCallerSuppliedVerificationPlanIsMergedNotReplaced() {
+        ObjectNode args = args(files -> {
+        });
+        ObjectNode verification = args.putObject("verification");
+        verification.put("loadPath", "/orders");
+        verification.put("concurrency", 4);
+        ObjectNode probe = verification.putArray("integration").addObject();
+        probe.put("method", "GET");
+        probe.put("path", "/orders/9999");
+        probe.put("expectedStatus", 404);
+
+        JsonNode merged = preparer.prepare(args).args().get("verification");
+        assertEquals("/orders", merged.get("loadPath").asText());
+        assertEquals(4, merged.get("concurrency").asInt());
+        assertEquals(2, merged.get("integration").size(), merged::toString);
+    }
+
+    // --- rejections ---
+
+    /** A manifest cannot carry a specId and cannot be rewritten file-by-file, so it is refused outright. */
+    @Test
+    void theManifestFormIsRefused() {
+        ObjectNode args = mapper.createObjectNode();
+        args.put("id", "orders");
+        args.put("version", "1");
+        args.put("manifest", "id: orders\nversion: 1\n");
+        assertTrue(rejects(args).getMessage().contains("manifest form is not accepted"));
+    }
+
+    @Test
+    void aCallWithNoDeclaredInterfaceIsRefused() {
+        ObjectNode args = mapper.createObjectNode();
+        args.put("id", "orders");
+        args.put("version", "1");
+        args.putArray("files");
+        assertTrue(rejects(args).getMessage().contains("requires a declared interface"));
+    }
+
+    @Test
+    void anUnknownSpecIdIsRefused() {
+        ObjectNode args = args(files -> {
+        });
+        args.put("specId", "00000000-0000-0000-0000-000000000000");
+        assertTrue(rejects(args).getMessage().contains("unknown or expired"));
+    }
+
+    /** A draft belongs to the module it was defined for; reusing it elsewhere would deploy the wrong contract. */
+    @Test
+    void aSpecIdFromAnotherModuleIsRefused() {
+        ObjectNode args = args(files -> {
+        });
+        args.put("id", "invoices");
+        assertTrue(rejects(args).getMessage().contains("was defined for module 'orders'"));
+    }
+
+    @Test
+    void duplicateFileEntriesAreRefused() {
+        ObjectNode args = args(files -> addFile(files, "OrdersServiceImpl.java", "duplicate", "source"));
+        assertTrue(rejects(args).getMessage().contains("two entries for"));
+    }
+
+    /** MyBatis: the mapper XML shipped with empty statements means the SQL was never written. */
+    @Test
+    void anUnwrittenMapperStatementIsRefused() {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("id", "orders");
+        root.put("version", "1.0.0");
+        root.put("specId", draftStore.put("orders", "1.0.0", "module.orders", SPEC, SKELETON));
+        ArrayNode files = root.putArray("files");
+        for (GeneratedFile file : SKELETON.authored()) {
+            addFile(files, file.filename(), file.content(), file.kind().wire());
+        }
+        assertTrue(rejects(root).getMessage().contains("has an empty body"));
+    }
+
+    @Test
+    void aTamperedMapperNamespaceIsRefused() {
+        ObjectNode args = args(files -> {
+        });
+        ArrayNode files = (ArrayNode) args.get("files");
+        for (int i = 0; i < files.size(); i++) {
+            ObjectNode file = (ObjectNode) files.get(i);
+            if (file.get("filename").asText().endsWith(".xml")) {
+                file.put("content", file.get("content").asText()
+                        .replace("namespace=\"module.orders.OrdersMapper\"", "namespace=\"orders\""));
+            }
+        }
+        assertTrue(rejects(args).getMessage().contains("must equal the Mapper interface FQCN"));
+    }
+
+    // --- the inline form ---
+
+    @Test
+    void anInlineInterfaceIsValidatedAndGenerated() throws Exception {
+        ObjectNode args = mapper.createObjectNode();
+        args.put("id", "orders");
+        args.put("version", "1.0.0");
+        args.put("packageName", "module.orders");
+        args.set("interface", mapper.valueToTree(SPEC));
+        ArrayNode files = args.putArray("files");
+        for (GeneratedFile file : SKELETON.authored()) {
+            addFile(files, file.filename(),
+                    file.filename().endsWith(".xml") ? filledXml(file.content()) : file.content(),
+                    file.kind().wire());
+        }
+        InterfaceDeployPreparer.Prepared prepared = preparer.prepare(args);
+        assertEquals(null, prepared.specId(), "an inline spec has no draft id");
+        assertEquals("module.orders.OrdersController", prepared.args().get("controller").asText());
+    }
+
+    @Test
+    void anInlineInterfaceWithoutAPackageNameIsRefused() {
+        ObjectNode args = mapper.createObjectNode();
+        args.put("id", "orders");
+        args.put("version", "1.0.0");
+        args.set("interface", mapper.valueToTree(SPEC));
+        args.putArray("files");
+        assertTrue(rejects(args).getMessage().contains("packageName"));
+    }
+
+    @Test
+    void anInvalidInlineInterfaceIsRefused() {
+        ObjectNode args = mapper.createObjectNode();
+        args.put("id", "orders");
+        args.put("version", "1.0.0");
+        args.put("packageName", "module.orders");
+        args.putObject("interface").put("description", "설명 문장");
+        args.putArray("files");
+        assertTrue(rejects(args).getMessage().contains("at least one operation"));
+    }
+
+    // --- the service layer cannot change under a deployed module ---
+
+    /** Pretends {@code orders} is already deployed carrying {@code spec} as its sealed resource. */
+    private void alreadyDeployedWith(InterfaceSpec spec) {
+        when(platform.find("orders")).thenReturn(Optional.of(ModuleDescriptor.builder()
+                .id("orders").version("1.0.0")
+                .resources(Map.of(SpecResource.PATH,
+                        org.htcom.protean.module.ModuleResource.text(SpecResource.serialize(mapper, spec))))
+                .build()));
+    }
+
+    /**
+     * Switching the shape would strand the previous mode's files — the old interface-typed
+     * {@code OrdersService.java} counts as authored in the interface-less mode, so the replace loop keeps it, and
+     * {@code OrdersServiceImpl.java} survives too. The module then holds two service structures and will not
+     * compile, so the deploy is refused rather than half-applied.
+     */
+    @Test
+    void droppingTheServiceInterfaceOnADeployedModuleIsRefused() {
+        alreadyDeployedWith(SPEC.withServiceInterface(true));
+        ObjectNode args = args(files -> { });
+        args.remove("specId");
+        args.put("packageName", "module.orders");
+        args.set("interface", mapper.valueToTree(SPEC.withServiceInterface(false)));
+
+        String message = rejects(args).getMessage();
+        assertTrue(message.contains("serviceInterface"), message);
+        assertTrue(message.contains("uninstall"), () -> "the message must say how to proceed: " + message);
+    }
+
+    @Test
+    void addingTheServiceInterfaceToADeployedModuleIsRefused() {
+        alreadyDeployedWith(SPEC.withServiceInterface(false));
+        ObjectNode args = args(files -> { });
+        args.remove("specId");
+        args.put("packageName", "module.orders");
+        args.set("interface", mapper.valueToTree(SPEC.withServiceInterface(true)));
+
+        assertTrue(rejects(args).getMessage().contains("serviceInterface"));
+    }
+
+    @Test
+    void redeployingTheSameShapeIsAllowed() {
+        alreadyDeployedWith(SPEC.withServiceInterface(true));
+
+        InterfaceDeployPreparer.Prepared prepared = preparer.prepare(args(files -> { }));
+
+        assertEquals("orders", prepared.moduleId());
+    }
+
+    /** A module with no sealed spec (deployed before the wrapper, or outside it) must not be blocked by this. */
+    @Test
+    void aDeployedModuleWithoutASealedSpecDoesNotBlockTheDeploy() {
+        when(platform.find("orders")).thenReturn(Optional.of(
+                ModuleDescriptor.builder().id("orders").version("0.9.0").build()));
+
+        assertEquals("orders", preparer.prepare(args(files -> { })).moduleId());
+    }
+}

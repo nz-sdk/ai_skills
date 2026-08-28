@@ -1,0 +1,270 @@
+// Orchestration, and specifically the two branches that are easy to get wrong: an install that succeeded but does
+// not serve what it declared (must be rolled back), and a rollback that itself fails (must be reported, not
+// swallowed — the operator is left with a live module that contradicts its published contract).
+package {{PKG}}.interfacedef.deploy;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.SpecFixtures;
+import {{PKG}}.interfacedef.gen.GeneratedFile;
+import {{PKG}}.interfacedef.gen.SkeletonBundle;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator;
+
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModulePlatform;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class SpecBearingDeployToolTest {
+
+    private static final InterfaceSpec SPEC = SpecFixtures.orders();
+    private static final SkeletonBundle SKELETON = SkeletonGenerator.generate(
+            new SkeletonGenerator.Request("orders", "module.orders", SPEC));
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final DraftStore draftStore = new DraftStore();
+
+    private McpTool delegate;
+    private InterfaceVerifier verifier;
+    private ModulePlatform platform;
+    // Built in setUp, not as a field: it shares the tool's ModulePlatform mock so both see the same deployed
+    // state. Its own lookup is what decides whether a deploy is switching an existing module's service layer.
+    private InterfaceDeployPreparer preparer;
+    private SpecBearingDeployTool tool;
+    private String specId;
+
+    @BeforeEach
+    void setUp() {
+        delegate = mock(McpTool.class);
+        verifier = mock(InterfaceVerifier.class);
+        platform = mock(ModulePlatform.class);
+        preparer = new InterfaceDeployPreparer(mapper, draftStore, platform);
+        when(delegate.name()).thenReturn("protean.deploy_module");
+        when(delegate.description()).thenReturn("Deploys a module.");
+        when(delegate.action()).thenReturn(ModuleActionAuthorizer.ModuleAction.DEPLOY);
+        tool = new SpecBearingDeployTool(delegate, mapper, preparer, verifier, platform, draftStore);
+        specId = draftStore.put("orders", "1.0.0", "module.orders", SPEC, SKELETON);
+    }
+
+    /** A well-formed call: the authored files, with real SQL in the mapper XML. */
+    private ObjectNode args() {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("id", "orders");
+        root.put("version", "1.0.0");
+        root.put("specId", specId);
+        ArrayNode files = root.putArray("files");
+        for (GeneratedFile file : SKELETON.authored()) {
+            ObjectNode node = files.addObject();
+            node.put("kind", file.kind().wire());
+            node.put("filename", file.filename());
+            node.put("content", file.filename().endsWith(".xml")
+                    ? file.content().replaceAll(
+                            "(?s)(<(select|insert|update|delete)\\b[^>]*>)\\s*(<!--.*?-->)?\\s*(</\\2\\s*>)",
+                            "$1SELECT 1$4")
+                    : file.content());
+        }
+        return root;
+    }
+
+    private ObjectNode delegateStatus() {
+        ObjectNode status = mapper.createObjectNode();
+        status.put("id", "orders");
+        status.put("version", "1.0.0");
+        status.put("desiredState", "ACTIVE");
+        return status;
+    }
+
+    private void delegateSucceeds() {
+        when(delegate.call(any(), any()))
+                .thenReturn(McpToolResult.ok("Module orders deployed (ACTIVE)", delegateStatus()));
+    }
+
+    private void verifierReturns(List<String> missing, List<String> extra) {
+        when(verifier.verify(eq("orders"), any()))
+                .thenReturn(new InterfaceVerifier.Verification(missing, extra));
+    }
+
+    // --- delegation surface ---
+
+    @Test
+    void identityAndAuthorizationComeFromTheBuiltIn() {
+        assertEquals("protean.deploy_module", tool.name());
+        assertEquals(ModuleActionAuthorizer.ModuleAction.DEPLOY, tool.action());
+        assertTrue(tool.description().startsWith("Deploys a module."));
+        assertTrue(tool.description().contains("REQUIRES a declared interface"));
+    }
+
+    /** The schema is derived from the built-in's, so protean's own contract is not re-copied by hand. */
+    @Test
+    void inputSchemaAddsTheInterfaceArgumentsAndDropsTheManifestForm() {
+        ObjectNode builtIn = mapper.createObjectNode();
+        builtIn.put("type", "object");
+        ObjectNode properties = builtIn.putObject("properties");
+        properties.putObject("id").put("type", "string");
+        properties.putObject("controller").put("type", "string");
+        properties.putObject("manifest").put("type", "string");
+        builtIn.putArray("oneOf").addObject().putArray("required").add("manifest");
+        when(delegate.inputSchema()).thenReturn(builtIn);
+
+        ObjectNode schema = tool.inputSchema();
+        assertFalse(schema.at("/properties/manifest").isObject(), "the manifest form must be removed");
+        assertFalse(schema.has("oneOf"), "the built-in files[]/manifest oneOf must be replaced");
+        assertEquals("#/$defs/interfaceSpec", schema.at("/properties/interface/$ref").asText());
+        assertTrue(schema.has("$defs"), "the $ref target must be attached at the root");
+        assertEquals(List.of("id", "version", "files"),
+                schema.withArray("required").valueStream().map(JsonNode::asText).toList());
+        assertEquals(2, schema.withArray("anyOf").size(), "specId or interface+packageName");
+        assertTrue(schema.at("/properties/controller/description").asText().contains("Ignored"));
+    }
+
+    // --- success ---
+
+    @Test
+    void aVerifiedDeployReturnsTheDocumentAndClearsTheDraft() {
+        delegateSucceeds();
+        verifierReturns(List.of(), List.of());
+
+        McpToolResult result = tool.call(args(), null);
+
+        assertFalse(result.isError(), result::text);
+        assertEquals("VERIFIED", result.structured().get("verificationStatus").asText());
+        assertEquals(specId, result.structured().get("specId").asText());
+        assertTrue(result.structured().get("document").asText().startsWith("# 주문 API"));
+        // The document is returned inline so the caller does not need a second round trip for it.
+        assertTrue(result.text().contains("--- interface definition document ---"), result::text);
+        assertTrue(draftStore.find(specId).isEmpty(), "a consumed draft must not linger");
+    }
+
+    @Test
+    void generatedProbesAndUndeclaredRoutesAreReported() {
+        delegateSucceeds();
+        verifierReturns(List.of(), List.of("GET /orders/internal"));
+
+        McpToolResult result = tool.call(args(), null);
+
+        assertEquals("VERIFIED_WITH_EXTRAS", result.structured().get("verificationStatus").asText());
+        assertEquals(List.of("GET /orders/internal"),
+                result.structured().withArray("undeclaredRoutes").valueStream()
+                        .map(JsonNode::asText).toList());
+        assertEquals(List.of("GET /orders/1001 -> 200"),
+                result.structured().withArray("generatedProbes").valueStream()
+                        .map(JsonNode::asText).toList());
+        assertTrue(result.text().contains("Routes served but not declared"), result::text);
+    }
+
+    @Test
+    void discardedEditsAndSeededFilesAreReportedBack() {
+        delegateSucceeds();
+        verifierReturns(List.of(), List.of());
+
+        ObjectNode args = args();
+        ObjectNode tampered = ((ArrayNode) args.get("files")).addObject();
+        tampered.put("kind", "source");
+        tampered.put("filename", "OrdersController.java");
+        tampered.put("content", "package module.orders;\npublic class OrdersController {}\n");
+
+        McpToolResult result = tool.call(args, null);
+
+        assertEquals(List.of("OrdersController.java"),
+                result.structured().withArray("replacedFiles").valueStream()
+                        .map(JsonNode::asText).toList());
+        assertTrue(result.text().contains("your edits to these were discarded"), result::text);
+    }
+
+    // --- failure paths ---
+
+    /** ModulePlatform.install already undeployed and removed the store record, so there is nothing to undo. */
+    @Test
+    void aFailedDelegateIsPassedStraightThroughWithNoRollback() {
+        when(delegate.call(any(), any())).thenReturn(McpToolResult.error("gate ① failed: unit tests failed 1/2"));
+
+        McpToolResult result = tool.call(args(), null);
+
+        assertTrue(result.isError());
+        assertTrue(result.text().contains("gate ① failed"));
+        verify(platform, never()).uninstall(any());
+        verify(verifier, never()).verify(any(), any());
+    }
+
+    /**
+     * The case gate-3 probes cannot cover: createOrder has a request body, so no probe exists for it and install
+     * would have succeeded even though the route is not served.
+     */
+    @Test
+    void aDeclaredRouteThatIsNotServedIsRolledBack() {
+        delegateSucceeds();
+        verifierReturns(List.of("POST /orders (operationId createOrder)"), List.of());
+
+        McpToolResult result = tool.call(args(), null);
+
+        assertTrue(result.isError());
+        assertTrue(result.text().contains("does not serve every declared route"), result::text);
+        assertTrue(result.text().contains("POST /orders (operationId createOrder)"), result::text);
+        verify(platform).uninstall("orders");
+    }
+
+    /** If the rollback fails too, both facts have to reach the operator. */
+    @Test
+    void aFailedRollbackIsReportedRatherThanSwallowed() {
+        delegateSucceeds();
+        verifierReturns(List.of("POST /orders (operationId createOrder)"), List.of());
+        doThrow(new IllegalStateException("module not deployed")).when(platform).uninstall("orders");
+
+        McpToolResult result = tool.call(args(), null);
+
+        assertTrue(result.isError());
+        assertTrue(result.text().contains("the rollback itself failed"), result::text);
+        assertTrue(result.text().contains("uninstall it manually"), result::text);
+    }
+
+    @Test
+    void aPreparationFailureNeverReachesTheBuiltIn() {
+        ObjectNode args = args();
+        args.remove("specId");
+
+        McpToolResult result = tool.call(args, null);
+
+        assertTrue(result.isError());
+        assertTrue(result.text().contains("requires a declared interface"), result::text);
+        verify(delegate, never()).call(any(), any());
+    }
+
+    /** The built-in must receive the rewritten arguments, not the caller's. */
+    @Test
+    void theBuiltInReceivesThePreparedArguments() {
+        delegateSucceeds();
+        verifierReturns(List.of(), List.of());
+
+        tool.call(args(), null);
+
+        org.mockito.ArgumentCaptor<JsonNode> captor = org.mockito.ArgumentCaptor.forClass(JsonNode.class);
+        verify(delegate).call(captor.capture(), any());
+        JsonNode passed = captor.getValue();
+        assertEquals("module.orders.OrdersController", passed.get("controller").asText());
+        assertFalse(passed.has("specId"), "specId is not part of the built-in's contract");
+        assertTrue(passed.at("/verification/integration").size() > 0, "probes must be attached");
+        assertTrue(passed.get("files").valueStream()
+                        .anyMatch(f -> SpecResource.PATH.equals(f.get("filename").asText())),
+                "the spec must be sealed into the module");
+    }
+}

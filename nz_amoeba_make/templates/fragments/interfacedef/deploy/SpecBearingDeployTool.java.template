@@ -1,0 +1,265 @@
+// [CAPABILITY: override a built-in MCP tool] Wraps protean.deploy_module / protean.update_module — layer L2.
+//
+// Registered by name over the built-in, so an agent cannot reach the unwrapped tool: McpDispatcher keeps tools in a
+// Map<name, McpTool> and registerTool replaces by key. The built-in is not reimplemented, it is DELEGATED to, so
+// gates, compilation, the store and rollback all stay protean's.
+//
+// Registration goes through an ApplicationRunner rather than a same-name @Component bean. The dispatcher's
+// constructor fills its map by iterating the injected List<McpTool>, so with two beans of one name the winner is
+// bean-injection order — a coin flip. Looking the original up and calling registerTool is deterministic, and it is
+// also the only way to get a reference to the delegate.
+//
+// What this layer can and cannot guarantee: it closes the MCP path completely, but the admin REST surface
+// (POST/PUT/PATCH /platform/modules) never reaches ModuleActionAuthorizer and therefore never reaches this class.
+// Only raising that path to mcp.admin in SecurityConfig, plus the gate-2 CodeRule, covers it.
+package {{PKG}}.interfacedef.deploy;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.mcp.InterfaceSpecSchema;
+import {{PKG}}.interfacedef.render.MarkdownRenderer;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolAnnotations;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModulePlatform;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+
+/** One wrapper instance per wrapped built-in. Immutable and stateless beyond its collaborators. */
+public final class SpecBearingDeployTool implements McpTool {
+
+    private static final Logger log = LoggerFactory.getLogger(SpecBearingDeployTool.class);
+
+    private final McpTool delegate;
+    private final ObjectMapper mapper;
+    private final InterfaceDeployPreparer preparer;
+    private final InterfaceVerifier verifier;
+    private final ModulePlatform platform;
+    private final DraftStore draftStore;
+
+    public SpecBearingDeployTool(McpTool delegate, ObjectMapper mapper, InterfaceDeployPreparer preparer,
+                                 InterfaceVerifier verifier, ModulePlatform platform, DraftStore draftStore) {
+        this.delegate = delegate;
+        this.mapper = mapper;
+        this.preparer = preparer;
+        this.verifier = verifier;
+        this.platform = platform;
+        this.draftStore = draftStore;
+    }
+
+    @Override
+    public String name() {
+        return delegate.name();
+    }
+
+    @Override
+    public String title() {
+        return delegate.title();
+    }
+
+    @Override
+    public McpToolAnnotations annotations() {
+        return delegate.annotations();
+    }
+
+    /** Unchanged from the built-in: DEPLOY / UPDATE, so this stays on {@code mcp.write}. */
+    @Override
+    public ModuleActionAuthorizer.ModuleAction action() {
+        return delegate.action();
+    }
+
+    @Override
+    public String targetModuleId(JsonNode arguments) {
+        return delegate.targetModuleId(arguments);
+    }
+
+    @Override
+    public String description() {
+        return delegate.description()
+                + " This deployment additionally REQUIRES a declared interface: pass specId from "
+                + "amoeba.define_interface, or an inline 'interface' plus 'packageName'. The DTOs, the controller "
+                + "and — when the spec declares one — the service interface are regenerated from that spec and "
+                + "replace whatever you submit under those names; controller/components/needsSharedBeans are "
+                + "filled in for you. A module's service-layer shape (interface.serviceInterface) cannot change "
+                + "once it is deployed. The manifest form is not accepted here. Verification probes are generated "
+                + "from the spec, and a declared route that is not actually served is rolled back.";
+    }
+
+    /**
+     * The built-in schema plus the interface arguments.
+     *
+     * <p>Built by mutating {@code delegate.inputSchema()} rather than rewriting it. {@code ModuleToolSchemas} is
+     * package-private in protean, so a hand-written copy could not share the builder and would drift from the
+     * built-in's contract on every library upgrade — the exact consistency hazard the project already warns about.
+     */
+    @Override
+    public ObjectNode inputSchema() {
+        ObjectNode schema = delegate.inputSchema();
+        ObjectNode properties = (ObjectNode) schema.get("properties");
+
+        // Not supported here: a manifest has nowhere to carry a specId and cannot be rewritten file-by-file.
+        properties.remove("manifest");
+        properties.putObject("specId").put("type", "string")
+                .put("description", "Draft id from amoeba.define_interface. Either this or 'interface' is required.");
+        properties.putObject("packageName").put("type", "string")
+                .put("pattern", InterfaceSpecSchema.PACKAGE_PATTERN)
+                .put("description", "Base package, required only with an inline 'interface'.");
+        properties.set("interface", InterfaceSpecSchema.interfaceRef(mapper));
+        if (properties.has("controller")) {
+            properties.putObject("controller").put("type", "string")
+                    .put("description", "Ignored: taken from the generated skeleton.");
+        }
+
+        // Replace the built-in's files[]/manifest oneOf. controller is no longer required — it is supplied.
+        schema.remove("oneOf");
+        schema.putArray("required").add("id").add("version").add("files");
+        ArrayNode anyOf = schema.putArray("anyOf");
+        anyOf.addObject().putArray("required").add("specId");
+        anyOf.addObject().putArray("required").add("interface").add("packageName");
+        InterfaceSpecSchema.attachDefs(schema, mapper);
+        return schema;
+    }
+
+    /** The built-in module status, plus what this layer decided. */
+    @Override
+    public ObjectNode outputSchema() {
+        ObjectNode schema = delegate.outputSchema();
+        if (schema == null || !schema.has("properties")) {
+            return schema;
+        }
+        ObjectNode p = (ObjectNode) schema.get("properties");
+        p.putObject("specId").putArray("type").add("string").add("null");
+        p.putObject("verificationStatus").put("type", "string")
+                .put("description", "VERIFIED | VERIFIED_WITH_EXTRAS");
+        stringArray(p, "replacedFiles",
+                "Server-owned files you submitted with different content. Your edits were discarded.");
+        stringArray(p, "seededFiles", "Author-owned files you omitted, filled in from the skeleton.");
+        stringArray(p, "generatedProbes", "Gate-3 probes generated from the spec.");
+        stringArray(p, "undeclaredRoutes",
+                "Routes the module serves that the spec does not declare. Reported, not blocking.");
+        p.putObject("document").put("type", "string")
+                .put("description", "The interface definition document, rendered as markdown.");
+        return schema;
+    }
+
+    private void stringArray(ObjectNode properties, String name, String description) {
+        ObjectNode node = properties.putObject(name);
+        node.put("type", "array").put("description", description);
+        node.putObject("items").put("type", "string");
+    }
+
+    @Override
+    public McpToolResult call(JsonNode arguments, McpCallContext ctx) {
+        InterfaceDeployPreparer.Prepared prepared;
+        try {
+            prepared = preparer.prepare(arguments);
+        } catch (InterfaceDeployPreparer.PreparationException e) {
+            return McpToolResult.error(e.getMessage());
+        }
+
+        // Gates, compilation, store persistence and protean's own rollback all happen in here.
+        McpToolResult result = delegate.call(prepared.args(), ctx);
+        if (result.isError()) {
+            // ModulePlatform.install already ran undeploy + store.remove on failure, so there is nothing to undo.
+            return result;
+        }
+
+        InterfaceVerifier.Verification verification = verifier.verify(prepared.moduleId(), prepared.spec());
+        if (!verification.missing().isEmpty()) {
+            return rollback(prepared, verification);
+        }
+
+        if (prepared.specId() != null) {
+            draftStore.remove(prepared.specId());
+        }
+        return success(prepared, result, verification);
+    }
+
+    /**
+     * A declared route is not being served, so the module comes back out.
+     *
+     * <p>This is the case gate-3 probes cannot cover: an operation with a request body has no probeable form
+     * (VerificationPlan.Probe carries no body), so nothing inside install would have caught it.
+     */
+    private McpToolResult rollback(InterfaceDeployPreparer.Prepared prepared,
+                                   InterfaceVerifier.Verification verification) {
+        String moduleId = prepared.moduleId();
+        StringBuilder message = new StringBuilder();
+        message.append("Module '").append(moduleId)
+                .append("' installed but does not serve every declared route, so it was rolled back.\n\n")
+                .append("Declared but not served:\n  - ")
+                .append(String.join("\n  - ", verification.missing()))
+                .append("\n\nThe controller is generated from the spec, so this normally means the module's "
+                        + "component list or its child context failed to register the controller.");
+        try {
+            platform.uninstall(moduleId);
+        } catch (RuntimeException e) {
+            // Report both problems: the operator has a live module that does not match its declared interface.
+            log.error("failed to roll back module {} after an interface mismatch", moduleId, e);
+            message.append("\n\nWARNING: the rollback itself failed (")
+                    .append(e.getMessage())
+                    .append("). The module is still installed and does NOT match its declared interface — "
+                            + "uninstall it manually.");
+        }
+        return McpToolResult.error(message.toString());
+    }
+
+    private McpToolResult success(InterfaceDeployPreparer.Prepared prepared, McpToolResult delegated,
+                                  InterfaceVerifier.Verification verification) {
+        String document = MarkdownRenderer.render(prepared.moduleId(), prepared.version(), prepared.spec());
+
+        ObjectNode structured = delegated.structured() instanceof ObjectNode node
+                ? node.deepCopy()
+                : mapper.createObjectNode();
+        if (prepared.specId() == null) {
+            structured.putNull("specId");
+        } else {
+            structured.put("specId", prepared.specId());
+        }
+        structured.put("verificationStatus", verification.status());
+        putStrings(structured, "replacedFiles", prepared.replaced());
+        putStrings(structured, "seededFiles", prepared.seeded());
+        putStrings(structured, "generatedProbes", prepared.probes().stream()
+                .map(p -> p.method() + " " + p.path() + " -> " + p.expectedStatus())
+                .toList());
+        putStrings(structured, "undeclaredRoutes", verification.extra());
+        structured.put("document", document);
+
+        StringBuilder text = new StringBuilder(delegated.text() == null ? "" : delegated.text());
+        text.append("\n\nInterface verification: ").append(verification.status()).append('\n');
+        appendList(text, "Regenerated from the spec (your edits to these were discarded)", prepared.replaced());
+        appendList(text, "Filled in from the skeleton because you omitted them", prepared.seeded());
+        appendList(text, "Routes served but not declared — add them to the spec or remove them",
+                verification.extra());
+        if (!prepared.probes().isEmpty()) {
+            appendList(text, "Verification probes generated and passed", prepared.probes().stream()
+                    .map(p -> p.method() + " " + p.path() + " expecting " + p.expectedStatus())
+                    .toList());
+        }
+        // The document is what the caller actually asked the platform for, so it is returned inline rather than
+        // requiring a second round trip.
+        text.append("\n--- interface definition document ---\n\n").append(document);
+        return McpToolResult.ok(text.toString(), structured);
+    }
+
+    private static void putStrings(ObjectNode node, String field, List<String> values) {
+        ArrayNode array = node.putArray(field);
+        values.forEach(array::add);
+    }
+
+    private static void appendList(StringBuilder out, String heading, List<String> values) {
+        if (values.isEmpty()) {
+            return;
+        }
+        out.append('\n').append(heading).append(":\n  - ").append(String.join("\n  - ", values)).append('\n');
+    }
+}

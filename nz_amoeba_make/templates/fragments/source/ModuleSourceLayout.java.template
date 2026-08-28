@@ -1,0 +1,205 @@
+// [MODULE SOURCE] The one place that maps a descriptor's three source maps onto a project layout.
+//
+// Why it lives here instead of in each tool: list/search/export all need the same view — sources under
+// src/main/java, tests under src/test/java, resources under src/main/resources. Duplicating that mapping per
+// tool would let a path shown by amoeba.list_module_files drift from the path amoeba.export_module_source
+// emits, which silently breaks the intended flow of feeding a listed path back into export's `paths`.
+//
+// A deployed module never exists as individual files on disk — it is one descriptor JSON holding FQCN-to-text
+// maps. This class is what turns that back into something that looks like a source tree.
+package {{PKG}}.source;
+
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModuleResource;
+import org.htcom.protean.module.ResourcePaths;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+public final class ModuleSourceLayout {
+
+    public static final String SOURCE_ROOT = "src/main/java/";
+    public static final String TEST_ROOT = "src/test/java/";
+    public static final String RESOURCE_ROOT = "src/main/resources/";
+
+    private ModuleSourceLayout() {
+    }
+
+    /**
+     * Which descriptor map a file came from.
+     *
+     * <p>The wire names deliberately match the descriptor's own field names ({@code sources}/{@code tests}/
+     * {@code resources}) rather than the enum constants, so a caller reading a raw descriptor and a caller
+     * reading these tools' output are using the same vocabulary.
+     */
+    public enum Kind {
+        SOURCE("sources"),
+        TEST("tests"),
+        RESOURCE("resources");
+
+        private final String wire;
+
+        Kind(String wire) {
+            this.wire = wire;
+        }
+
+        public String wire() {
+            return wire;
+        }
+
+        /** Resolves a wire name from the tools' {@code include} argument. Empty when it matches nothing. */
+        public static Optional<Kind> fromWire(String value) {
+            if (value == null) {
+                return Optional.empty();
+            }
+            String v = value.trim().toLowerCase(Locale.ROOT);
+            for (Kind k : values()) {
+                if (k.wire.equals(v)) {
+                    return Optional.of(k);
+                }
+            }
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * One file of a deployed module, at its project-layout path.
+     *
+     * @param path    project-relative path, e.g. {@code src/main/java/module/hello/HelloController.java}
+     * @param fqcn    the class name for {@code SOURCE}/{@code TEST}; {@code null} for a resource
+     * @param content UTF-8 text, or the Base64 payload when {@code binary}
+     * @param binary  true when the descriptor stored this resource Base64-encoded
+     * @param bytes   decoded size in bytes (not the Base64 length)
+     * @param lines   line count for text; {@code 0} for binary
+     */
+    public record SourceFile(String path, String fqcn, Kind kind, String content,
+                             boolean binary, int bytes, int lines) {
+
+        static SourceFile text(String path, String fqcn, Kind kind, String content) {
+            String c = content == null ? "" : content;
+            return new SourceFile(path, fqcn, kind, c, false,
+                    c.getBytes(StandardCharsets.UTF_8).length, countLines(c));
+        }
+
+        static SourceFile binary(String path, String base64, int decodedBytes) {
+            return new SourceFile(path, null, Kind.RESOURCE, base64 == null ? "" : base64,
+                    true, decodedBytes, 0);
+        }
+    }
+
+    /**
+     * The files, plus any resource path rejected as unsafe.
+     *
+     * <p>{@code skipped} is expected to stay empty — deploy already normalizes resource paths on the way in — so
+     * a non-empty list means the descriptor was written through a path that bypassed that check. The tools report
+     * it rather than quietly serving a shorter file list, because "the file isn't there" and "the file was
+     * dropped because its path escapes the tree" call for different responses.
+     */
+    public record Layout(List<SourceFile> files, List<String> skipped) {
+
+        public Layout {
+            files = List.copyOf(files);
+            skipped = List.copyOf(skipped);
+        }
+    }
+
+    /**
+     * Views a descriptor as a project tree, restricted to the requested kinds.
+     *
+     * <p>Sorted by path, which puts {@code src/main/java} before {@code src/main/resources} before
+     * {@code src/test/java} for free and makes offset-based paging stable across calls.
+     */
+    public static Layout of(ModuleDescriptor descriptor, Set<Kind> include) {
+        List<SourceFile> files = new ArrayList<>();
+        List<String> skipped = new ArrayList<>();
+
+        if (include.contains(Kind.SOURCE)) {
+            addJava(files, descriptor.sources(), Kind.SOURCE, SOURCE_ROOT);
+        }
+        if (include.contains(Kind.TEST)) {
+            addJava(files, descriptor.tests(), Kind.TEST, TEST_ROOT);
+        }
+        if (include.contains(Kind.RESOURCE)) {
+            addResources(files, descriptor.resources(), skipped);
+        }
+
+        files.sort(Comparator.comparing(SourceFile::path));
+        skipped.sort(Comparator.naturalOrder());
+        return new Layout(files, skipped);
+    }
+
+    private static void addJava(List<SourceFile> out, Map<String, String> sources, Kind kind, String root) {
+        if (sources == null) {
+            return;
+        }
+        sources.forEach((fqcn, text) -> {
+            if (fqcn != null && !fqcn.isBlank()) {
+                out.add(SourceFile.text(javaPath(root, fqcn), fqcn, kind, text));
+            }
+        });
+    }
+
+    private static void addResources(List<SourceFile> out, Map<String, ModuleResource> resources,
+                                     List<String> skipped) {
+        if (resources == null) {
+            return;
+        }
+        resources.forEach((path, resource) -> {
+            if (resource == null) {
+                return;
+            }
+            String normalized;
+            try {
+                normalized = ResourcePaths.normalize(path);
+            } catch (RuntimeException e) {
+                // One malformed path must not fail the whole listing.
+                skipped.add(String.valueOf(path));
+                return;
+            }
+            String full = RESOURCE_ROOT + normalized;
+            out.add(resource.base64()
+                    ? SourceFile.binary(full, resource.content(), decodedLength(resource))
+                    : SourceFile.text(full, null, Kind.RESOURCE, resource.content()));
+        });
+    }
+
+    /** {@code module.hello.HelloController} -> {@code src/main/java/module/hello/HelloController.java}. */
+    static String javaPath(String root, String fqcn) {
+        return root + fqcn.replace('.', '/') + ".java";
+    }
+
+    /**
+     * Decoded size of a Base64 resource. A corrupt payload reports {@code 0} rather than throwing — a listing
+     * that names the bad file is more useful than one that fails outright.
+     */
+    private static int decodedLength(ModuleResource resource) {
+        try {
+            return resource.bytes().length;
+        } catch (RuntimeException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Line count. A trailing newline does not add a phantom final line, so a 3-line file ending in {@code \n}
+     * reports 3 — matching what an editor shows.
+     */
+    private static int countLines(String s) {
+        if (s.isEmpty()) {
+            return 0;
+        }
+        int lines = 1;
+        for (int i = 0; i < s.length(); i++) {
+            if (s.charAt(i) == '\n') {
+                lines++;
+            }
+        }
+        return s.endsWith("\n") ? lines - 1 : lines;
+    }
+}

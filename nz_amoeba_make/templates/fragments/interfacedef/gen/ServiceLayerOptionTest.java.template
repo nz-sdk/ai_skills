@@ -1,0 +1,218 @@
+// Covers the interface-less service layer (serviceInterface=false): Controller / Service / Mapper with no separate
+// Service interface.
+//
+// The compile assertions are the ones that matter. Dropping the interface means the implementation has nothing to
+// override, so a stray @Override or a leftover `implements` clause is a COMPILE error — and a string assertion
+// looking for the absence of "@Override" would pass on plenty of broken output that javac would reject. Everything
+// here runs the real compiler over the emitted bundle.
+package {{PKG}}.interfacedef.gen;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DataAccess;
+import {{PKG}}.interfacedef.SpecFixtures;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ServiceLayerOptionTest {
+
+    private static SkeletonBundle generate(InterfaceSpec spec) {
+        return SkeletonGenerator.generate(new SkeletonGenerator.Request("orders", "module.orders", spec));
+    }
+
+    /** MyBatis, no service interface — the shape a three-layer team asks for. */
+    private static InterfaceSpec withoutServiceInterface() {
+        return SpecFixtures.orders().withServiceInterface(false);
+    }
+
+    private static InterfaceSpec withoutServiceInterfaceNoDb() {
+        return new InterfaceSpec("주문 API", "주문을 조회하고 생성한다", DataAccess.NONE, false,
+                List.of(SpecFixtures.getOrder(), SpecFixtures.createOrder()));
+    }
+
+    private static Optional<GeneratedFile> file(SkeletonBundle bundle, String filename) {
+        return bundle.files().stream().filter(f -> f.filename().equals(filename)).findFirst();
+    }
+
+    private static String content(SkeletonBundle bundle, String filename) {
+        return file(bundle, filename).map(GeneratedFile::content)
+                .orElseThrow(() -> new AssertionError("no generated file named " + filename
+                        + " (have " + bundle.files().stream().map(GeneratedFile::filename).toList() + ")"));
+    }
+
+    private static void assertCompiles(SkeletonBundle bundle) {
+        List<String> errors = GeneratedSourceCompiler.compile(bundle);
+        assertTrue(errors.isEmpty(), () -> "generated skeleton does not compile:\n" + String.join("\n", errors));
+    }
+
+    // --- the real check ---
+
+    @Test
+    void interfaceLessSkeletonCompiles() {
+        assertCompiles(generate(withoutServiceInterface()));
+    }
+
+    @Test
+    void interfaceLessSkeletonWithoutDataAccessCompiles() {
+        assertCompiles(generate(withoutServiceInterfaceNoDb()));
+    }
+
+    // --- file set ---
+
+    @Test
+    void emitsOneServiceClassAndNoImpl() {
+        SkeletonBundle bundle = generate(withoutServiceInterface());
+
+        assertTrue(file(bundle, "OrdersService.java").isPresent());
+        assertTrue(file(bundle, "OrdersServiceImpl.java").isEmpty(),
+                "the Impl suffix only earns its place when there is an interface to implement");
+    }
+
+    /**
+     * The single service file is AUTHORED. It holds method bodies, so replacing it from the spec on every deploy
+     * would discard the author's logic — the opposite of what the interface split was protecting.
+     */
+    @Test
+    void theServiceClassIsAuthoredNotServerOwned() {
+        SkeletonBundle bundle = generate(withoutServiceInterface());
+
+        assertEquals(List.of("GetOrderResponse.java", "CreateOrderRequest.java", "CreateOrderResponse.java",
+                        "OrdersController.java", "GetOrderRow.java", "OrdersMyBatisConfig.java"),
+                bundle.serverOwned().stream().map(GeneratedFile::filename).toList());
+        assertEquals(List.of("OrdersService.java", "OrdersContractTest.java", "OrdersMapper.java",
+                        "mapper/orders/OrdersMapper.xml"),
+                bundle.authored().stream().map(GeneratedFile::filename).toList());
+    }
+
+    /** Registering the wrong class name leaves components at [controller] alone — the classic wiring failure. */
+    @Test
+    void componentListNamesTheServiceClass() {
+        SkeletonBundle bundle = generate(withoutServiceInterface());
+
+        assertEquals(List.of("module.orders.OrdersController", "module.orders.OrdersService",
+                        "module.orders.OrdersMyBatisConfig"), bundle.componentFqcns());
+        assertEquals("module.orders.OrdersController", bundle.controllerFqcn());
+    }
+
+    // --- the emitted service class ---
+
+    @Test
+    void serviceClassImplementsNothingAndOverridesNothing() {
+        String service = content(generate(withoutServiceInterface()), "OrdersService.java");
+
+        // `extends BaseService` is the common-support seam and is present in both shapes; what this shape drops is
+        // the interface, so there is nothing to implement and nothing to override.
+        assertTrue(service.contains("public class OrdersService extends BaseService {"), service);
+        assertFalse(service.contains("implements"), service);
+        assertFalse(service.contains("@Override"), service);
+        assertTrue(service.contains("@Service"), "it is still the Spring bean the controller injects");
+    }
+
+    /**
+     * The common-support seam must not depend on the service-layer shape. Cross-cutting logic added to BaseService
+     * later has to reach every module, so a project that turned the interface off cannot quietly lose it.
+     */
+    @Test
+    void bothShapesExtendBaseServiceAndImportIt() {
+        String withImpl = content(generate(SpecFixtures.orders()), "OrdersServiceImpl.java");
+        String withoutImpl = content(generate(withoutServiceInterface()), "OrdersService.java");
+
+        assertTrue(withImpl.contains("public class OrdersServiceImpl extends BaseService implements OrdersService {"),
+                "extends must precede implements: " + withImpl);
+        assertTrue(withoutImpl.contains("public class OrdersService extends BaseService {"), withoutImpl);
+        for (String service : List.of(withImpl, withoutImpl)) {
+            assertTrue(service.contains("import {{PKG}}.support.BaseService;"),
+                    "the supertype lives in the host app, so the module source must import it: " + service);
+        }
+    }
+
+    /** Documentation lived on the interface. Dropping the interface must not drop the documentation with it. */
+    @Test
+    void serviceClassInheritsTheDocumentationTheInterfaceCarried() {
+        String service = content(generate(withoutServiceInterface()), "OrdersService.java");
+
+        assertTrue(service.contains("주문을 조회하고 생성한다"),
+                "the spec's description belongs on the class now: " + service);
+        assertTrue(service.contains("주문 단건 조회"),
+                "each operation's summary belongs on its method now: " + service);
+    }
+
+    @Test
+    void serviceClassStillStubsEveryOperation() {
+        String service = content(generate(withoutServiceInterface()), "OrdersService.java");
+
+        assertTrue(service.contains("public GetOrderResponse getOrder("), service);
+        assertTrue(service.contains("public CreateOrderResponse createOrder("), service);
+        // The throw is what makes an unimplemented module fail gate 3 instead of going live serving empty bodies.
+        assertEquals(2, service.split("UnsupportedOperationException", -1).length - 1, service);
+    }
+
+    @Test
+    void serviceClassKeepsTheMapperConstructorUnderMyBatis() {
+        String service = content(generate(withoutServiceInterface()), "OrdersService.java");
+
+        assertTrue(service.contains("private final OrdersMapper mapper;"), service);
+        assertTrue(service.contains("public OrdersService(OrdersMapper mapper)"), service);
+    }
+
+    // --- the controller is identical in both modes ---
+
+    /**
+     * The point of the design: the injected type is named {@code OrdersService} either way, so the controller is
+     * byte-for-byte the same text. If this ever diverges, the mode has leaked somewhere it should not have.
+     */
+    @Test
+    void controllerIsUnchangedBetweenModes() {
+        String withInterface = content(generate(SpecFixtures.orders()), "OrdersController.java");
+        String without = content(generate(withoutServiceInterface()), "OrdersController.java");
+
+        assertEquals(withInterface, without);
+        assertTrue(without.contains("private final OrdersService service;"), without);
+        assertTrue(without.contains("public OrdersController(OrdersService service)"), without);
+    }
+
+    /** Likewise the contract test, which reflects on the controller only. */
+    @Test
+    void contractTestIsUnchangedBetweenModes() {
+        assertEquals(content(generate(SpecFixtures.orders()), "OrdersContractTest.java"),
+                content(generate(withoutServiceInterface()), "OrdersContractTest.java"));
+    }
+
+    @Test
+    void dtosAndMapperArtifactsAreUnchangedBetweenModes() {
+        SkeletonBundle withInterface = generate(SpecFixtures.orders());
+        SkeletonBundle without = generate(withoutServiceInterface());
+
+        for (String filename : List.of("GetOrderResponse.java", "CreateOrderRequest.java", "GetOrderRow.java",
+                "OrdersMapper.java", "OrdersMyBatisConfig.java", "mapper/orders/OrdersMapper.xml")) {
+            assertEquals(content(withInterface, filename), content(without, filename),
+                    () -> filename + " should not depend on the service layer choice");
+        }
+    }
+
+    // --- the default is unchanged ---
+
+    /** An unstated preference must keep generating what it always did. */
+    @Test
+    void unstatedPreferenceStillEmitsTheInterface() {
+        SkeletonBundle bundle = generate(SpecFixtures.orders());
+
+        assertTrue(SpecFixtures.orders().generatesServiceInterface());
+        assertTrue(file(bundle, "OrdersService.java").isPresent());
+        assertTrue(file(bundle, "OrdersServiceImpl.java").isPresent());
+        assertTrue(content(bundle, "OrdersServiceImpl.java").contains("implements OrdersService"));
+        assertTrue(content(bundle, "OrdersServiceImpl.java").contains("@Override"));
+    }
+
+    @Test
+    void explicitTrueMatchesTheDefault() {
+        assertEquals(generate(SpecFixtures.orders().withServiceInterface(true)).files().stream()
+                        .map(GeneratedFile::filename).toList(),
+                generate(SpecFixtures.orders()).files().stream().map(GeneratedFile::filename).toList());
+    }
+}

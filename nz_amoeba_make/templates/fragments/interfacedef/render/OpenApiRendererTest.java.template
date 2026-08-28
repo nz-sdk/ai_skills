@@ -1,0 +1,169 @@
+// These assertions are about OpenAPI 3.0 conformance, not formatting: an emitted `"required": []`, a Response
+// Object without `description`, or an `array` schema without `items` all make the document fail validation in the
+// tools it exists to feed. Each is pinned individually.
+package {{PKG}}.interfacedef.render;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DataAccess;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+import {{PKG}}.interfacedef.SpecFixtures;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class OpenApiRendererTest {
+
+    private final OpenApiRenderer renderer = new OpenApiRenderer(new ObjectMapper());
+
+    private ObjectNode render(InterfaceSpec spec) {
+        return renderer.render("orders", "1.0.0", spec);
+    }
+
+    private ObjectNode renderBody(List<FieldSpec> body) {
+        return render(new InterfaceSpec("t", "이 모듈이 하는 일", DataAccess.NONE,
+                List.of(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장",
+                        List.of(), body, List.of(new ResponseSpec(200, "성공", body))))));
+    }
+
+    /** The request-body schema of the single operation built by {@link #renderBody}. */
+    private static JsonNode bodySchema(ObjectNode doc) {
+        return doc.at("/paths/~1x/post/requestBody/content/application~1json/schema");
+    }
+
+    @Test
+    void envelopeAndInfo() {
+        ObjectNode doc = render(SpecFixtures.orders());
+        assertEquals("3.0.3", doc.get("openapi").asText());
+        assertEquals("주문 API", doc.at("/info/title").asText());
+        assertEquals("1.0.0", doc.at("/info/version").asText());
+        assertEquals("주문을 조회하고 생성한다", doc.at("/info/description").asText());
+    }
+
+    /** info.version is required by OpenAPI, so a draft with no module version still gets a value. */
+    @Test
+    void draftWithoutAVersionStillEmitsInfoVersion() {
+        ObjectNode doc = renderer.render("orders", null,
+                new InterfaceSpec(null, "이 모듈이 하는 일", DataAccess.NONE,
+                        List.of(SpecFixtures.getOrder())));
+        assertEquals("0", doc.at("/info/version").asText());
+        assertEquals("orders", doc.at("/info/title").asText());
+    }
+
+    @Test
+    void operationLandsUnderItsPathAndLowercasedMethod() {
+        ObjectNode doc = render(SpecFixtures.orders());
+        assertEquals("getOrder", doc.at("/paths/~1orders~1{orderId}/get/operationId").asText());
+        assertEquals("createOrder", doc.at("/paths/~1orders/post/operationId").asText());
+    }
+
+    /** Two operations on the same path must merge into one path item, not overwrite each other. */
+    @Test
+    void methodsShareOnePathItem() {
+        ObjectNode doc = render(new InterfaceSpec("t", "이 모듈이 하는 일", DataAccess.NONE, List.of(
+                new OperationSpec("list", HttpMethod.GET, "/orders", "목록", "주문 목록을 반환한다",
+                        List.of(), null, List.of(new ResponseSpec(200, "성공", List.of()))),
+                SpecFixtures.createOrder())));
+        JsonNode pathItem = doc.at("/paths/~1orders");
+        assertTrue(pathItem.has("get"), pathItem::toString);
+        assertTrue(pathItem.has("post"), pathItem::toString);
+    }
+
+    @Test
+    void parameterCarriesSchemaAndExample() {
+        JsonNode p = render(SpecFixtures.orders()).at("/paths/~1orders~1{orderId}/get/parameters/0");
+        assertEquals("orderId", p.get("name").asText());
+        assertEquals("path", p.get("in").asText());
+        assertTrue(p.get("required").asBoolean());
+        assertEquals("integer", p.at("/schema/type").asText());
+        assertEquals("1001", p.get("example").asText());
+    }
+
+    /** A repeated query parameter is an array; OpenAPI rejects an array schema with no `items`. */
+    @Test
+    void arrayQueryParameterGetsAnItemsSchema() {
+        ObjectNode doc = render(new InterfaceSpec("t", "이 모듈이 하는 일", DataAccess.NONE,
+                List.of(new OperationSpec("op", HttpMethod.GET, "/x", "요약", "설명 문장",
+                        List.of(new ParamSpec("tags", ParamIn.QUERY, FieldType.ARRAY, false,
+                                "태그로 필터", "a")),
+                        null, List.of(new ResponseSpec(200, "성공", List.of()))))));
+        JsonNode schema = doc.at("/paths/~1x/get/parameters/0/schema");
+        assertEquals("array", schema.get("type").asText());
+        assertEquals("string", schema.at("/items/type").asText());
+    }
+
+    @Test
+    void nestedObjectAndArrayBecomeInlineSchemas() {
+        JsonNode schema = bodySchema(renderBody(SpecFixtures.orderBody()));
+        assertEquals("object", schema.get("type").asText());
+        assertEquals("date-time", schema.at("/properties/orderedAt/format").asText());
+        assertEquals("object", schema.at("/properties/customer/type").asText());
+        assertEquals("string", schema.at("/properties/customer/properties/name/type").asText());
+        assertEquals("array", schema.at("/properties/tags/type").asText());
+        assertEquals("string", schema.at("/properties/tags/items/type").asText());
+    }
+
+    @Test
+    void requiredListsOnlyRequiredFieldsAndIsOmittedWhenEmpty() {
+        JsonNode withRequired = bodySchema(renderBody(SpecFixtures.orderBody()));
+        List<String> required = withRequired.withArray("required").valueStream()
+                .map(JsonNode::asText).toList();
+        assertEquals(List.of("orderId", "orderedAt", "customer"), required);
+
+        // OpenAPI 3.0 requires `required` to be non-empty, so an all-optional object must omit the key entirely.
+        JsonNode allOptional = bodySchema(renderBody(List.of(
+                FieldSpec.scalar("note", FieldType.STRING, false, "선택 입력 메모"))));
+        assertFalse(allOptional.has("required"), allOptional::toString);
+    }
+
+    @Test
+    void nestedObjectKeepsItsOwnRequiredList() {
+        JsonNode customer = bodySchema(renderBody(SpecFixtures.orderBody())).at("/properties/customer");
+        assertEquals(List.of("name"), customer.withArray("required").valueStream()
+                .map(JsonNode::asText).toList());
+        assertEquals("주문한 고객 정보", customer.get("description").asText());
+    }
+
+    @Test
+    void declaredRequestBodyIsRequiredAndOmittedWhenAbsent() {
+        ObjectNode doc = render(SpecFixtures.orders());
+        assertTrue(doc.at("/paths/~1orders/post/requestBody/required").asBoolean());
+        assertTrue(doc.at("/paths/~1orders~1{orderId}/get/requestBody").isMissingNode());
+    }
+
+    /** `description` is REQUIRED on a Response Object even when the spec left it blank. */
+    @Test
+    void responseAlwaysHasADescriptionAndOmitsContentForAnEmptyBody() {
+        ObjectNode doc = render(new InterfaceSpec("t", "이 모듈이 하는 일", DataAccess.NONE,
+                List.of(new OperationSpec("op", HttpMethod.DELETE, "/x", "요약", "설명 문장",
+                        List.of(), null, List.of(new ResponseSpec(204, null, List.of()))))));
+        JsonNode response = doc.at("/paths/~1x/delete/responses/204");
+        assertTrue(response.has("description"), response::toString);
+        assertEquals("", response.get("description").asText());
+        assertFalse(response.has("content"), response::toString);
+    }
+
+    @Test
+    void everyDeclaredStatusIsPresent() {
+        ObjectNode doc = render(new InterfaceSpec("t", "이 모듈이 하는 일", DataAccess.NONE,
+                List.of(new OperationSpec("op", HttpMethod.GET, "/x", "요약", "설명 문장", List.of(), null,
+                        List.of(new ResponseSpec(200, "성공", List.of()),
+                                new ResponseSpec(404, "대상을 찾지 못함", List.of()))))));
+        JsonNode responses = doc.at("/paths/~1x/get/responses");
+        assertTrue(responses.has("200"), responses::toString);
+        assertTrue(responses.has("404"), responses::toString);
+    }
+}

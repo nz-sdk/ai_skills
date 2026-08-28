@@ -1,0 +1,312 @@
+// Embedded Authorization Server, end to end and over real HTTP: browser login → authorization_code + PKCE →
+// use the resulting token on /platform/mcp.
+//
+// THE POINT OF THIS TEST is the last hop. Issuing a token and validating a token are separate halves of the app
+// here, wired through a locally-declared JwtDecoder that backs off Boot's issuer-uri auto-configuration. Nothing
+// short of "log in, then actually call the control plane with what you got" proves those halves agree — a test
+// that stops at the token endpoint would still pass if the Resource Server rejected every token it was handed.
+//
+// A fixed port is used rather than RANDOM_PORT because the issuer must be pinned before the context starts
+// (@DynamicPropertySource runs before a random port is known) and the 'iss' the AS stamps has to be the same
+// string the Resource Server half validates against.
+package {{PKG}}.auth;
+
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
+class EmbeddedAuthFlowTest {
+
+    static final int PORT = 18080;
+    static final String BASE = "http://localhost:" + PORT;
+    static final String RESOURCE_ID = BASE + "/platform/mcp";
+    static final String REDIRECT_URI = "http://127.0.0.1:3334/oauth/callback";
+
+    static final Path keyFile = Path.of("build", "test-auth-jwks-" + System.nanoTime() + ".json");
+    static final Path storeDir = Path.of("build", "test-auth-store-" + System.nanoTime());
+
+    @DynamicPropertySource
+    static void props(DynamicPropertyRegistry r) {
+        r.add("server.port", () -> PORT);
+        r.add("amoeba.auth.enabled", () -> true);
+        r.add("amoeba.auth.jwks-path", () -> keyFile.toString());
+        r.add("amoeba.auth.mcp-redirect-uris", () -> REDIRECT_URI);
+        // The issuer IS this app when embedded — same string on both halves.
+        r.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> BASE);
+        r.add("protean.mcp.authorization.resource", () -> RESOURCE_ID);
+        // Keep the deployed-module store out of the repository working tree.
+        r.add("protean.module-store.dir", storeDir::toString);
+        // The backend override is what makes the dir override mean anything here. If application.yml sets
+        // protean.module-store.backend=jdbc, the jdbc store reads listActive() off the DataSource during startup
+        // reconcile — which would drag this test onto a live database and make an offline `./gradlew test`
+        // impossible. Forcing filesystem keeps the test about the auth flow, which is all it tests. With
+        // amoeba.auth.store=memory nothing else asks for a connection, so no DataSource is ever opened.
+        r.add("protean.module-store.backend", () -> "filesystem");
+    }
+
+    @AfterAll
+    static void cleanup() throws Exception {
+        Files.deleteIfExists(keyFile);
+    }
+
+    private final HttpClient http = HttpClient.newBuilder()
+            .followRedirects(HttpClient.Redirect.NEVER)
+            .build();
+    private final Map<String, String> cookies = new LinkedHashMap<>();
+
+    @BeforeEach
+    void freshSession() {
+        cookies.clear();
+    }
+
+    // ── the whole point: a token this app issued is accepted by the control plane it also guards ──────────────
+
+    @Test
+    void loginIssuesATokenTheControlPlaneAccepts() throws Exception {
+        String token = logInAndGetToken("admin", "admin-pw", "mcp.read mcp.write");
+
+        HttpResponse<String> res = mcp(token, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+
+        assertEquals(200, res.statusCode(), "issued token must be accepted by /platform/mcp: " + res.body());
+        assertTrue(res.body().contains("\"tools\""), "tools/list should return a catalog: " + brief(res.body()));
+    }
+
+    @Test
+    void controlPlaneStillRejectsCallersWithNoToken() throws Exception {
+        // The embedded AS must not have loosened anything: no token is still 401.
+        HttpResponse<String> res = mcp(null, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+        assertEquals(401, res.statusCode(), "an unauthenticated caller must not reach the RCE surface");
+    }
+
+    // ── the audience lock that bounds the embedded key's blast radius ──────────────────────────────────────────
+
+    @Test
+    void issuedTokensAreAudienceLockedToThisApp() throws Exception {
+        Map<String, Object> claims = claimsOf(logInAndGetToken("admin", "admin-pw", "mcp.read"));
+
+        assertEquals(BASE, claims.get("iss"), "iss must be the pinned issuer");
+        assertTrue(String.valueOf(claims.get("aud")).contains(RESOURCE_ID),
+                "★ tokens must be audience-locked so they are useless to any other service: " + claims.get("aud"));
+    }
+
+    // ── per-user scope narrowing, all the way through to the authorizer ────────────────────────────────────────
+
+    @Test
+    void readOnlyUserCannotEscalateByAskingForWrite() throws Exception {
+        // THE ACCOUNT NAMES HERE ARE A CONTRACT WITH application.yml (amoeba.auth.users). The authstore sub-flow
+        // collects them, so if it is asked for names other than `admin` and `reader` this test must be updated
+        // with them — an account that does not exist fails login and the code flow dies at the redirect, which
+        // reads like a broken filter chain rather than a missing user.
+        //
+        // `reader` holds mcp.read only, while the client below asks for read+write.
+        String token = logInAndGetToken("reader", "reader-pw", "mcp.read mcp.write");
+
+        String scope = String.valueOf(claimsOf(token).get("scope"));
+        assertTrue(scope.contains("mcp.read"), "read is both requested and held: " + scope);
+        assertFalse(scope.contains("mcp.write"),
+                "★ write must be narrowed away — this is the only place per-user policy is applied: " + scope);
+
+        // And the narrowing has to actually reach ApiModuleActionAuthorizer, not just sit in the claim.
+        //
+        // 'protean.uninstall_module' is chosen for a reason: it maps to the DELETE action (mcp.write) and its
+        // whole schema is one required 'id'. That matters because McpDispatcher validates arguments against the
+        // tool's JSON Schema BEFORE it consults the authorizer — a call with empty arguments comes back
+        // INVALID_ARGUMENT and never reaches the authorization check at all, so it would prove nothing.
+        //
+        // The two assertions below exist to keep this test honest: an earlier version asserted only "the body
+        // mentions an error", which passed while calling a tool that did not exist.
+        HttpResponse<String> denied = mcp(token, """
+                {"jsonrpc":"2.0","id":2,"method":"tools/call",\
+                "params":{"name":"protean.uninstall_module","arguments":{"id":"no-such-module"}}}""");
+        assertFalse(denied.body().contains("UNKNOWN_TOOL"),
+                "the tool must exist, or this is not exercising authorization: " + brief(denied.body()));
+        assertFalse(denied.body().contains("INVALID_ARGUMENT"),
+                "arguments must satisfy the schema, or the call stops before authorization: " + brief(denied.body()));
+        assertTrue(denied.body().contains("mcp.write"),
+                "a read-only token must be refused DELETE by ApiModuleActionAuthorizer: " + brief(denied.body()));
+
+        // Reads still work — the narrowing is a reduction, not a lockout.
+        assertEquals(200, mcp(token, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}").statusCode());
+    }
+
+    @Test
+    void wrongPasswordIsRejected() throws Exception {
+        startAuthorize(challengeOf(verifier()), "mcp.read");
+        String location = submitLogin("admin", "not-the-password");
+        assertTrue(location.contains("/login?error"), "expected a failed login, got: " + location);
+    }
+
+    // ── flow ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /** authorize → login → back to authorize → code → PKCE token exchange. Returns the access token. */
+    private String logInAndGetToken(String username, String password, String scope) throws Exception {
+        String verifier = verifier();
+        startAuthorize(challengeOf(verifier), scope);
+
+        String back = submitLogin(username, password);
+        assertTrue(back.contains("/oauth2/authorize"),
+                "★ login must return to the SavedRequest or the code flow dies here. Got: " + back);
+
+        HttpResponse<String> authorized = get(back);
+        assertEquals(302, authorized.statusCode(), "authenticated authorize should redirect to the callback");
+        String callback = location(authorized);
+        String code = queryParam(callback, "code");
+        assertNotNull(code, "no authorization code in " + callback);
+
+        HttpResponse<String> token = postForm(BASE + "/oauth2/token", Map.of(
+                "grant_type", "authorization_code",
+                "code", code,
+                "redirect_uri", REDIRECT_URI,
+                "client_id", "nz-mcp-agent",
+                "code_verifier", verifier));
+        assertEquals(200, token.statusCode(), "token exchange failed: " + token.body());
+
+        String accessToken = jsonString(token.body(), "access_token");
+        assertNotNull(accessToken, "no access_token in " + token.body());
+        return accessToken;
+    }
+
+    private void startAuthorize(String challenge, String scope) throws Exception {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("response_type", "code");
+        params.put("client_id", "nz-mcp-agent");
+        params.put("redirect_uri", REDIRECT_URI);
+        params.put("scope", scope);
+        params.put("code_challenge", challenge);
+        params.put("code_challenge_method", "S256");
+        HttpResponse<String> res = get(BASE + "/oauth2/authorize?" + form(params));
+        assertEquals(302, res.statusCode(),
+                "unauthenticated authorize must redirect to the login form (401 means the entry point is missing)");
+    }
+
+    private String submitLogin(String username, String password) throws Exception {
+        assertEquals(200, get(BASE + "/login").statusCode(), "/login must render");
+        // CSRF is disabled on this chain (module routes may be POST) — see SecurityConfig chain #2.
+        HttpResponse<String> submit = postForm(BASE + "/login",
+                Map.of("username", username, "password", password));
+        assertEquals(302, submit.statusCode(), "form login always ends in a redirect. body=" + brief(submit.body()));
+        return location(submit);
+    }
+
+    private HttpResponse<String> mcp(String bearer, String body) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(RESOURCE_ID))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        if (bearer != null) {
+            b.header("Authorization", "Bearer " + bearer);
+        }
+        return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    // ── HTTP plumbing (same shape as nz_oauth's LoginFlowTest) ─────────────────────────────────────────────────
+
+    private HttpResponse<String> get(String url) throws Exception {
+        return send(HttpRequest.newBuilder(URI.create(url)).header("Accept", "text/html").GET());
+    }
+
+    private HttpResponse<String> postForm(String url, Map<String, String> fields) throws Exception {
+        return send(HttpRequest.newBuilder(URI.create(url))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("Accept", "text/html")
+                .POST(HttpRequest.BodyPublishers.ofString(form(fields))));
+    }
+
+    private HttpResponse<String> send(HttpRequest.Builder b) throws Exception {
+        if (!cookies.isEmpty()) {
+            b.header("Cookie", cookies.entrySet().stream()
+                    .map(e -> e.getKey() + "=" + e.getValue()).collect(Collectors.joining("; ")));
+        }
+        HttpResponse<String> res = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+        // Session fixation protection rotates the id at login — refresh on every response or the flow breaks.
+        for (String setCookie : res.headers().allValues("set-cookie")) {
+            String pair = setCookie.split(";", 2)[0];
+            int eq = pair.indexOf('=');
+            if (eq > 0) {
+                cookies.put(pair.substring(0, eq).trim(), pair.substring(eq + 1).trim());
+            }
+        }
+        return res;
+    }
+
+    private static String location(HttpResponse<?> res) {
+        return res.headers().firstValue("location")
+                .orElseThrow(() -> new AssertionError("no Location header, status=" + res.statusCode()));
+    }
+
+    private static String form(Map<String, String> fields) {
+        return fields.entrySet().stream()
+                .map(e -> enc(e.getKey()) + "=" + enc(e.getValue()))
+                .collect(Collectors.joining("&"));
+    }
+
+    private static String enc(String s) {
+        return URLEncoder.encode(s, StandardCharsets.UTF_8);
+    }
+
+    private static String queryParam(String url, String name) {
+        Matcher m = Pattern.compile("[?&]" + Pattern.quote(name) + "=([^&]+)").matcher(url);
+        return m.find() ? m.group(1) : null;
+    }
+
+    private static String jsonString(String json, String field) {
+        Matcher m = Pattern.compile("\"" + Pattern.quote(field) + "\"\\s*:\\s*\"([^\"]*)\"").matcher(json);
+        return m.find() ? m.group(1) : null;
+    }
+
+    /** Decodes the JWT payload. Values arrive as raw JSON text, which is enough for contains-style assertions. */
+    private static Map<String, Object> claimsOf(String jwt) {
+        String payload = jwt.split("\\.")[1].replace('-', '+').replace('_', '/');
+        payload += "=".repeat((4 - payload.length() % 4) % 4);
+        String json = new String(Base64.getDecoder().decode(payload), StandardCharsets.UTF_8);
+        Map<String, Object> claims = new LinkedHashMap<>();
+        Matcher m = Pattern.compile("\"([^\"]+)\"\\s*:\\s*(\"[^\"]*\"|\\[[^\\]]*\\]|[^,}]+)").matcher(json);
+        while (m.find()) {
+            claims.put(m.group(1), m.group(2).replaceAll("^\"|\"$", ""));
+        }
+        return claims;
+    }
+
+    private static String verifier() {
+        return "amoeba-test-verifier-0123456789-0123456789-abc";
+    }
+
+    private static String challengeOf(String verifier) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(verifier.getBytes(StandardCharsets.US_ASCII));
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static String brief(String body) {
+        return body.length() <= 400 ? body : body.substring(0, 400) + "…";
+    }
+}

@@ -1,0 +1,125 @@
+// [INTERFACE DEFINITION] Signatures -> the service interface (server-owned) and its stub implementation (authored).
+//
+// The split is what makes "the author writes only the logic" enforceable. The interface is a function of the spec,
+// so its method signatures cannot drift from the declared contract; the implementation is the one file the author
+// is meant to rewrite, and it is deliberately NOT hash-checked.
+//
+// A spec can opt out of the interface (InterfaceSpec.generatesServiceInterface), leaving one <Base>Service class
+// for teams whose standard is a three-layer Controller/Service/Mapper. That trades the drift guarantee away
+// knowingly: with nothing to override, a signature that no longer matches the contract fails at the contract test
+// or gate 3 instead of at compile time.
+//
+// The stub throws rather than returning null. An unimplemented module therefore cannot reach ACTIVE: gate 3 probes
+// a live route, the throw surfaces as a 500, the expected 2xx does not match, and ModulePlatform.install rolls the
+// deployment back on its own. Returning null would let a half-built module go live serving empty bodies.
+package {{PKG}}.interfacedef.gen;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator.Layout;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator.Signature;
+
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+final class ServiceWriter {
+
+    private ServiceWriter() {
+    }
+
+    static String writeInterface(Layout layout, InterfaceSpec spec, List<Signature> signatures) {
+        Set<String> imports = new LinkedHashSet<>(SkeletonGenerator.dtoImports(layout, signatures));
+        if (SkeletonGenerator.usesList(signatures)) {
+            imports.add("java.util.List");
+        }
+
+        StringBuilder out = new StringBuilder();
+        out.append("// GENERATED from the module's interface definition. Do not edit — the deploy wrapper replaces\n")
+                .append("// this file from the declared spec, so hand edits are silently discarded.\n")
+                .append("package ").append(layout.basePackage()).append(";\n\n")
+                .append(SkeletonGenerator.imports(imports, layout.basePackage()))
+                .append('\n')
+                .append("/**\n * ").append(JavaNames.oneLine(spec.description())).append('\n')
+                .append(" *\n * <p>One method per declared operation. Implemented by {@link ")
+                .append(layout.serviceImpl()).append("}.\n */\n")
+                .append("public interface ").append(layout.service()).append(" {\n");
+
+        for (Signature sig : signatures) {
+            out.append('\n')
+                    .append("    /** ").append(JavaNames.oneLine(sig.operation().summary())).append(" */\n")
+                    .append("    ").append(sig.returnType()).append(' ')
+                    .append(sig.operation().operationId()).append('(')
+                    .append(SkeletonGenerator.plainParameters(sig)).append(");\n");
+        }
+        return out.append("}\n").toString();
+    }
+
+    /**
+     * The stub implementation.
+     *
+     * <p>Without a separate interface this file is the service outright, so it inherits what the interface used to
+     * carry: the spec's description as its class Javadoc and each operation's summary on its method. The
+     * documentation must not disappear just because the type it lived on did.
+     *
+     * @param myBatis when true the constructor takes the Mapper, so the author's first move is writing SQL rather
+     *                than wiring
+     */
+    static String writeImplementation(Layout layout, InterfaceSpec spec, List<Signature> signatures,
+                                      boolean myBatis) {
+        Set<String> imports = new LinkedHashSet<>(SkeletonGenerator.dtoImports(layout, signatures));
+        imports.add("org.springframework.stereotype.Service");
+        imports.add(SkeletonGenerator.BASE_SERVICE);
+        if (SkeletonGenerator.usesList(signatures)) {
+            imports.add("java.util.List");
+        }
+        boolean hasInterface = layout.hasServiceInterface();
+
+        StringBuilder out = new StringBuilder();
+        out.append("// AUTHORED. This is the file to write: fill in each method body.\n")
+                .append("// Everything else in this module is generated from the interface definition.\n")
+                .append("package ").append(layout.basePackage()).append(";\n\n")
+                .append(SkeletonGenerator.imports(imports, layout.basePackage()))
+                .append('\n')
+                .append(hasInterface
+                        ? "/** Implements {@link " + layout.service() + "}. */\n"
+                        : "/**\n * " + JavaNames.oneLine(spec.description()) + "\n *\n"
+                                + " * <p>One method per declared operation.\n */\n")
+                .append("@Service\n")
+                .append("public class ").append(layout.serviceImpl())
+                // The common-support seam. Emitted in BOTH shapes: layout.serviceImpl() is <Base>ServiceImpl when
+                // there is an interface and <Base>Service when there is not, so one clause covers each. `extends`
+                // must precede `implements` — that is the order the language requires.
+                .append(" extends BaseService");
+        if (hasInterface) {
+            out.append(" implements ").append(layout.service());
+        }
+        out.append(" {\n\n");
+
+        if (myBatis) {
+            out.append("    private final ").append(layout.mapper()).append(" mapper;\n\n")
+                    .append("    public ").append(layout.serviceImpl()).append('(')
+                    .append(layout.mapper()).append(" mapper) {\n")
+                    .append("        this.mapper = mapper;\n    }\n");
+        }
+
+        for (Signature sig : signatures) {
+            out.append('\n');
+            // @Override only compiles when there is something to override.
+            if (hasInterface) {
+                out.append("    @Override\n");
+            } else {
+                out.append("    /** ").append(JavaNames.oneLine(sig.operation().summary())).append(" */\n");
+            }
+            out.append("    public ").append(sig.returnType()).append(' ')
+                    .append(sig.operation().operationId()).append('(')
+                    .append(SkeletonGenerator.plainParameters(sig)).append(") {\n")
+                    // The message names the operation so a rolled-back deploy says which method is still a stub.
+                    .append("        throw new UnsupportedOperationException(")
+                    .append(JavaNames.literal(sig.operation().operationId()
+                            + ": not implemented yet — write this method body"))
+                    .append(");\n")
+                    .append("    }\n");
+        }
+        return out.append("}\n").toString();
+    }
+}

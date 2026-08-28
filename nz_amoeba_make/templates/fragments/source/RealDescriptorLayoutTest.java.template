@@ -1,0 +1,128 @@
+// Validates the layout mapping against a descriptor a REAL deploy produced, rather than one this test wrote.
+//
+// A hand-built fixture can only confirm the mapping agrees with my idea of the storage format. The committed
+// sample under document/testProject/generated-sample was written by the actual deploy path, so it also confirms
+// the format itself — including that the descriptor is read back as UTF-8, which a hand-built fixture can never
+// catch because it never went through a file.
+//
+// The sample lives outside this Gradle project, so every test here is skipped rather than failed when it is
+// absent: this project must stay buildable on its own.
+package {{PKG}}.source;
+
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import {{PKG}}.source.ModuleSourceLayout.Kind;
+import {{PKG}}.source.ModuleSourceLayout.Layout;
+import {{PKG}}.source.ModuleSourceLayout.SourceFile;
+
+import org.htcom.protean.module.ModuleDescriptor;
+import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+class RealDescriptorLayoutTest {
+
+    private static final Path SAMPLE = Path.of("..", "..", "document", "testProject",
+            "generated-sample", "module-store", "hello.json");
+
+    /**
+     * Reads the descriptor the way protean's FileSystemModuleStore does. Unknown properties are ignored because
+     * the stored JSON carries {@code library}, a derived getter that is not a record component — Boot's mapper
+     * ignores it by default, a bare ObjectMapper would not.
+     */
+    private static ModuleDescriptor load() throws IOException {
+        ObjectMapper mapper = new ObjectMapper()
+                .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+        return mapper.readValue(SAMPLE.toFile(), ModuleDescriptor.class);
+    }
+
+    private static Optional<SourceFile> at(Layout layout, String path) {
+        return layout.files().stream().filter(f -> f.path().equals(path)).findFirst();
+    }
+
+    @Test
+    void mapsARealDeployedDescriptorOntoAProjectTree() throws IOException {
+        assumeTrue(Files.isReadable(SAMPLE), () -> "sample descriptor absent: " + SAMPLE.toAbsolutePath());
+        ModuleDescriptor descriptor = load();
+
+        assertEquals("hello", descriptor.id());
+        Layout layout = ModuleSourceLayout.of(descriptor, EnumSet.allOf(Kind.class));
+
+        assertEquals(List.of(
+                        "src/main/java/module/hello/HelloController.java",
+                        "src/main/java/module/hello/HelloService.java",
+                        "src/main/java/module/hello/HelloServiceImpl.java",
+                        "src/main/java/module/hello/dto/GetHelloResponse.java",
+                        "src/main/resources/META-INF/protean/interface.json",
+                        "src/test/java/module/hello/HelloContractTest.java"),
+                layout.files().stream().map(SourceFile::path).toList());
+        assertTrue(layout.skipped().isEmpty());
+    }
+
+    /** The sealed spec is the artifact protean.get_module_source cannot reach at all. */
+    @Test
+    void surfacesTheSealedInterfaceSpecFromARealDescriptor() throws IOException {
+        assumeTrue(Files.isReadable(SAMPLE), () -> "sample descriptor absent: " + SAMPLE.toAbsolutePath());
+
+        Layout layout = ModuleSourceLayout.of(load(), EnumSet.of(Kind.RESOURCE));
+        SourceFile spec = at(layout, "src/main/resources/META-INF/protean/interface.json").orElseThrow();
+
+        assertEquals(Kind.RESOURCE, spec.kind());
+        assertTrue(spec.content().contains("\"operations\""), spec.content());
+    }
+
+    /**
+     * The sample's spec carries Korean descriptions. Reading them back as Hangul proves the round trip is UTF-8
+     * end to end — the failure this guards against is silent, producing mojibake rather than an exception.
+     */
+    @Test
+    void readsKoreanDescriptionsAsUtf8() throws IOException {
+        assumeTrue(Files.isReadable(SAMPLE), () -> "sample descriptor absent: " + SAMPLE.toAbsolutePath());
+
+        Layout layout = ModuleSourceLayout.of(load(), EnumSet.of(Kind.RESOURCE));
+        String spec = at(layout, "src/main/resources/META-INF/protean/interface.json").orElseThrow().content();
+
+        assertTrue(spec.codePoints().anyMatch(cp -> cp >= 0xAC00 && cp <= 0xD7A3),
+                "expected Hangul syllables in the sealed spec, got: " + spec);
+        assertTrue(spec.indexOf('�') < 0, "the replacement character means the bytes were mis-decoded");
+    }
+
+    /**
+     * The directory each file lands in must match the package its own source declares — that agreement is the
+     * whole reason the exported tree compiles, and it is checked against real generated sources here rather than
+     * against text this test wrote.
+     *
+     * <p>Note what is NOT asserted: that the content starts with {@code package}. Generated sources open with a
+     * header comment, so the declaration sits further down.
+     */
+    @Test
+    void everyJavaFileLandsInTheDirectoryItsPackageDeclares() throws IOException {
+        assumeTrue(Files.isReadable(SAMPLE), () -> "sample descriptor absent: " + SAMPLE.toAbsolutePath());
+
+        Layout layout = ModuleSourceLayout.of(load(), EnumSet.of(Kind.SOURCE, Kind.TEST));
+        assertEquals(5, layout.files().size());
+
+        for (SourceFile file : layout.files()) {
+            String declaredPackage = file.fqcn().substring(0, file.fqcn().lastIndexOf('.'));
+            assertTrue(file.content().contains("package " + declaredPackage + ";"),
+                    () -> file.path() + " does not declare package " + declaredPackage);
+
+            String expectedDir = "src/" + (file.kind() == Kind.TEST ? "test" : "main") + "/java/"
+                    + declaredPackage.replace('.', '/');
+            assertEquals(expectedDir, file.path().substring(0, file.path().lastIndexOf('/')));
+            assertTrue(file.path().endsWith(".java"));
+            assertTrue(file.bytes() > 0);
+            assertTrue(file.lines() > 1);
+        }
+    }
+}

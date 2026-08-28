@@ -1,0 +1,163 @@
+// [INTERFACE DEFINITION] InterfaceSpec -> OpenAPI 3.0.3 document.
+//
+// The conversion is mechanical because InterfaceSpec.FieldType is restricted to the JSON Schema primitives — that
+// restriction exists precisely to buy this renderer. No springdoc, no swagger-core model classes: the output is a
+// Jackson tree, so nothing new lands on the classpath and the shape stays inspectable in a test.
+//
+// Inline schemas only (no $ref / components). Module interfaces are small and each operation owns its request and
+// response shapes, so hoisting them into components would add naming policy for no reuse. If shared types appear
+// later, that is the point to introduce components — not before.
+package {{PKG}}.interfacedef.render;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+
+import java.util.List;
+import java.util.Locale;
+
+/** Renders an OpenAPI 3.0.3 document. Holds only the mapper, so one instance is safe to share. */
+public final class OpenApiRenderer {
+
+    private static final String OPENAPI_VERSION = "3.0.3";
+    private static final String JSON = "application/json";
+
+    private final ObjectMapper mapper;
+
+    public OpenApiRenderer(ObjectMapper mapper) {
+        this.mapper = mapper;
+    }
+
+    /**
+     * Renders the document for one module version.
+     *
+     * @param version becomes {@code info.version}, which OpenAPI requires — falls back to {@code "0"} when the
+     *                spec is still a draft with no module version assigned
+     */
+    public ObjectNode render(String moduleId, String version, InterfaceSpec spec) {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("openapi", OPENAPI_VERSION);
+
+        ObjectNode info = root.putObject("info");
+        info.put("title", spec.title() == null || spec.title().isBlank() ? moduleId : spec.title());
+        info.put("version", version == null || version.isBlank() ? "0" : version);
+        putIfPresent(info, "description", spec.description());
+
+        ObjectNode paths = root.putObject("paths");
+        for (OperationSpec op : spec.operations()) {
+            // Several operations may share a path under different methods, so the path item is fetched-or-created.
+            ObjectNode pathItem = paths.has(op.path()) ? (ObjectNode) paths.get(op.path())
+                    : paths.putObject(op.path());
+            pathItem.set(op.method().name().toLowerCase(Locale.ROOT), operation(op));
+        }
+        return root;
+    }
+
+    private ObjectNode operation(OperationSpec op) {
+        ObjectNode node = mapper.createObjectNode();
+        node.put("operationId", op.operationId());
+        putIfPresent(node, "summary", op.summary());
+        putIfPresent(node, "description", op.description());
+
+        if (!op.parameters().isEmpty()) {
+            ArrayNode parameters = node.putArray("parameters");
+            for (ParamSpec p : op.parameters()) {
+                parameters.add(parameter(p));
+            }
+        }
+
+        if (op.hasRequestBody()) {
+            ObjectNode body = node.putObject("requestBody");
+            // Any declared body is required: the spec has no "body is optional" notion, and a generated controller
+            // binds it with @RequestBody, which is required by default.
+            body.put("required", true);
+            body.putObject("content").set(JSON, mediaType(op.requestBody()));
+        }
+
+        ObjectNode responses = node.putObject("responses");
+        for (ResponseSpec r : op.responses()) {
+            ObjectNode response = responses.putObject(String.valueOf(r.status()));
+            // `description` is REQUIRED on a Response Object by the spec, so it is always written even if blank.
+            response.put("description", r.description() == null ? "" : r.description());
+            if (!r.body().isEmpty()) {
+                response.putObject("content").set(JSON, mediaType(r.body()));
+            }
+        }
+        return node;
+    }
+
+    private ObjectNode parameter(ParamSpec p) {
+        ObjectNode node = mapper.createObjectNode();
+        node.put("name", p.name());
+        node.put("in", p.in().wire());
+        node.put("required", p.required());
+        putIfPresent(node, "description", p.description());
+        ObjectNode schema = node.putObject("schema");
+        schema.put("type", p.type().wire());
+        // A composite query parameter is validated to be an array of repeated values; its element type is not
+        // expressible in ParamSpec, so it degrades to a string element rather than an invalid schema with no items.
+        if (p.type() == InterfaceSpec.FieldType.ARRAY) {
+            schema.putObject("items").put("type", "string");
+        }
+        putIfPresent(node, "example", p.example());
+        return node;
+    }
+
+    private ObjectNode mediaType(List<FieldSpec> fields) {
+        ObjectNode media = mapper.createObjectNode();
+        media.set("schema", objectSchema(fields));
+        return media;
+    }
+
+    /** An object schema from a sibling field list. */
+    private ObjectNode objectSchema(List<FieldSpec> fields) {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        ObjectNode properties = schema.putObject("properties");
+        ArrayNode required = mapper.createArrayNode();
+        for (FieldSpec f : fields) {
+            properties.set(f.name(), fieldSchema(f));
+            if (f.required()) {
+                required.add(f.name());
+            }
+        }
+        // OpenAPI 3.0 requires `required` to have at least one element, so an all-optional object omits it.
+        if (!required.isEmpty()) {
+            schema.set("required", required);
+        }
+        return schema;
+    }
+
+    private ObjectNode fieldSchema(FieldSpec f) {
+        ObjectNode schema = mapper.createObjectNode();
+        switch (f.type()) {
+            case OBJECT -> {
+                ObjectNode nested = objectSchema(f.children());
+                schema.setAll(nested);
+            }
+            case ARRAY -> {
+                schema.put("type", "array");
+                schema.set("items", fieldSchema(f.items()));
+            }
+            default -> {
+                schema.put("type", f.type().wire());
+                putIfPresent(schema, "format", f.format());
+            }
+        }
+        putIfPresent(schema, "description", f.description());
+        putIfPresent(schema, "example", f.example());
+        return schema;
+    }
+
+    private static void putIfPresent(ObjectNode node, String field, String value) {
+        if (value != null && !value.isBlank()) {
+            node.put(field, value.trim());
+        }
+    }
+}

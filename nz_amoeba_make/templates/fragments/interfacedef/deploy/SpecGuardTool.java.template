@@ -1,0 +1,204 @@
+// [CAPABILITY: override a built-in MCP tool] Guards the two paths that could desynchronize a module from its
+// declared interface without ever going through the deploy wrapper.
+//
+// protean.patch_module — a delta over the CURRENT descriptor. It can replace the controller source alone, leaving
+//   the sealed spec describing routes the module no longer serves. Supporting it properly would mean re-deriving the
+//   skeleton from the sealed spec, re-checking the patched result, and unwinding a completed hot-swap on failure
+//   (platform.rollback to the previous version) — a rollback path with no test coverage here. So for a module that
+//   carries a sealed spec, patch is refused and the caller is pointed at update_module, which does the same job as
+//   one atomic spec+source replacement. Modules with no sealed spec are unaffected and pass straight through.
+//
+// protean.reload_module_resources — ModulePlatform.reloadResources swaps resources on a LIVE module without running
+//   any promotion gate. That is the one way to overwrite the sealed spec resource with no verification at all, so
+//   the reserved META-INF/protean/ prefix is refused here.
+//
+// Both are guards, not reimplementations: anything that passes the check is delegated unchanged.
+package {{PKG}}.interfacedef.deploy;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolAnnotations;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.function.BiFunction;
+
+/** A delegating wrapper that applies one precondition before passing the call through. */
+public final class SpecGuardTool implements McpTool {
+
+    private final McpTool delegate;
+    private final String extraDescription;
+    private final BiFunction<JsonNode, ModulePlatform, List<String>> guard;
+    private final ModulePlatform platform;
+
+    private SpecGuardTool(McpTool delegate, String extraDescription, ModulePlatform platform,
+                          BiFunction<JsonNode, ModulePlatform, List<String>> guard) {
+        this.delegate = delegate;
+        this.extraDescription = extraDescription;
+        this.platform = platform;
+        this.guard = guard;
+    }
+
+    /** Refuses a patch against a module that carries a sealed interface spec. */
+    public static SpecGuardTool forPatch(McpTool delegate, ObjectMapper mapper, ModulePlatform platform) {
+        return new SpecGuardTool(delegate,
+                " Not available for a module that carries a declared interface: patching source alone would leave "
+                        + "the sealed spec describing routes the module no longer serves. Use protean.update_module "
+                        + "with a specId instead — it replaces spec and source together.",
+                platform,
+                (args, p) -> {
+                    String moduleId = textOf(args, "id");
+                    if (moduleId == null) {
+                        return List.of();
+                    }
+                    boolean hasSpec = p.find(moduleId)
+                            .map(ModuleDescriptor::resources)
+                            .flatMap(resources -> SpecResource.read(mapper, resources))
+                            .isPresent();
+                    if (!hasSpec) {
+                        return List.of();
+                    }
+                    return List.of("module '" + moduleId + "' carries a declared interface, so patch_module is "
+                            + "refused. Call amoeba.define_interface for the new shape and then "
+                            + "protean.update_module with that specId, so the spec and the source change together.");
+                });
+    }
+
+    /** Refuses writes to the reserved resource prefix, which reloadResources would otherwise apply ungated. */
+    public static SpecGuardTool forReloadResources(McpTool delegate, ModulePlatform platform) {
+        return new SpecGuardTool(delegate,
+                " Writes under " + SpecResource.RESERVED_PREFIX + " are refused: that prefix holds the module's "
+                        + "sealed interface definition, and this call bypasses every promotion gate.",
+                platform,
+                (args, p) -> {
+                    List<String> violations = new ArrayList<>();
+                    // Both of the tool's resource arguments can target the reserved prefix, and they have different
+                    // shapes — see reservedPathsInFiles / reservedPathsInRemovals.
+                    for (String path : reservedPathsInFiles(args)) {
+                        violations.add("refusing to write reserved resource '" + path + "' — "
+                                + SpecResource.RESERVED_PREFIX + " is platform-owned and this call runs no gates");
+                    }
+                    for (String path : reservedPathsInRemovals(args)) {
+                        violations.add("refusing to remove reserved resource '" + path + "'");
+                    }
+                    return violations;
+                });
+    }
+
+    @Override
+    public String name() {
+        return delegate.name();
+    }
+
+    @Override
+    public String title() {
+        return delegate.title();
+    }
+
+    @Override
+    public String description() {
+        return delegate.description() + extraDescription;
+    }
+
+    @Override
+    public ObjectNode inputSchema() {
+        return delegate.inputSchema();
+    }
+
+    @Override
+    public ObjectNode outputSchema() {
+        return delegate.outputSchema();
+    }
+
+    @Override
+    public McpToolAnnotations annotations() {
+        return delegate.annotations();
+    }
+
+    @Override
+    public ModuleActionAuthorizer.ModuleAction action() {
+        return delegate.action();
+    }
+
+    @Override
+    public String targetModuleId(JsonNode arguments) {
+        return delegate.targetModuleId(arguments);
+    }
+
+    @Override
+    public McpToolResult call(JsonNode arguments, McpCallContext ctx) {
+        List<String> violations = guard.apply(arguments, platform);
+        if (!violations.isEmpty()) {
+            return McpToolResult.error(String.join("\n", violations));
+        }
+        return delegate.call(arguments, ctx);
+    }
+
+    /**
+     * Reserved paths among the resources being written.
+     *
+     * <p>{@code files} is an array of objects and the classpath path lives in each entry's {@code filename} — NOT
+     * under a key named for {@code ModulePlatform.reloadResources}'s {@code add} parameter. Reading the Java
+     * parameter name instead of the wire name is exactly how this guard was silently inert once.
+     *
+     * @see org.htcom.protean.mcp.tools.ReloadModuleResourcesTool
+     */
+    private static List<String> reservedPathsInFiles(JsonNode args) {
+        List<String> reserved = new ArrayList<>();
+        if (args == null || !args.hasNonNull("files") || !args.get("files").isArray()) {
+            return reserved;
+        }
+        for (JsonNode file : args.get("files")) {
+            String path = file.path("filename").asText(null);
+            if (path != null && isReserved(path)) {
+                reserved.add(path);
+            }
+        }
+        return reserved;
+    }
+
+    /** Reserved paths among the resources being removed. {@code removeFiles} is a plain array of path strings. */
+    private static List<String> reservedPathsInRemovals(JsonNode args) {
+        List<String> reserved = new ArrayList<>();
+        if (args == null || !args.hasNonNull("removeFiles") || !args.get("removeFiles").isArray()) {
+            return reserved;
+        }
+        for (JsonNode element : args.get("removeFiles")) {
+            String path = element.asText();
+            if (isReserved(path)) {
+                reserved.add(path);
+            }
+        }
+        return reserved;
+    }
+
+    /**
+     * Whether a path lands under the platform-owned prefix.
+     *
+     * <p>Normalized the way {@code ResourcePaths} normalizes — backslashes to slashes, leading slashes stripped —
+     * before comparing, so {@code /META-INF\protean\interface.json} names the same resource as
+     * {@code META-INF/protean/interface.json} and cannot slip past a literal prefix check. Case is ignored for the
+     * same reason.
+     */
+    private static boolean isReserved(String path) {
+        String normalized = path.replace('\\', '/');
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        return normalized.toUpperCase(Locale.ROOT)
+                .startsWith(SpecResource.RESERVED_PREFIX.toUpperCase(Locale.ROOT));
+    }
+
+    private static String textOf(JsonNode args, String field) {
+        return args != null && args.hasNonNull(field) ? args.get(field).asText() : null;
+    }
+}

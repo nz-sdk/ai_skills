@@ -1,0 +1,295 @@
+// [CAPABILITY: embedded Authorization Server] OPT-IN (amoeba.auth.enabled). Lets this app issue the mcp.* tokens
+// it also validates, so it runs standalone before a group-wide IdP exists.
+//
+// ── THE TRADEOFF, STATED PLAINLY ────────────────────────────────────────────────────────────────────────────────
+// The signing key now lives in the same JVM as /platform/mcp, which compiles and hot-loads submitted code.
+// protean has NO sandbox and says so (docs/guide/12-security: "보안 샌드박스가 없으며, 이는 의도적 non-goal";
+// module code holds every permission the host JVM has — filesystem, network, OTHER BEANS). ForbiddenApiRule only
+// blocks accidental APIs (System.exit, ProcessBuilder.start); reading a file or reaching a bean is not blocked.
+//
+// Therefore a module deployed with mcp.write can read the signing key and mint mcp.admin, bypassing the scope
+// separation SecurityConfig and ApiModuleActionAuthorizer enforce. Two things bound the blast radius:
+//   1. Only mcp.* scopes are registered — there is no place to put another service's scope.
+//   2. Every issued token is audience-locked to this app's resource identifier (see tokenCustomizer).
+// Both are load-bearing. The moment this AS issues tokens something ELSE accepts, an RCE here becomes an RCE
+// everywhere. Production points OAUTH_ISSUER_URI at the real IdP and leaves amoeba.auth.enabled=false.
+// ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// FILTER CHAIN PLACEMENT — @Order(0), ahead of SecurityConfig's two chains, matching only the AS endpoints:
+//   @Order(0) /oauth2/**, /.well-known/oauth-authorization-server   this file
+//   @Order(1) /platform/**                                          SecurityConfig chain #1 (control plane)
+//   @Order(2) everything else                                       SecurityConfig chain #2 (+ the login form)
+// The existing numbers are untouched on purpose: renumbering them would also reorder the /platform/** rules,
+// whose order is itself load-bearing (see SecurityConfig's header).
+package {{PKG}}.auth;
+
+import com.nimbusds.jose.jwk.JWKSet;
+import com.nimbusds.jose.jwk.RSAKey;
+import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
+import com.nimbusds.jose.jwk.source.JWKSource;
+import com.nimbusds.jose.proc.SecurityContext;
+
+import jakarta.annotation.PostConstruct;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
+import org.springframework.http.MediaType;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.oauth2.core.AuthorizationGrantType;
+import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtValidators;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.security.oauth2.server.authorization.OAuth2TokenType;
+import org.springframework.security.oauth2.server.authorization.client.InMemoryRegisteredClientRepository;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
+import org.springframework.security.oauth2.server.authorization.config.annotation.web.configuration.OAuth2AuthorizationServerConfiguration;
+import org.springframework.security.oauth2.server.authorization.config.annotation.web.configurers.OAuth2AuthorizationServerConfigurer;
+import org.springframework.security.oauth2.server.authorization.settings.AuthorizationServerSettings;
+import org.springframework.security.oauth2.server.authorization.settings.ClientSettings;
+import org.springframework.security.oauth2.server.authorization.settings.TokenSettings;
+import org.springframework.security.oauth2.server.authorization.token.JwtEncodingContext;
+import org.springframework.security.oauth2.server.authorization.token.OAuth2TokenCustomizer;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
+import org.springframework.security.web.util.matcher.MediaTypeRequestMatcher;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.interfaces.RSAPrivateKey;
+import java.security.interfaces.RSAPublicKey;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+@Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties(EmbeddedAuthProperties.class)
+@ConditionalOnProperty(prefix = "amoeba.auth", name = "enabled", havingValue = "true")
+public class EmbeddedAuthServerConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(EmbeddedAuthServerConfig.class);
+
+    /** The only scopes this AS will ever mint. Kept in sync with ApiModuleActionAuthorizer. */
+    private static final List<String> MCP_SCOPES = List.of("mcp.read", "mcp.write", "mcp.admin");
+
+    private final EmbeddedAuthProperties props;
+    private final String issuer;
+    private final String resourceId;
+
+    /**
+     * Startup fail-fast, in the style of {@code SecurityConfig}'s constructor.
+     *
+     * <p>The issuer must be pinned when embedded. Letting Spring Authorization Server derive it from the request
+     * host would make the {@code iss} claim vary by how a caller reached the app, while the Resource Server half
+     * validates against one fixed string — tokens would verify or not depending on the URL used to get them.
+     */
+    EmbeddedAuthServerConfig(
+            EmbeddedAuthProperties props,
+            @Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri:}") String issuer,
+            @Value("${protean.mcp.authorization.resource:}") String resourceId) {
+        if (issuer.isBlank() || issuer.contains("${") || !issuer.startsWith("http")) {
+            throw new IllegalStateException("""
+                    amoeba.auth.enabled=true needs a pinned issuer, but \
+                    spring.security.oauth2.resourceserver.jwt.issuer-uri resolved to '""" + issuer + """
+                    '. When this app issues its own tokens the issuer is THIS app's externally visible base URL:
+
+                      export OAUTH_ISSUER_URI=http://localhost:8080     # must match SERVER_HOST/SERVER_PORT
+
+                    It is the exact 'iss' string the tokens will carry and the value the Resource Server half \
+                    checks, so it cannot be derived per-request. See README §Security.""");
+        }
+        this.props = props;
+        this.issuer = issuer;
+        this.resourceId = resourceId;
+    }
+
+    /**
+     * Loud on purpose. This is the one configuration in the app that trades a security boundary for convenience,
+     * and the person who turned it on is not always the person who later deploys it.
+     */
+    @PostConstruct
+    void warnLoudly() {
+        log.warn("""
+
+                ╔═══════════════════════════════════════════════════════════════════════════════╗
+                ║  ⚠  EMBEDDED AUTHORIZATION SERVER IS ON (amoeba.auth.enabled=true)
+                ║     This app now signs the tokens it validates. The signing key ({})
+                ║     lives in the same JVM as /platform/mcp, which compiles and runs submitted
+                ║     code with no sandbox — a module deployed with mcp.write can read that key
+                ║     and mint mcp.admin.
+                ║
+                ║     Tokens are audience-locked to {} so they are useless elsewhere.
+                ║     Do NOT point another service at this issuer.
+                ║
+                ║     Production: amoeba.auth.enabled=false + OAUTH_ISSUER_URI=<real IdP>
+                ╚═══════════════════════════════════════════════════════════════════════════════╝""",
+                props.jwksPath(), resourceId.isBlank() ? issuer : resourceId);
+    }
+
+    /**
+     * AS endpoints only. {@code getEndpointsMatcher()} scopes this chain to {@code /oauth2/**} and the
+     * authorization-server metadata, so SecurityConfig's chains keep matching exactly what they matched before.
+     *
+     * <p>The login redirect is wired explicitly: {@code applyDefaultSecurity} does NOT install one (verified
+     * against the SAS 1.5.8 bytecode — it only sets a securityMatcher, registers the configurer and requires
+     * authentication). Without this, a browser hitting {@code /oauth2/authorize} gets a bare 401 and the
+     * authorization_code flow never starts. Scoped to TEXT_HTML so a token request still fails as a 401 rather
+     * than being handed a redirect to a login page.
+     */
+    @Bean
+    @Order(0)
+    @SuppressWarnings("removal")
+    SecurityFilterChain authorizationServerFilterChain(HttpSecurity http) throws Exception {
+        OAuth2AuthorizationServerConfiguration.applyDefaultSecurity(http);
+        http.getConfigurer(OAuth2AuthorizationServerConfigurer.class)
+                .oidc(Customizer.withDefaults());
+        http.exceptionHandling(exceptions -> exceptions.defaultAuthenticationEntryPointFor(
+                new LoginUrlAuthenticationEntryPoint("/login"),
+                new MediaTypeRequestMatcher(MediaType.TEXT_HTML)));
+        return http.build();
+    }
+
+    @Bean
+    AuthorizationServerSettings authorizationServerSettings() {
+        return AuthorizationServerSettings.builder().issuer(issuer).build();
+    }
+
+    /**
+     * Registered clients — only {@code mcp.*} scopes are ever offered, by design (see the header).
+     *
+     * <p>The MCP client is public + PKCE: Claude Code and mcp-remote cannot keep a secret, which is exactly what
+     * OAuth 2.1 means by a public client. Note that Spring Authorization Server refuses to issue refresh tokens
+     * to public clients ({@code OAuth2RefreshTokenGenerator} returns null for authorization_code + NONE), so a
+     * browser login has to be repeated once the access token expires.
+     */
+    @Bean
+    RegisteredClientRepository registeredClientRepository() {
+        List<RegisteredClient> clients = new ArrayList<>();
+
+        RegisteredClient.Builder agent = RegisteredClient.withId(UUID.randomUUID().toString())
+                .clientId(props.mcpClientId())
+                .clientAuthenticationMethod(ClientAuthenticationMethod.NONE)
+                .authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
+                .clientSettings(ClientSettings.builder()
+                        .requireProofKey(true)
+                        // SAS ships no consent page; supplying one is the consumer's job. An internal tool has no
+                        // scope for the user to choose, so it is skipped. Revisit if this is ever exposed outside.
+                        .requireAuthorizationConsent(false)
+                        .build())
+                .tokenSettings(TokenSettings.builder().accessTokenTimeToLive(props.accessTokenTtl()).build());
+        MCP_SCOPES.forEach(agent::scope);
+        props.mcpRedirectUris().forEach(uri -> agent.redirectUri(uri.trim()));
+        clients.add(agent.build());
+
+        // Optional machine client. Absent unless an id AND a secret are configured — half-configured credentials
+        // would otherwise register a client nobody can authenticate as.
+        if (!props.serviceClientId().isBlank() && !props.serviceClientSecret().isBlank()) {
+            RegisteredClient.Builder service = RegisteredClient.withId(UUID.randomUUID().toString())
+                    .clientId(props.serviceClientId())
+                    .clientSecret("{noop}" + props.serviceClientSecret())
+                    .clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
+                    .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
+                    .tokenSettings(TokenSettings.builder().accessTokenTimeToLive(props.accessTokenTtl()).build());
+            MCP_SCOPES.forEach(service::scope);
+            clients.add(service.build());
+        }
+        return new InMemoryRegisteredClientRepository(clients);
+    }
+
+    /**
+     * Two jobs, both load-bearing.
+     *
+     * <p><b>Audience lock.</b> Every access token carries {@code aud} = this app's resource identifier. That is
+     * what keeps the blast radius of the embedded key inside this app: a token minted here is not valid anywhere
+     * that checks its audience.
+     *
+     * <p><b>Scope narrowing.</b> Issued scope = requested ∩ the logged-in user's {@code mcp.*} authorities. This
+     * is the ONLY place per-user differentiation can happen: ApiModuleActionAuthorizer reads scopes off the token
+     * and never looks the user up again (it is a stateless Resource Server). A client_credentials token has no
+     * user, so it is left alone — its ceiling is the RegisteredClient's own scope list.
+     */
+    @Bean
+    OAuth2TokenCustomizer<JwtEncodingContext> tokenCustomizer() {
+        return context -> {
+            if (!OAuth2TokenType.ACCESS_TOKEN.equals(context.getTokenType())) {
+                return;
+            }
+            if (!resourceId.isBlank()) {
+                context.getClaims().audience(List.of(resourceId));
+            }
+            if (context.getPrincipal() == null || context.getPrincipal().getAuthorities() == null) {
+                return;
+            }
+            Set<String> userScopes = context.getPrincipal().getAuthorities().stream()
+                    .map(GrantedAuthority::getAuthority)
+                    .filter(a -> a.startsWith("mcp."))
+                    .collect(Collectors.toSet());
+            if (userScopes.isEmpty()) {
+                return; // not user-based (client_credentials) — leave untouched
+            }
+            Set<String> granted = new HashSet<>(context.getAuthorizedScopes());
+            granted.retainAll(userScopes);
+            context.getClaims().claim("scope", granted);
+        };
+    }
+
+    /**
+     * File-backed signing key, so a restart does not invalidate every issued token.
+     *
+     * <p>The private key is in this file. It is gitignored and must never reach an image layer — but note that
+     * "protect the file" is not much of a control here: any deployed module can read it (see the header).
+     */
+    @Bean
+    JWKSource<SecurityContext> jwkSource() throws Exception {
+        Path path = Path.of(props.jwksPath());
+        RSAKey rsaKey;
+        if (Files.exists(path)) {
+            rsaKey = (RSAKey) JWKSet.parse(Files.readString(path)).getKeys().get(0);
+        } else {
+            KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+            generator.initialize(2048);
+            KeyPair keyPair = generator.generateKeyPair();
+            rsaKey = new RSAKey.Builder((RSAPublicKey) keyPair.getPublic())
+                    .privateKey((RSAPrivateKey) keyPair.getPrivate())
+                    .keyID(UUID.randomUUID().toString())
+                    .build();
+            if (path.toAbsolutePath().getParent() != null) {
+                Files.createDirectories(path.toAbsolutePath().getParent());
+            }
+            Files.writeString(path, new JWKSet(rsaKey).toString(false)); // false = include the private key
+            log.info("Generated a new embedded-auth signing key at {} (kid={})", path, rsaKey.getKeyID());
+        }
+        return new ImmutableJWKSet<>(new JWKSet(rsaKey));
+    }
+
+    /**
+     * The Resource Server half verifies against the in-process key instead of fetching its own discovery document
+     * over HTTP. Boot's {@code JwtDecoderConfiguration} is annotated {@code @ConditionalOnMissingBean(JwtDecoder)}
+     * at the class level (verified against the 3.5.16 bytecode), so declaring this bean backs the whole thing off
+     * — no self-call, no startup ordering, no dependence on the advertised port being reachable from inside.
+     *
+     * <p>{@code OAuth2AuthorizationServerConfiguration.jwtDecoder} validates the SIGNATURE only, so the standard
+     * validators (exp/nbf) plus the issuer check are attached explicitly. Skipping this would accept a
+     * correctly-signed token with any {@code iss}.
+     */
+    @Bean
+    JwtDecoder jwtDecoder(JWKSource<SecurityContext> jwkSource) {
+        NimbusJwtDecoder decoder = (NimbusJwtDecoder) OAuth2AuthorizationServerConfiguration.jwtDecoder(jwkSource);
+        decoder.setJwtValidator(JwtValidators.createDefaultWithIssuer(issuer));
+        return decoder;
+    }
+}

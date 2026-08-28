@@ -1,0 +1,162 @@
+// [CAPABILITY: secured MCP / OAuth metadata] Only when MCP is exposed beyond a trusted local demo.
+// protean does NOT implement authentication — it delegates to your Spring Security. Requires:
+//   implementation 'org.springframework.boot:spring-boot-starter-security'
+//   implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
+// and spring.security.oauth2.resourceserver.jwt.issuer-uri (or jwk-set-uri) in application.yml.
+//
+// TWO CHAINS, on purpose:
+//   #1 /platform/** — the CONTROL plane. Bearer token required; scope-gated per method (see below).
+//   #2 everything else — the SERVICE plane. Deployed module routes and the public discovery document.
+// They are separate so service-plane auth can be added later without touching #1.
+//
+// WHY THE METHOD GATING IN CHAIN #1: protean calls ModuleActionAuthorizer from exactly one place (McpDispatcher),
+// which means the /platform/** admin REST controllers are a SECOND deploy path that never reaches that bean.
+// `POST /platform/modules` installs a module without passing any authorizer policy. So module-mutating admin REST
+// is raised to the admin scope here, in the filter chain — the only layer that sees it. Promotion gates still run
+// on every deploy path, but gates check code, not who asked.
+//
+// WHY THE CONSTRUCTOR CHECK: only the UNSET case stops the app on its own — Boot's jwtDecoderByIssuerUri resolves
+// issuer-uri through the Environment during condition evaluation and rejects the unresolvable ${...} placeholder.
+// An EMPTY value and a MALFORMED one (no scheme) both get past Spring, leaving an RCE surface with a decoder that
+// can never verify anything. So those two are rejected here, loudly, with the fix in the message.
+package {{PKG}};
+
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
+
+@Configuration
+public class SecurityConfig {
+
+    // Authorities as Spring renders bearer scopes: scope "mcp.read" -> authority "SCOPE_mcp.read".
+    // Advertise the same names in protean.mcp.authorization.scopes-supported, and map them to actions in
+    // ExampleAuthorizer. NOTE: these are OAUTH scopes — nothing to do with protean.worker.db.scopes (DB tenants).
+    private static final String READ = "SCOPE_mcp.read";
+    private static final String WRITE = "SCOPE_mcp.write";
+    private static final String ADMIN = "SCOPE_mcp.admin";
+
+    /**
+     * Reads the PROPERTY, not the {@code OAUTH_ISSUER_URI} env var: what matters is the value the Resource Server
+     * actually uses, and setting {@code SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI} directly is a
+     * legitimate route that must pass. The empty {@code :} fallback keeps the diagnostic here instead of depending
+     * on which placeholder exception Spring raises first.
+     *
+     * <p>A <i>well-formed but wrong or unreachable</i> issuer is deliberately NOT caught: Boot returns a
+     * {@code SupplierJwtDecoder} that defers the discovery fetch to the first {@code decode(String)}, so the
+     * Authorization Server need not be reachable at startup. Checking it here would impose a startup ordering
+     * constraint that Spring intentionally avoids — such a value starts fine and 401s on every request instead.
+     */
+    SecurityConfig(@Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri:}") String issuerUri) {
+        if (issuerUri.isBlank() || issuerUri.contains("${") || !issuerUri.startsWith("http")) {
+            throw new IllegalStateException("""
+                    No usable OAuth2 issuer is configured, so the MCP control plane (/platform/**) cannot be \
+                    protected. /platform/mcp is a remote code execution surface, so this app refuses to start.
+
+                      export OAUTH_ISSUER_URI=https://<your-as-host>/realms/<realm>
+
+                    The value must be the Authorization Server's issuer identifier — the exact 'iss' claim string \
+                    its tokens carry, not the token endpoint, JWKS URL, or login page. Confirm it with:
+                      curl -s <candidate>/.well-known/openid-configuration | jq -r .issuer
+
+                    See README section 'Security'. Resolved value was: '""" + issuerUri + "'");
+        }
+    }
+
+    /**
+     * Control plane. Scoped to {@code /platform/**} so nothing else in the app is affected.
+     *
+     * <p>CSRF off and sessions stateless because every caller here is a bearer-token client (MCP agents, operators'
+     * scripts) — there is no browser form to protect. Rules are evaluated in declaration order.
+     */
+    @Bean
+    @Order(1)
+    SecurityFilterChain platformSecurityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher("/platform/**")
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> auth
+                // (1) MCP transport — coarse gate only; ExampleAuthorizer decides per action.
+                .requestMatchers("/platform/mcp", "/platform/mcp/**").hasAnyAuthority(READ, WRITE, ADMIN)
+                // (2) admin REST reads — /platform/modules, /platform/trace/*, /platform/runtimes, ...
+                .requestMatchers(HttpMethod.GET, "/platform/**").hasAnyAuthority(READ, WRITE)
+                // (3) MODULE-MUTATING admin REST — raised above plain deploy rights, because this path bypasses
+                // ModuleActionAuthorizer entirely (see the header). An agent holding mcp.write cannot reach it;
+                // an operator with mcp.admin still can. Declared before the general write rules below.
+                .requestMatchers(HttpMethod.POST, "/platform/modules", "/platform/modules/**").hasAuthority(ADMIN)
+                .requestMatchers(HttpMethod.PUT, "/platform/modules", "/platform/modules/**").hasAuthority(ADMIN)
+                .requestMatchers(HttpMethod.PATCH, "/platform/modules", "/platform/modules/**").hasAuthority(ADMIN)
+                .requestMatchers(HttpMethod.DELETE, "/platform/modules", "/platform/modules/**").hasAuthority(ADMIN)
+                // (4) remaining admin REST writes — config, shared libs, scopes.
+                .requestMatchers(HttpMethod.POST, "/platform/**").hasAuthority(WRITE)
+                .requestMatchers(HttpMethod.PUT, "/platform/**").hasAuthority(WRITE)
+                .requestMatchers(HttpMethod.PATCH, "/platform/**").hasAuthority(WRITE)
+                .requestMatchers(HttpMethod.DELETE, "/platform/**").hasAuthority(WRITE)
+                // (5) anything else that reached this chain still needs a valid token.
+                .anyRequest().authenticated())
+            // Missing/invalid token -> 401 + WWW-Authenticate: Bearer, emitted by the Resource Server.
+            .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
+        return http.build();
+    }
+
+    /**
+     * Service plane + discovery. Everything that did not match chain #1 lands here.
+     *
+     * <p>Deployed modules declare their own routes at the root, so this chain cannot use a positive matcher — it is
+     * the fallback by design. {@code oauth2ResourceServer} is deliberately NOT applied: service traffic should not
+     * even attempt token parsing while the plane is open. {@code /.well-known/oauth-protected-resource} (published
+     * by protean when {@code protean.mcp.authorization.resource} is set) must be reachable unauthenticated and
+     * reaches it here.
+     *
+     * <p>THIS is the seam to edit when the service plane gains its own authentication.
+     *
+     * <p><b>Embedded auth (capability {@code embedded_auth}, off unless selected).</b> The login form is added
+     * HERE rather than in a chain of its own, because this chain already matches {@code /login} and is already
+     * {@code permitAll}. A separate chain would need an order number wedged between the existing two, and
+     * renumbering them also reorders the {@code /platform/**} rules above, whose order is load-bearing.
+     *
+     * <p><b>The session policy flips with it, and must.</b> {@code STATELESS} installs a no-op
+     * {@code SecurityContextRepository}, so a form login on this chain would authenticate and immediately forget
+     * — the redirect back to {@code /oauth2/authorize} would arrive unauthenticated and bounce to {@code /login}
+     * forever. {@code IF_REQUIRED} still creates no session for ordinary service traffic (everything here is
+     * {@code permitAll}); the Authorization Server chain then reads that same {@code HttpSession}.
+     *
+     * <p>CSRF stays disabled either way — module routes may be POST and would break otherwise. That leaves
+     * {@code POST /login} without CSRF protection (login-CSRF). Accepted for an internal control plane; it is a
+     * reason not to expose the form publicly.
+     *
+     * <p>With embedded auth NOT selected the provider is empty and every line below behaves exactly as it did
+     * before the capability existed.
+     */
+    @Bean
+    @Order(2)
+    SecurityFilterChain serviceSecurityFilterChain(
+            HttpSecurity http,
+            ObjectProvider<AuthenticationSuccessHandler> loginSuccessHandler) throws Exception {
+        AuthenticationSuccessHandler successHandler = loginSuccessHandler.getIfAvailable();
+        boolean embeddedAuth = successHandler != null;
+
+        http
+            // Modules may declare POST routes; with permitAll and no session, CSRF has nothing to protect.
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(s -> s.sessionCreationPolicy(
+                    embeddedAuth ? SessionCreationPolicy.IF_REQUIRED : SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
+
+        if (embeddedAuth) {
+            // No loginPage() — DefaultLoginPageGeneratingFilter renders /login, so there is no template engine,
+            // controller, or extra dependency to carry.
+            http.formLogin(form -> form.successHandler(successHandler))
+                .logout(Customizer.withDefaults());
+        }
+        return http.build();
+    }
+}

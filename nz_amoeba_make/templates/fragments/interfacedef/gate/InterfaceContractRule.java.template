@@ -1,0 +1,257 @@
+// [CAPABILITY: custom CodeRule] Promotion gate 2 — enforcement layer L3, and the only one that cannot be bypassed.
+//
+// RuleSystem collects every CodeRule bean and PromotionPipeline.enforceReviewGate runs them over the compiled
+// bytecode of EVERY deploy, whichever door it came through: the MCP tools (wrapped or not), the admin REST surface
+// that never reaches ModuleActionAuthorizer, and the manifest endpoint. That is why the rules here are the ones that
+// must hold unconditionally.
+//
+// It also explains why the description channel is an ANNOTATION rather than a Javadoc comment. CodeRule's signature
+// is check(String className, byte[] bytecode) — comments are gone by then, so a "must be documented" rule expressed
+// as Javadoc could only ever be checked in the MCP wrapper, which the admin REST path skips entirely. @Operation and
+// @Schema are @Retention(RUNTIME), so they are still there in the bytecode and can be required here.
+//
+// Bytecode is read with the ASM that spring-core already bundles (org.springframework.asm), so this needs no new
+// dependency.
+//
+// Scope note: a CodeRule applies to all modules with no per-module opt-out, so turning it on would break any already
+// deployed module that predates it. The module store is currently empty — zero modules have ever been deployed on
+// this host — which is exactly why now is the time to introduce it.
+package {{PKG}}.interfacedef.gate;
+
+import org.htcom.protean.gate.rules.CodeRule;
+import org.springframework.asm.AnnotationVisitor;
+import org.springframework.asm.ClassReader;
+import org.springframework.asm.ClassVisitor;
+import org.springframework.asm.FieldVisitor;
+import org.springframework.asm.MethodVisitor;
+import org.springframework.asm.Opcodes;
+import org.springframework.asm.SpringAsmInfo;
+import org.springframework.asm.Type;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+@Component
+public class InterfaceContractRule implements CodeRule {
+
+    // --- annotation descriptors we look for ---
+
+    private static final String REST_CONTROLLER = "Lorg/springframework/web/bind/annotation/RestController;";
+    private static final String CONTROLLER = "Lorg/springframework/stereotype/Controller;";
+    private static final String OPERATION = "Lio/swagger/v3/oas/annotations/Operation;";
+    private static final String SCHEMA = "Lio/swagger/v3/oas/annotations/media/Schema;";
+    private static final String MAPPER = "Lorg/apache/ibatis/annotations/Mapper;";
+
+    private static final Set<String> MAPPING_ANNOTATIONS = Set.of(
+            "Lorg/springframework/web/bind/annotation/RequestMapping;",
+            "Lorg/springframework/web/bind/annotation/GetMapping;",
+            "Lorg/springframework/web/bind/annotation/PostMapping;",
+            "Lorg/springframework/web/bind/annotation/PutMapping;",
+            "Lorg/springframework/web/bind/annotation/PatchMapping;",
+            "Lorg/springframework/web/bind/annotation/DeleteMapping;");
+
+    /**
+     * Return types that erase the response shape.
+     *
+     * <p>This is the rule that makes an interface definition recoverable at all: a handler returning
+     * {@code ResponseEntity<?>} or {@code Map<String,Object>} has no discoverable output structure, so the declared
+     * contract could never be checked against it. {@code void} is deliberately allowed — a 204 has no body.
+     */
+    private static final Set<String> OPAQUE_RETURN_TYPES = Set.of(
+            "Lorg/springframework/http/ResponseEntity;",
+            "Ljava/util/Map;",
+            "Ljava/lang/Object;");
+
+    /**
+     * Records held to the "every component is described" rule.
+     *
+     * <p>Suffix-scoped rather than "every record": these are the names the generator emits for the API surface, so
+     * the rule is predictable and an author's internal value type is not dragged in. It matters on the admin REST
+     * path specifically — there the deploy wrapper never ran, so the DTOs were not regenerated from the spec.
+     */
+    private static final Set<String> DOCUMENTED_RECORD_SUFFIXES = Set.of("Request", "Response", "Row");
+
+    private static final String RECORD_SUPERCLASS = "java/lang/Record";
+
+    private final boolean enabled;
+
+    public InterfaceContractRule(
+            @Value("${amoeba.interface.contract-rule-enabled:true}") boolean enabled) {
+        this.enabled = enabled;
+    }
+
+    @Override
+    public String name() {
+        return "interface-contract";
+    }
+
+    @Override
+    public List<String> check(String className, byte[] bytecode) {
+        if (!enabled || bytecode == null || bytecode.length == 0) {
+            return List.of();
+        }
+        Collector collector = new Collector();
+        // Method bodies are irrelevant here — only annotations and descriptors are read.
+        new ClassReader(bytecode).accept(collector,
+                ClassReader.SKIP_CODE | ClassReader.SKIP_FRAMES | ClassReader.SKIP_DEBUG);
+        return collector.violations(className);
+    }
+
+    /** Accumulates what one class declares, then turns it into violations. */
+    private static final class Collector extends ClassVisitor {
+
+        private final Set<String> classAnnotations = new LinkedHashSet<>();
+        private final List<Member> methods = new ArrayList<>();
+        private final List<Member> fields = new ArrayList<>();
+        private boolean isRecord;
+
+        /** The binary name without its package, so a nested type keeps its {@code Outer$Inner} form. */
+        private String nestedName = "";
+
+        /** One method or field, with the annotations directly present on it. */
+        private record Member(String name, String returnDescriptor, Set<String> annotations, boolean abstractMember) {
+        }
+
+        Collector() {
+            super(SpringAsmInfo.ASM_VERSION);
+        }
+
+        @Override
+        public void visit(int version, int access, String name, String signature,
+                          String superName, String[] interfaces) {
+            isRecord = RECORD_SUPERCLASS.equals(superName);
+            int slash = name.lastIndexOf('/');
+            nestedName = slash < 0 ? name : name.substring(slash + 1);
+        }
+
+        @Override
+        public AnnotationVisitor visitAnnotation(String descriptor, boolean visible) {
+            classAnnotations.add(descriptor);
+            return null;
+        }
+
+        @Override
+        public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                         String signature, String[] exceptions) {
+            if ((access & (Opcodes.ACC_SYNTHETIC | Opcodes.ACC_BRIDGE)) != 0
+                    || "<init>".equals(name) || "<clinit>".equals(name)) {
+                return null;
+            }
+            Set<String> annotations = new LinkedHashSet<>();
+            methods.add(new Member(name, Type.getReturnType(descriptor).getDescriptor(), annotations,
+                    (access & Opcodes.ACC_ABSTRACT) != 0));
+            return new MethodVisitor(SpringAsmInfo.ASM_VERSION) {
+                @Override
+                public AnnotationVisitor visitAnnotation(String annotationDescriptor, boolean visible) {
+                    annotations.add(annotationDescriptor);
+                    return null;
+                }
+            };
+        }
+
+        @Override
+        public FieldVisitor visitField(int access, String name, String descriptor,
+                                       String signature, Object value) {
+            if ((access & (Opcodes.ACC_SYNTHETIC | Opcodes.ACC_STATIC)) != 0) {
+                return null;
+            }
+            Set<String> annotations = new LinkedHashSet<>();
+            fields.add(new Member(name, descriptor, annotations, false));
+            // A record component's annotation is propagated to the backing FIELD (and the accessor), because
+            // @Schema targets FIELD/METHOD/PARAMETER and not RECORD_COMPONENT — so the RecordComponent attribute
+            // would not carry it. The field is the reliable place to look.
+            return new FieldVisitor(SpringAsmInfo.ASM_VERSION) {
+                @Override
+                public AnnotationVisitor visitAnnotation(String annotationDescriptor, boolean visible) {
+                    annotations.add(annotationDescriptor);
+                    return null;
+                }
+            };
+        }
+
+        List<String> violations(String className) {
+            List<String> violations = new ArrayList<>();
+            if (classAnnotations.contains(REST_CONTROLLER) || classAnnotations.contains(CONTROLLER)) {
+                checkController(violations, className);
+            }
+            if (classAnnotations.contains(MAPPER)) {
+                checkMapper(violations, className);
+            }
+            if (isRecord && isDocumentedRecordName(nestedName)) {
+                checkDocumentedRecord(violations, className);
+            }
+            return violations;
+        }
+
+        /**
+         * Whether a record is part of the published surface.
+         *
+         * <p>Every {@code $}-separated segment is tested, not just the innermost one: nested DTOs arrive as
+         * {@code CreateOrderRequest$Item}, and they are exactly as much part of the request body as their parent.
+         */
+        private static boolean isDocumentedRecordName(String nestedName) {
+            for (String segment : nestedName.split("\\$")) {
+                if (DOCUMENTED_RECORD_SUFFIXES.stream().anyMatch(segment::endsWith)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private void checkController(List<String> violations, String className) {
+            for (Member method : methods) {
+                if (method.annotations().stream().noneMatch(MAPPING_ANNOTATIONS::contains)) {
+                    continue;
+                }
+                if (!method.annotations().contains(OPERATION)) {
+                    violations.add(className + "." + method.name() + " is a request mapping without "
+                            + "@io.swagger.v3.oas.annotations.Operation — every endpoint must carry its summary and "
+                            + "description as an annotation, because a Javadoc comment cannot be verified here");
+                }
+                if (OPAQUE_RETURN_TYPES.contains(method.returnDescriptor())) {
+                    violations.add(className + "." + method.name() + " returns "
+                            + readable(method.returnDescriptor())
+                            + ", which erases the response shape — return a concrete DTO (or void for no body) so "
+                            + "the interface definition can be checked against the code");
+                }
+            }
+        }
+
+        private void checkMapper(List<String> violations, String className) {
+            for (Member method : methods) {
+                if (!method.abstractMember()) {
+                    // A default method has a body and no statement; it is not part of the data-access contract.
+                    continue;
+                }
+                if (!method.annotations().contains(SCHEMA)) {
+                    violations.add(className + "." + method.name() + " is a @Mapper method without "
+                            + "@io.swagger.v3.oas.annotations.media.Schema — describe what it reads or writes");
+                }
+                if (OPAQUE_RETURN_TYPES.contains(method.returnDescriptor())) {
+                    violations.add(className + "." + method.name() + " returns "
+                            + readable(method.returnDescriptor())
+                            + "; a Mapper must return a concrete row type");
+                }
+            }
+        }
+
+        private void checkDocumentedRecord(List<String> violations, String className) {
+            for (Member field : fields) {
+                if (!field.annotations().contains(SCHEMA)) {
+                    violations.add(className + "." + field.name() + " has no "
+                            + "@io.swagger.v3.oas.annotations.media.Schema description — every field of a "
+                            + "Request/Response/Row type is part of the published interface");
+                }
+            }
+        }
+
+        /** {@code Ljava/util/Map;} -> {@code java.util.Map}, for a message a human can act on. */
+        private static String readable(String descriptor) {
+            return Type.getType(descriptor).getClassName();
+        }
+    }
+}

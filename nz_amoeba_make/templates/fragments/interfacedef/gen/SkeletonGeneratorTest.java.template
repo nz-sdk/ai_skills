@@ -1,0 +1,280 @@
+// The compile tests are the load-bearing ones: they run the real javac over the emitted skeleton against the same
+// classpath a deployed module gets. The content assertions cover the things that compile fine but are still wrong —
+// a missing binding name, a lost description, a component list that would not wire.
+package {{PKG}}.interfacedef.gen;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DataAccess;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+import {{PKG}}.interfacedef.SpecFixtures;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class SkeletonGeneratorTest {
+
+    private static SkeletonBundle generate(InterfaceSpec spec) {
+        return SkeletonGenerator.generate(
+                new SkeletonGenerator.Request("orders", "module.orders", spec));
+    }
+
+    private static InterfaceSpec withoutDataAccess() {
+        return new InterfaceSpec("주문 API", "주문을 조회하고 생성한다", DataAccess.NONE,
+                List.of(SpecFixtures.getOrder(), SpecFixtures.createOrder()));
+    }
+
+    private static String content(SkeletonBundle bundle, String filename) {
+        return bundle.files().stream()
+                .filter(f -> f.filename().equals(filename))
+                .findFirst()
+                .map(GeneratedFile::content)
+                .orElseThrow(() -> new AssertionError("no generated file named " + filename
+                        + " (have " + bundle.files().stream().map(GeneratedFile::filename).toList() + ")"));
+        }
+
+    private static Optional<GeneratedFile> file(SkeletonBundle bundle, String filename) {
+        return bundle.files().stream().filter(f -> f.filename().equals(filename)).findFirst();
+    }
+
+    private static void assertCompiles(SkeletonBundle bundle) {
+        List<String> errors = GeneratedSourceCompiler.compile(bundle);
+        assertTrue(errors.isEmpty(), () -> "generated skeleton does not compile:\n" + String.join("\n", errors));
+    }
+
+    // --- the real check: does the emitted Java compile ---
+
+    @Test
+    void skeletonWithoutDataAccessCompiles() {
+        assertCompiles(generate(withoutDataAccess()));
+    }
+
+    @Test
+    void myBatisSkeletonCompiles() {
+        assertCompiles(generate(SpecFixtures.orders()));
+    }
+
+    /** Deep object nesting, arrays of arrays and every scalar/format combination in one module. */
+    @Test
+    void skeletonForAwkwardShapesCompiles() {
+        InterfaceSpec spec = new InterfaceSpec("t", "까다로운 형태를 모두 담은 모듈", DataAccess.NONE, List.of(
+                new OperationSpec("awkward", HttpMethod.POST, "/awkward/{id}",
+                        "까다로운 입력", "중첩과 배열과 모든 스칼라 형식을 한 번에 받는다",
+                        List.of(new ParamSpec("id", ParamIn.PATH, FieldType.STRING, true, "대상 식별자", "x"),
+                                new ParamSpec("page-size", ParamIn.QUERY, FieldType.INTEGER, false,
+                                        "한 페이지 크기", "20"),
+                                new ParamSpec("X-Request-Id", ParamIn.HEADER, FieldType.STRING, false,
+                                        "요청 추적 식별자", "abc"),
+                                new ParamSpec("tags", ParamIn.QUERY, FieldType.ARRAY, false, "태그로 필터", "a")),
+                        List.of(FieldSpec.scalar("small", FieldType.INTEGER, "int32", true, "32비트 정수"),
+                                FieldSpec.scalar("big", FieldType.INTEGER, true, "기본 정수"),
+                                FieldSpec.scalar("money", FieldType.NUMBER, true, "정밀 소수"),
+                                FieldSpec.scalar("ratio", FieldType.NUMBER, "double", true, "배정밀도 소수"),
+                                FieldSpec.scalar("flag", FieldType.BOOLEAN, false, "참거짓 값"),
+                                new FieldSpec("grid", FieldType.ARRAY, null, true, "행 목록", null, List.of(),
+                                        new FieldSpec("row", FieldType.ARRAY, null, true, "한 행", null, List.of(),
+                                                FieldSpec.scalar("cell", FieldType.INTEGER, true, "칸 값"))),
+                                new FieldSpec("outer", FieldType.OBJECT, null, true, "겉 객체", null,
+                                        List.of(new FieldSpec("inner", FieldType.OBJECT, null, true,
+                                                "안 객체", null,
+                                                List.of(FieldSpec.scalar("leaf", FieldType.STRING, true,
+                                                        "가장 안쪽 값")), null)), null)),
+                        List.of(new ResponseSpec(204, "본문 없이 성공", List.of())))));
+        assertCompiles(generate(spec));
+    }
+
+    /** Two object fields with the same name at different levels must not generate two records of one name. */
+    @Test
+    void collidingNestedObjectNamesGetDistinctRecords() {
+        InterfaceSpec spec = new InterfaceSpec("t", "같은 이름의 중첩 객체를 두 번 담는다", DataAccess.NONE,
+                List.of(new OperationSpec("collide", HttpMethod.POST, "/collide", "충돌", "이름 충돌 확인",
+                        List.of(),
+                        List.of(new FieldSpec("detail", FieldType.OBJECT, null, true, "겉 상세", null,
+                                        List.of(new FieldSpec("detail", FieldType.OBJECT, null, true,
+                                                "안 상세", null,
+                                                List.of(FieldSpec.scalar("value", FieldType.STRING, true,
+                                                        "안쪽 값")), null)), null)),
+                        List.of(new ResponseSpec(204, "본문 없이 성공", List.of())))));
+        SkeletonBundle bundle = generate(spec);
+        String dto = content(bundle, "CollideRequest.java");
+        assertTrue(dto.contains("public record Detail("), dto);
+        assertTrue(dto.contains("public record Detail2("), dto);
+        assertCompiles(bundle);
+    }
+
+    // --- deploy parameters travel with the files ---
+
+    @Test
+    void deployParametersListEveryComponent() {
+        SkeletonBundle bundle = generate(SpecFixtures.orders());
+        assertEquals("module.orders.OrdersController", bundle.controllerFqcn());
+        // Controller + service impl + MyBatis configuration. Omitting any of these leaves components defaulting to
+        // [controller] alone, which is the classic MVC-module wiring failure.
+        assertEquals(List.of("module.orders.OrdersController", "module.orders.OrdersServiceImpl",
+                "module.orders.OrdersMyBatisConfig"), bundle.componentFqcns());
+        assertTrue(bundle.needsSharedBeans(), "a MyBatis module injects the host DataSource");
+    }
+
+    @Test
+    void withoutDataAccessThereIsNoMapperAndNoSharedBeans() {
+        SkeletonBundle bundle = generate(withoutDataAccess());
+        assertFalse(bundle.needsSharedBeans());
+        assertEquals(List.of("module.orders.OrdersController", "module.orders.OrdersServiceImpl"),
+                bundle.componentFqcns());
+        assertTrue(file(bundle, "OrdersMapper.java").isEmpty());
+        assertTrue(file(bundle, "OrdersMyBatisConfig.java").isEmpty());
+    }
+
+    /** Server-owned vs authored decides what the wrapper replaces, so the split is pinned. */
+    @Test
+    void ownershipSplitIsAsDeclared() {
+        SkeletonBundle bundle = generate(SpecFixtures.orders());
+        assertEquals(List.of("GetOrderResponse.java", "CreateOrderRequest.java", "CreateOrderResponse.java",
+                        "OrdersController.java", "OrdersService.java", "GetOrderRow.java",
+                        "OrdersMyBatisConfig.java"),
+                bundle.serverOwned().stream().map(GeneratedFile::filename).toList());
+        assertEquals(List.of("OrdersServiceImpl.java", "OrdersContractTest.java", "OrdersMapper.java",
+                        "mapper/orders/OrdersMapper.xml"),
+                bundle.authored().stream().map(GeneratedFile::filename).toList());
+    }
+
+    // --- content that compiles but could still be wrong ---
+
+    @Test
+    void bindingAnnotationsAlwaysSpellTheWireName() {
+        String controller = content(generate(SpecFixtures.orders()), "OrdersController.java");
+        assertTrue(controller.contains("@PathVariable(name = \"orderId\")"), controller);
+        assertTrue(controller.contains("@GetMapping(\"/orders/{orderId}\")"), controller);
+        assertTrue(controller.contains("@PostMapping(\"/orders\")"), controller);
+        assertTrue(controller.contains("@RequestBody CreateOrderRequest request"), controller);
+    }
+
+    @Test
+    void descriptionsBecomeSwaggerAnnotations() {
+        SkeletonBundle bundle = generate(SpecFixtures.orders());
+        String controller = content(bundle, "OrdersController.java");
+        assertTrue(controller.contains("@Operation(summary = \"주문 단건 조회\""), controller);
+        assertTrue(controller.contains("@Parameter(description = \"조회할 주문 번호\")"), controller);
+
+        String dto = content(bundle, "CreateOrderRequest.java");
+        assertTrue(dto.contains("@Schema(description = \"주문하는 고객 번호\""), dto);
+        assertTrue(dto.contains("requiredMode = Schema.RequiredMode.REQUIRED"), dto);
+    }
+
+    @Test
+    void emptySuccessBodyGivesAVoidControllerMethod() {
+        InterfaceSpec spec = new InterfaceSpec("t", "본문 없는 응답만 담는다", DataAccess.NONE,
+                List.of(new OperationSpec("remove", HttpMethod.DELETE, "/things/{id}", "삭제",
+                        "대상을 삭제하고 본문 없이 응답한다",
+                        List.of(new ParamSpec("id", ParamIn.PATH, FieldType.STRING, true, "대상 식별자", "x")),
+                        null, List.of(new ResponseSpec(204, "본문 없이 성공", List.of())))));
+        String controller = content(generate(spec), "OrdersController.java");
+        assertTrue(controller.contains("public void remove("), controller);
+        assertTrue(controller.contains("        service.remove(id);"), controller);
+    }
+
+    /** The stub must throw, so gate 3 rolls back an unimplemented module instead of serving empty responses. */
+    @Test
+    void serviceStubThrows() {
+        String impl = content(generate(SpecFixtures.orders()), "OrdersServiceImpl.java");
+        assertTrue(impl.contains("throw new UnsupportedOperationException(\"getOrder: not implemented yet"), impl);
+        assertTrue(impl.contains("private final OrdersMapper mapper;"), impl);
+    }
+
+    @Test
+    void contractTestPinsRouteAndReturnType() {
+        String test = content(generate(SpecFixtures.orders()), "OrdersContractTest.java");
+        assertTrue(test.contains("getDeclaredMethod(\"getOrder\", Long.class)"), test);
+        assertTrue(test.contains("assertArrayEquals(new String[] {\"/orders/{orderId}\"}, mapping.value())"), test);
+        assertTrue(test.contains("getDeclaredMethod(\"createOrder\", CreateOrderRequest.class)"), test);
+        assertTrue(test.contains("assertEquals(GetOrderResponse.class, method.getReturnType()"), test);
+    }
+
+    // --- MyBatis artifacts ---
+
+    @Test
+    void mapperXmlNamespaceEqualsTheMapperFqcn() {
+        String xml = content(generate(SpecFixtures.orders()), "mapper/orders/OrdersMapper.xml");
+        assertTrue(xml.contains("<mapper namespace=\"module.orders.OrdersMapper\">"), xml);
+        // Statement id == Mapper method name is the other half of the binding contract.
+        assertTrue(xml.contains("<select id=\"getOrder\" resultMap=\"getOrderResult\">"), xml);
+        assertTrue(xml.contains("<insert id=\"createOrder\">"), xml);
+    }
+
+    /** A record cannot be auto-mapped, so the result map must use constructor args with flattened columns. */
+    @Test
+    void resultMapUsesConstructorArgsWithFlattenedColumns() {
+        String xml = content(generate(SpecFixtures.orders()), "mapper/orders/OrdersMapper.xml");
+        assertTrue(xml.contains("<resultMap id=\"getOrderResult\" type=\"module.orders.dto.GetOrderRow\">"), xml);
+        assertTrue(xml.contains("<constructor>"), xml);
+        assertTrue(xml.contains("<arg column=\"order_id\" javaType=\"Long\"/>"), xml);
+        // customer.name flattens to customerName / customer_name.
+        assertTrue(xml.contains("<arg column=\"customer_name\" javaType=\"String\"/>"), xml);
+        // tags is an array, so it is deliberately absent from the row.
+        assertFalse(xml.contains("column=\"tags\""), xml);
+    }
+
+    @Test
+    void rowRecordCarriesFlattenedScalarLeavesOnly() {
+        String row = content(generate(SpecFixtures.orders()), "GetOrderRow.java");
+        assertTrue(row.contains("Long orderId"), row);
+        assertTrue(row.contains("String customerName"), row);
+        assertTrue(row.contains("Boolean customerVip"), row);
+        assertFalse(row.contains("tags"), row);
+    }
+
+    @Test
+    void mapperMethodsReturnRowsForReadsAndCountsForWrites() {
+        String mapper = content(generate(SpecFixtures.orders()), "OrdersMapper.java");
+        assertTrue(mapper.contains("List<GetOrderRow> getOrder(@Param(\"orderId\") Long orderId)"), mapper);
+        assertTrue(mapper.contains("int createOrder(@Param(\"request\") CreateOrderRequest request)"), mapper);
+        assertTrue(mapper.contains("@Mapper"), mapper);
+    }
+
+    @Test
+    void myBatisConfigWiresTheFactoryAndTheTypedMapper() {
+        String config = content(generate(SpecFixtures.orders()), "OrdersMyBatisConfig.java");
+        assertTrue(config.contains("classpath*:mapper/orders/*.xml"), config);
+        assertTrue(config.contains("new MapperFactoryBean<>(OrdersMapper.class)"), config);
+        assertTrue(config.contains("public MapperFactoryBean<OrdersMapper> ordersMapper("), config);
+    }
+
+    // --- generation-time invariants ---
+
+    @Test
+    void invalidSpecIsRejectedBeforeAnythingIsGenerated() {
+        InterfaceSpec spec = new InterfaceSpec("t", "설명 문장", DataAccess.NONE, List.of());
+        assertThrows(IllegalArgumentException.class, () -> generate(spec));
+    }
+
+    @Test
+    void illegalPackageNameIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> SkeletonGenerator.generate(
+                new SkeletonGenerator.Request("orders", "Module.Orders", SpecFixtures.orders())));
+    }
+
+    /** Two wire names collapsing onto one Java identifier is a generation failure, never a silent rename. */
+    @Test
+    void collidingParameterIdentifiersFailGeneration() {
+        InterfaceSpec spec = new InterfaceSpec("t", "같은 식별자로 접히는 파라미터 둘", DataAccess.NONE,
+                List.of(new OperationSpec("collide", HttpMethod.GET, "/collide", "충돌", "식별자 충돌 확인",
+                        List.of(new ParamSpec("page-size", ParamIn.QUERY, FieldType.INTEGER, false,
+                                        "하이픈 표기 크기", "20"),
+                                new ParamSpec("pageSize", ParamIn.QUERY, FieldType.INTEGER, false,
+                                        "낙타 표기 크기", "20")),
+                        null, List.of(new ResponseSpec(200, "성공", List.of())))));
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> generate(spec));
+        assertTrue(e.getMessage().contains("pageSize"), e.getMessage());
+    }
+}

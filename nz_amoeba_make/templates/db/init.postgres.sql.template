@@ -1,0 +1,9 @@
+-- Seeded into `{{DB}}` on the FIRST boot of a fresh PostgreSQL data volume (mounted at /docker-entrypoint-initdb.d).
+-- Re-apply: `docker compose down -v` (clean boot) or
+--   docker exec -i protean-{{NAME}}-postgres psql -U {{DB}} -d {{DB}} < init/01-schema.sql
+
+CREATE TABLE IF NOT EXISTS items (
+    id         BIGSERIAL    PRIMARY KEY,
+    name       VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

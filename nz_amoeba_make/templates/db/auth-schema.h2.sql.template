@@ -1,0 +1,50 @@
+-- [amoeba.auth.store=jdbc] Standard Spring Security user schema — the exact tables JdbcUserDetailsManager
+-- queries, so the JDBC store is configuration rather than code.
+--
+-- NOT run at startup on purpose. Spring Boot only auto-runs schema.sql against an embedded datasource, and this
+-- app points at a real MySQL server; creating login tables as a silent boot side effect on a shared database is
+-- the wrong default. Apply it yourself:
+--
+--   -- (embedded H2: run through your usual console/JDBC) src/main/resources/db/auth-schema.h2.sql
+--
+-- ★ PASSWORDS ARE STORED ENCODED, NOT PLAINTEXT. The app uses a DelegatingPasswordEncoder, so every value needs
+--   its algorithm prefix — '{bcrypt}$2a$10$...'. A bare plaintext password will never match and the login just
+--   fails with "Bad credentials".
+--
+--   Generate a hash with the app's own encoder (no extra tooling):
+--     jshell --class-path build/classes/java/main:<spring-security-crypto.jar>
+--     > new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().encode("your-password")
+--
+-- ★ AUTHORITY NAMING IS A CONTRACT. `authority` must be spelled exactly like the OAuth scope — mcp.read,
+--   mcp.write, mcp.admin. EmbeddedAuthServerConfig intersects requested scopes with these authorities; anything
+--   else (ROLE_ADMIN, MCP_WRITE) intersects to nothing and yields a scope-less token that is denied everything.
+
+CREATE TABLE IF NOT EXISTS users (
+    username VARCHAR(50)  NOT NULL PRIMARY KEY,
+    password VARCHAR(500) NOT NULL,
+    enabled  BOOLEAN      NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS authorities (
+    username  VARCHAR(50) NOT NULL,
+    authority VARCHAR(50) NOT NULL,
+    CONSTRAINT fk_authorities_users FOREIGN KEY (username) REFERENCES users (username)
+);
+
+-- JdbcUserDetailsManager looks users up by (username, authority); the unique index also stops an authority being
+-- granted twice, which would otherwise duplicate the scope in the intersection.
+CREATE UNIQUE INDEX IF NOT EXISTS ix_auth_username ON authorities (username, authority);
+
+-- ── Example seed — replace the hashes before using this anywhere real ────────────────────────────────────────
+-- Both hashes below are BCrypt of the DEV defaults shipped in application.yml ('admin-pw' / 'viewer-pw').
+-- They are published in this repository, so they are worth exactly nothing as secrets. Re-generate them.
+--
+-- INSERT INTO users (username, password, enabled) VALUES
+--   ('admin',  '{bcrypt}$2a$10$REPLACE_ME', TRUE),
+--   ('viewer', '{bcrypt}$2a$10$REPLACE_ME', TRUE);
+--
+-- INSERT INTO authorities (username, authority) VALUES
+--   ('admin',  'mcp.read'),
+--   ('admin',  'mcp.write'),
+--   ('admin',  'mcp.admin'),
+--   ('viewer', 'mcp.read');

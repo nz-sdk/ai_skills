@@ -1,0 +1,139 @@
+// [INTERFACE DEFINITION] Signatures -> the @RestController source.
+//
+// The controller is server-owned and contains no logic: it binds, annotates and delegates. That is deliberate —
+// it is the file the platform compares against the declared routes, so its mappings must be a pure function of the
+// spec. Business behaviour lives in the service implementation, which the module author owns.
+//
+// @Operation / @Parameter come from the spec's summary and description fields. They are the description channel
+// that survives into bytecode, so promotion gate 2 can require them on every deploy path — including the admin
+// REST path that never reaches the MCP wrapper.
+package {{PKG}}.interfacedef.gen;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator.Layout;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator.MethodParam;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator.Signature;
+
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+final class ControllerWriter {
+
+    static final String SPRING_WEB = "org.springframework.web.bind.annotation.";
+
+    private ControllerWriter() {
+    }
+
+    static String write(Layout layout, InterfaceSpec spec, List<Signature> signatures) {
+        Set<String> imports = new LinkedHashSet<>();
+        imports.add("io.swagger.v3.oas.annotations.Operation");
+        imports.add(SPRING_WEB + "RestController");
+        imports.addAll(SkeletonGenerator.dtoImports(layout, signatures));
+        if (SkeletonGenerator.usesList(signatures)) {
+            imports.add("java.util.List");
+        }
+        for (Signature sig : signatures) {
+            imports.add(SPRING_WEB + mappingAnnotation(sig.operation().method()));
+            if (sig.requestDto() != null) {
+                imports.add(SPRING_WEB + "RequestBody");
+            }
+            for (MethodParam p : sig.params()) {
+                imports.add("io.swagger.v3.oas.annotations.Parameter");
+                imports.add(SPRING_WEB + bindingAnnotation(p.in()));
+            }
+        }
+
+        StringBuilder out = new StringBuilder();
+        out.append("// GENERATED from the module's interface definition. Do not edit — the deploy wrapper replaces\n")
+                .append("// this file from the declared spec, so hand edits are silently discarded.\n")
+                .append("package ").append(layout.basePackage()).append(";\n\n")
+                .append(SkeletonGenerator.imports(imports, layout.basePackage()))
+                .append('\n');
+
+        out.append("/**\n * ").append(JavaNames.oneLine(spec.description())).append('\n')
+                .append(" *\n * <p>Binds and delegates only. Behaviour belongs in ")
+                .append("{@link ").append(layout.service()).append("}.\n */\n")
+                .append("@RestController\n")
+                .append("public class ").append(layout.controller()).append(" {\n\n")
+                .append("    private final ").append(layout.service()).append(" service;\n\n")
+                .append("    public ").append(layout.controller()).append('(')
+                .append(layout.service()).append(" service) {\n")
+                .append("        this.service = service;\n    }\n");
+
+        for (Signature sig : signatures) {
+            appendMethod(out, sig);
+        }
+        return out.append("}\n").toString();
+    }
+
+    private static void appendMethod(StringBuilder out, Signature sig) {
+        OperationSpec op = sig.operation();
+        out.append('\n')
+                .append("    /** ").append(JavaNames.oneLine(op.summary())).append(" */\n")
+                .append("    @Operation(summary = ").append(JavaNames.literal(JavaNames.oneLine(op.summary())))
+                .append(", description = ").append(JavaNames.literal(JavaNames.oneLine(op.description())))
+                .append(")\n")
+                .append("    @").append(mappingAnnotation(op.method())).append('(')
+                .append(JavaNames.literal(op.path())).append(")\n")
+                .append("    public ").append(sig.returnType()).append(' ').append(op.operationId()).append('(');
+
+        List<String> parameters = new ArrayList<>();
+        for (MethodParam p : sig.params()) {
+            parameters.add("@Parameter(description = "
+                    + JavaNames.literal(JavaNames.oneLine(p.description())) + ") "
+                    + binding(p) + " " + p.javaType() + " " + p.javaName());
+        }
+        if (sig.requestDto() != null) {
+            parameters.add("@RequestBody " + sig.requestDto() + " " + sig.bodyParam());
+        }
+        if (parameters.isEmpty()) {
+            out.append(") {\n");
+        } else {
+            // One parameter per line: an annotated parameter list is long enough that a single line is unreadable.
+            out.append('\n').append("            ").append(String.join(",\n            ", parameters))
+                    .append(") {\n");
+        }
+
+        out.append("        ").append("void".equals(sig.returnType()) ? "" : "return ")
+                .append("service.").append(op.operationId()).append('(')
+                .append(sig.forwardedArguments()).append(");\n")
+                .append("    }\n");
+    }
+
+    /**
+     * The binding annotation, always with an explicit {@code name}. Spring can infer the name from the parameter
+     * only because protean compiles modules with {@code -parameters}; spelling it out removes that dependency and
+     * is required anyway whenever the wire name is not a legal identifier ({@code X-Request-Id}).
+     */
+    private static String binding(MethodParam p) {
+        String name = "name = " + JavaNames.literal(p.wireName());
+        return switch (p.in()) {
+            // A path variable is part of the URI, so `required` is not expressible and not needed.
+            case PATH -> "@PathVariable(" + name + ")";
+            case QUERY -> "@RequestParam(" + name + ", required = " + p.required() + ")";
+            case HEADER -> "@RequestHeader(" + name + ", required = " + p.required() + ")";
+        };
+    }
+
+    private static String bindingAnnotation(InterfaceSpec.ParamIn in) {
+        return switch (in) {
+            case PATH -> "PathVariable";
+            case QUERY -> "RequestParam";
+            case HEADER -> "RequestHeader";
+        };
+    }
+
+    static String mappingAnnotation(HttpMethod method) {
+        return switch (method) {
+            case GET -> "GetMapping";
+            case POST -> "PostMapping";
+            case PUT -> "PutMapping";
+            case PATCH -> "PatchMapping";
+            case DELETE -> "DeleteMapping";
+        };
+    }
+}

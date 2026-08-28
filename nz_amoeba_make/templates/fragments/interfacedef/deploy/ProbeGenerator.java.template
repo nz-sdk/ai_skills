@@ -1,0 +1,114 @@
+// [INTERFACE DEFINITION] InterfaceSpec -> VerificationPlan probes. The cheapest enforcement in the whole design.
+//
+// ModulePlatform.install runs promotion gate 3 AFTER isolation.deploy(), and any RuntimeException from it triggers
+// undeploy + store.remove + rethrow. So a probe that fails takes the deployment down and cleans up after itself,
+// using a path protean already implements and tests. Declaring a route that the controller does not actually serve
+// therefore costs zero lines of rollback code here.
+//
+// The limit is structural: VerificationPlan.Probe is (method, path, expectedStatus, bodyContains) — there is no
+// request-body field. An operation with a body cannot be probed at all, because sending an empty body to a
+// @RequestBody handler produces a 400 and asserting on that would prove nothing about the declared contract. Those
+// operations fall to InterfaceVerifier's route comparison instead, and define_interface warns the caller which ones
+// they are rather than leaving the coverage gap invisible.
+package {{PKG}}.interfacedef.deploy;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import org.htcom.protean.module.VerificationPlan;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+/** Builds gate-3 probes from a spec. Stateless. */
+public final class ProbeGenerator {
+
+    private ProbeGenerator() {
+    }
+
+    /**
+     * Generates one probe per probeable operation.
+     *
+     * <p>An operation is probeable when it declares no request body, declares a 2xx response, and every {@code {var}}
+     * in its path has an example to substitute. The validator already requires an example on every path parameter,
+     * so the last condition is a guard rather than an expected outcome.
+     */
+    public static List<VerificationPlan.Probe> probesFor(InterfaceSpec spec) {
+        List<VerificationPlan.Probe> probes = new ArrayList<>();
+        for (OperationSpec op : spec.operations()) {
+            if (op.hasRequestBody()) {
+                continue;
+            }
+            Optional<String> path = concretePath(op);
+            Optional<Integer> status = op.successResponse().map(InterfaceSpec.ResponseSpec::status);
+            if (path.isPresent() && status.isPresent()) {
+                // bodyContains stays null: the spec declares the response SHAPE, not any particular value, and
+                // asserting on a substring of a shape would be a false constraint.
+                probes.add(new VerificationPlan.Probe(op.method().name(), path.get(), status.get(), null));
+            }
+        }
+        return probes;
+    }
+
+    /** The operation ids that got no probe, so the caller can be told where coverage stops. */
+    public static List<String> unprobeable(InterfaceSpec spec) {
+        List<String> ids = new ArrayList<>();
+        for (OperationSpec op : spec.operations()) {
+            if (op.hasRequestBody() || concretePath(op).isEmpty() || op.successResponse().isEmpty()) {
+                ids.add(op.operationId());
+            }
+        }
+        return ids;
+    }
+
+    /**
+     * Merges generated probes into whatever plan the caller supplied.
+     *
+     * <p>Caller-supplied probes are kept as-is and generated ones are added, minus any duplicate method+path — a
+     * hand-written probe is more specific (it can assert {@code bodyContains}), so it wins. Load-test settings pass
+     * through untouched.
+     */
+    public static VerificationPlan merge(VerificationPlan existing, List<VerificationPlan.Probe> generated) {
+        if (generated.isEmpty()) {
+            return existing;
+        }
+        List<VerificationPlan.Probe> merged = new ArrayList<>();
+        if (existing != null && existing.integration() != null) {
+            merged.addAll(existing.integration());
+        }
+        for (VerificationPlan.Probe probe : generated) {
+            boolean alreadyCovered = merged.stream()
+                    .anyMatch(p -> p.method().equalsIgnoreCase(probe.method()) && p.path().equals(probe.path()));
+            if (!alreadyCovered) {
+                merged.add(probe);
+            }
+        }
+        if (existing == null) {
+            return new VerificationPlan(merged, null, null, null, null, null);
+        }
+        return new VerificationPlan(merged, existing.loadPath(), existing.concurrency(),
+                existing.requestsPerThread(), existing.maxAvgLatencyMs(), existing.maxHeapGrowthBytes());
+    }
+
+    /**
+     * Substitutes each {@code {var}} with its declared example, producing a path a probe can actually request.
+     * Empty when any variable has no usable example.
+     */
+    private static Optional<String> concretePath(OperationSpec op) {
+        String path = op.path();
+        for (ParamSpec p : op.parameters()) {
+            if (p.in() != ParamIn.PATH) {
+                continue;
+            }
+            if (p.example() == null || p.example().isBlank()) {
+                return Optional.empty();
+            }
+            path = path.replace("{" + p.name() + "}", p.example().trim());
+        }
+        // A leftover brace means a variable had no matching parameter. The validator rejects that, so reaching here
+        // would mean an unvalidated spec got through — refuse to build a nonsense probe either way.
+        return path.indexOf('{') >= 0 ? Optional.empty() : Optional.of(path);
+    }
+}

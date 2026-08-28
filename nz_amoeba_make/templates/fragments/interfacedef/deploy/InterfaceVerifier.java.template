@@ -1,0 +1,126 @@
+// [INTERFACE DEFINITION] Declared routes vs the routes the module actually registered on the live mapping.
+//
+// This runs right after install returns, and it is what covers the operations a gate-3 probe cannot reach (anything
+// with a request body — VerificationPlan.Probe has no body field).
+//
+// It reads DynamicEndpointRegistrar.routesOf(moduleId), which is documented as "the routes the module ACTUALLY
+// registered on the live mapping ... rather than the store's desiredState". That is the right source: it catches the
+// "ACTIVE but 404" case where the store says the module is deployed and nothing is actually serving.
+//
+// The asymmetry is deliberate and is the policy that was chosen: a DECLARED route that does not exist is a broken
+// promise, so it blocks; an UNDECLARED route that does exist is under-documentation, so it warns. Blocking on extras
+// would force every incidental route into the spec, and the definition document is about the published contract.
+package {{PKG}}.interfacedef.deploy;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import org.htcom.protean.dynamic.DynamicEndpointRegistrar;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+/** Compares a declared spec with the live routing table. */
+@Component
+public class InterfaceVerifier {
+
+    private final DynamicEndpointRegistrar registrar;
+
+    public InterfaceVerifier(DynamicEndpointRegistrar registrar) {
+        this.registrar = registrar;
+    }
+
+    /**
+     * The comparison result.
+     *
+     * @param missing declared but not registered — each entry is {@code "METHOD /path"}. Non-empty means the deploy
+     *                must be rolled back.
+     * @param extra   registered but not declared. Reported, never blocking.
+     */
+    public record Verification(List<String> missing, List<String> extra) {
+
+        public Verification {
+            missing = List.copyOf(missing);
+            extra = List.copyOf(extra);
+        }
+
+        public boolean matches() {
+            return missing.isEmpty() && extra.isEmpty();
+        }
+
+        /** VERIFIED when nothing is missing; a declared-but-absent route is the only blocking outcome. */
+        public String status() {
+            return missing.isEmpty() ? (extra.isEmpty() ? "VERIFIED" : "VERIFIED_WITH_EXTRAS") : "MISMATCH";
+        }
+    }
+
+    /** Reads the live routes for a module and compares them with its declared spec. */
+    public Verification verify(String moduleId, InterfaceSpec spec) {
+        return compare(registrar.routesOf(moduleId), spec);
+    }
+
+    /**
+     * The comparison itself, split out from the registrar lookup so it can be exercised directly.
+     *
+     * <p>{@code DynamicEndpointRegistrar} needs a live {@code RequestMappingHandlerMapping} to construct, and the
+     * interesting logic here is the set arithmetic — not the lookup.
+     */
+    public static Verification compare(List<DynamicEndpointRegistrar.RouteInfo> routes, InterfaceSpec spec) {
+        // Expanded view, for answering "is this declared route served?". A mapping with an empty method condition
+        // answers EVERY method, so it satisfies any declared method on that path.
+        Set<String> served = new LinkedHashSet<>();
+        // Unexpanded view, for reporting extras. Expanding an all-methods mapping here would report four phantom
+        // extras for a path that has exactly one real mapping.
+        Set<String> registered = new LinkedHashSet<>();
+        for (DynamicEndpointRegistrar.RouteInfo route : routes) {
+            for (String pattern : route.patterns()) {
+                if (route.methods().isEmpty()) {
+                    registered.add(key("*", pattern));
+                    for (InterfaceSpec.HttpMethod method : InterfaceSpec.HttpMethod.values()) {
+                        served.add(key(method.name(), pattern));
+                    }
+                } else {
+                    for (String method : route.methods()) {
+                        registered.add(key(method, pattern));
+                        served.add(key(method, pattern));
+                    }
+                }
+            }
+        }
+
+        Set<String> declared = new LinkedHashSet<>();
+        Set<String> declaredPaths = new LinkedHashSet<>();
+        for (OperationSpec op : spec.operations()) {
+            declared.add(key(op.method().name(), op.path()));
+            declaredPaths.add(op.path());
+        }
+
+        List<String> missing = new ArrayList<>();
+        for (OperationSpec op : spec.operations()) {
+            if (!served.contains(key(op.method().name(), op.path()))) {
+                missing.add(op.method() + " " + op.path() + " (operationId " + op.operationId() + ")");
+            }
+        }
+
+        List<String> extra = new ArrayList<>();
+        for (String route : registered) {
+            boolean allMethods = route.startsWith("* ");
+            // An all-methods mapping is "declared" if the path appears at all — which method it was declared under
+            // is not something an all-methods mapping can contradict.
+            boolean isDeclared = allMethods
+                    ? declaredPaths.contains(route.substring(2))
+                    : declared.contains(route);
+            if (!isDeclared) {
+                extra.add(route);
+            }
+        }
+        return new Verification(missing, extra);
+    }
+
+    /** Normalizes to {@code "METHOD /path"}. Method case is normalized; the pattern is compared verbatim. */
+    private static String key(String method, String pattern) {
+        return method.toUpperCase(java.util.Locale.ROOT) + " " + pattern;
+    }
+}

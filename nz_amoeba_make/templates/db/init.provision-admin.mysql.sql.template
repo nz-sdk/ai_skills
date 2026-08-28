@@ -1,0 +1,7 @@
+-- [worker.db.auto-provision + MySQL docker] Creates the provisioning ADMIN account application.yml expects
+-- (protean.worker.db.admin-username / admin-password). Auto-provision carves a per-module DB scope at deploy via
+-- this account, so it needs CREATE DATABASE/USER + GRANT OPTION. Runs on first boot of a fresh data volume.
+-- Name this so it sorts BEFORE any data init (e.g. 00-provision-admin.sql). Live-demo credentials — not for prod.
+CREATE USER IF NOT EXISTS '{{ADMIN_USER}}'@'%' IDENTIFIED BY '{{ADMIN_PW}}';
+GRANT ALL PRIVILEGES ON *.* TO '{{ADMIN_USER}}'@'%' WITH GRANT OPTION;
+FLUSH PRIVILEGES;

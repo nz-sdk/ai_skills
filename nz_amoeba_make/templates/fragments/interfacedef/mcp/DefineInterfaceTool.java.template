@@ -1,0 +1,319 @@
+// [CAPABILITY: custom MCP tool] amoeba.define_interface — step 1 of the two-step deploy flow.
+//
+// Why this is a separate call from deploy, rather than one combined tool: failure cost. protean.deploy_module is the
+// only feedback channel today, and inside it every attempt pays for javac, gate 1 (compiling and RUNNING the module's
+// JUnit tests) and gate 2. A single misspelled type therefore costs a full compile-and-test cycle and a rewrite of
+// every source file. This call compiles nothing, so iterating on the contract is cheap; by the time deploy runs, the
+// shape is already settled and the DTOs are generated rather than hand-written.
+//
+// It returns the skeleton so the caller can see exactly what it will be deployed with. Handing back the generated
+// files (instead of just an id) is what lets an agent write only the service body and the SQL.
+package {{PKG}}.interfacedef.mcp;
+
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpecValidator;
+import {{PKG}}.interfacedef.gen.GeneratedFile;
+import {{PKG}}.interfacedef.gen.SkeletonBundle;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator;
+import {{PKG}}.interfacedef.render.MarkdownRenderer;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolAnnotations;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.List;
+
+@Component
+public class DefineInterfaceTool implements McpTool {
+
+    private final ObjectMapper mapper;
+    private final DraftStore draftStore;
+    private final boolean serviceInterfaceByDefault;
+
+    /**
+     * @param serviceInterfaceByDefault the project's service-layer standard, applied when a spec does not state
+     *                                  one. Defaults to true, the historical shape, so an existing deployment's
+     *                                  redeploys are unaffected by this option existing.
+     */
+    public DefineInterfaceTool(ObjectMapper mapper, DraftStore draftStore,
+                               @Value("${amoeba.skeleton.service-interface:true}")
+                               boolean serviceInterfaceByDefault) {
+        this.mapper = mapper;
+        this.draftStore = draftStore;
+        this.serviceInterfaceByDefault = serviceInterfaceByDefault;
+    }
+
+    @Override
+    public String name() {
+        return "amoeba.define_interface";
+    }
+
+    @Override
+    public String title() {
+        return "Define Module Interface";
+    }
+
+    @Override
+    public String description() {
+        return "Declares a module's request/response contract and returns the generated Java skeleton "
+                + "(DTOs, controller, the service layer, and — for dataAccess=MYBATIS — Mapper, mapper XML and "
+                + "SqlSessionFactory wiring). Set interface.serviceInterface=false for a three-layer "
+                + "Controller/Service/Mapper structure with no separate Service interface. Returns a specId to "
+                + "pass to protean.deploy_module. Nothing is compiled or deployed here, so this is the cheap "
+                + "place to get the contract right. Write only the service implementation, the SQL bodies and "
+                + "your tests; the rest is generated and is replaced from the spec at deploy time.";
+    }
+
+    /**
+     * Classified by effect, not left at the {@code CUSTOM} default.
+     *
+     * <p>{@code CUSTOM} demands {@code mcp.admin} under {@code ApiModuleActionAuthorizer} — the same bucket as
+     * {@code config.set} and {@code deploy_shared_lib} — because that bucket cannot be split per tool. This call
+     * writes a draft and nothing else, so {@code UPDATE} puts it on {@code mcp.write} alongside deploy, which is
+     * the right level for the agent that is about to deploy. No change to the authorizer is needed.
+     */
+    @Override
+    public ModuleActionAuthorizer.ModuleAction action() {
+        return ModuleActionAuthorizer.ModuleAction.UPDATE;
+    }
+
+    /** The default reads {@code id}; this tool's module argument is {@code moduleId}. */
+    @Override
+    public String targetModuleId(JsonNode arguments) {
+        return arguments != null && arguments.hasNonNull("moduleId")
+                ? arguments.get("moduleId").asText()
+                : null;
+    }
+
+    @Override
+    public McpToolAnnotations annotations() {
+        // Writes only a short-lived draft: nothing existing is touched, and calling it twice with the same spec
+        // just yields another equivalent draft. Closed domain — no network, no external service.
+        return McpToolAnnotations.builder()
+                .readOnly(false).destructive(false).idempotent(true).openWorld(false).build();
+    }
+
+    @Override
+    public ObjectNode inputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        schema.put("additionalProperties", false);
+        ObjectNode p = schema.putObject("properties");
+        p.putObject("moduleId").put("type", "string")
+                .put("pattern", InterfaceSpecSchema.MODULE_ID_PATTERN)
+                .put("description", "protean module id. Also the stem of every generated class name.");
+        p.putObject("version").put("type", "string").put("minLength", 1)
+                .put("description", "Module version, as it will be passed to deploy.");
+        p.putObject("packageName").put("type", "string")
+                .put("pattern", InterfaceSpecSchema.PACKAGE_PATTERN)
+                .put("description", "Base package for the module's classes. DTOs land in <packageName>.dto. "
+                        + "Must not be a package the host app already owns.");
+        p.set("interface", InterfaceSpecSchema.interfaceRef(mapper));
+        schema.putArray("required").add("moduleId").add("version").add("packageName").add("interface");
+        // $ref resolves against the schema ROOT, so the shared definitions have to hang here.
+        InterfaceSpecSchema.attachDefs(schema, mapper);
+        return schema;
+    }
+
+    @Override
+    public ObjectNode outputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        ObjectNode p = schema.putObject("properties");
+        p.putObject("specId").put("type", "string")
+                .put("description", "Pass this to protean.deploy_module.");
+        p.putObject("controllerFqcn").put("type", "string");
+        ObjectNode components = p.putObject("componentFqcns");
+        components.put("type", "array").put("description",
+                "Pass as the deploy call's components. Omitting it defaults to [controller] alone, which breaks "
+                        + "dependency injection for a multi-class module.");
+        components.putObject("items").put("type", "string");
+        p.putObject("needsSharedBeans").put("type", "boolean")
+                .put("description", "Pass as the deploy call's needsSharedBeans.");
+        ObjectNode files = p.putObject("files");
+        files.put("type", "array").put("description", "The generated skeleton.");
+        ObjectNode item = files.putObject("items");
+        item.put("type", "object");
+        ObjectNode fp = item.putObject("properties");
+        fp.putObject("filename").put("type", "string");
+        fp.putObject("content").put("type", "string");
+        fp.putObject("kind").put("type", "string").put("description", "source | test | resource");
+        fp.putObject("serverOwned").put("type", "boolean").put("description",
+                "true = regenerated from the spec at deploy time; edits are discarded. "
+                        + "false = yours to write.");
+        item.putArray("required").add("filename").add("content").add("kind").add("serverOwned");
+        p.putObject("document").put("type", "string")
+                .put("description", "The interface definition document, rendered as markdown.");
+        ObjectNode warnings = p.putObject("warnings");
+        warnings.put("type", "array").put("description",
+                "Things the caller cannot see from the spec itself. Empty when there are none.");
+        warnings.putObject("items").put("type", "string");
+        schema.putArray("required").add("specId").add("controllerFqcn").add("componentFqcns")
+                .add("needsSharedBeans").add("files").add("document").add("warnings");
+        return schema;
+    }
+
+    @Override
+    public McpToolResult call(JsonNode arguments, McpCallContext ctx) {
+        JsonNode args = arguments == null ? mapper.missingNode() : arguments;
+        String moduleId = text(args, "moduleId");
+        String version = text(args, "version");
+        String packageName = text(args, "packageName");
+        if (moduleId == null || version == null || packageName == null) {
+            return McpToolResult.error("moduleId, version and packageName are all required");
+        }
+        if (!args.hasNonNull("interface")) {
+            return McpToolResult.error("interface is required (the structured request/response contract)");
+        }
+
+        InterfaceSpec spec;
+        try {
+            // Strict reader: Spring Boot's default ObjectMapper ignores unknown properties, which would silently
+            // drop a misspelled field name. With strict-schema off, this is the only thing that catches it.
+            spec = mapper.readerFor(InterfaceSpec.class)
+                    .with(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                    .readValue(args.get("interface"));
+        } catch (Exception e) {
+            return McpToolResult.error("interface could not be parsed: " + rootMessage(e));
+        }
+
+        // Resolve the service-layer choice HERE, before anything stores the spec. An unstated preference must
+        // become an explicit value in the draft, because the deploy wrapper regenerates the server-owned files
+        // from this spec on every redeploy — a spec that still says "use the default" would follow the project
+        // default as it stands at redeploy time, silently restructuring a module when someone flips the setting.
+        if (spec.serviceInterface() == null) {
+            spec = spec.withServiceInterface(serviceInterfaceByDefault);
+        }
+
+        List<String> violations = InterfaceSpecValidator.validate(spec);
+        if (!violations.isEmpty()) {
+            return McpToolResult.error("interface spec is invalid — fix these and call again:\n  - "
+                    + String.join("\n  - ", violations));
+        }
+
+        SkeletonBundle skeleton;
+        try {
+            skeleton = SkeletonGenerator.generate(
+                    new SkeletonGenerator.Request(moduleId, packageName, spec));
+        } catch (RuntimeException e) {
+            return McpToolResult.error("skeleton generation failed: " + rootMessage(e));
+        }
+
+        String specId = draftStore.put(moduleId, version, packageName, spec, skeleton);
+        String document = MarkdownRenderer.render(moduleId, version, spec);
+        List<String> warnings = warningsFor(spec, skeleton);
+
+        ObjectNode out = mapper.createObjectNode();
+        out.put("specId", specId);
+        out.put("controllerFqcn", skeleton.controllerFqcn());
+        ArrayNode components = out.putArray("componentFqcns");
+        skeleton.componentFqcns().forEach(components::add);
+        out.put("needsSharedBeans", skeleton.needsSharedBeans());
+        ArrayNode files = out.putArray("files");
+        for (GeneratedFile file : skeleton.files()) {
+            ObjectNode node = files.addObject();
+            node.put("filename", file.filename());
+            node.put("content", file.content());
+            node.put("kind", file.kind().wire());
+            node.put("serverOwned", file.serverOwned());
+        }
+        out.put("document", document);
+        ArrayNode warningsNode = out.putArray("warnings");
+        warnings.forEach(warningsNode::add);
+
+        return McpToolResult.ok(summaryText(moduleId, specId, skeleton, warnings), out);
+    }
+
+    /**
+     * Situational notes only — no boilerplate an agent would learn to skip. Each one names something the caller
+     * cannot see from the spec itself.
+     */
+    private static List<String> warningsFor(InterfaceSpec spec, SkeletonBundle skeleton) {
+        List<String> warnings = new ArrayList<>();
+
+        if (spec.dataAccess() == InterfaceSpec.DataAccess.MYBATIS) {
+            warnings.add("dataAccess=MYBATIS: the database must be REACHABLE at deploy time. Gate 3 probes call "
+                    + "the live route, so a query against a down database fails the deploy and rolls it back.");
+            warnings.add("Keep the mapper XML namespace equal to the Mapper interface FQCN and every statement id "
+                    + "equal to a method name — the deploy wrapper rejects a mismatch in either direction.");
+        }
+
+        List<String> unprobeable = spec.operations().stream()
+                .filter(InterfaceSpec.OperationSpec::hasRequestBody)
+                .map(InterfaceSpec.OperationSpec::operationId)
+                .toList();
+        if (!unprobeable.isEmpty()) {
+            // VerificationPlan.Probe carries no request body, so these cannot get a generated probe.
+            warnings.add("No verification probe can be generated for " + String.join(", ", unprobeable)
+                    + " (an operation with a request body): protean's probe has no body field. Their routes are "
+                    + "checked by reflection after install instead, which confirms the mapping but not the "
+                    + "behaviour — cover those with your own tests.");
+        }
+
+        boolean placeholderRow = skeleton.files().stream()
+                .anyMatch(f -> f.filename().endsWith("Row.java") && f.content().contains("String placeholder"));
+        if (placeholderRow) {
+            warnings.add("A generated Row record has no scalar columns to flatten, because that response body "
+                    + "contains only arrays. Edit the resultMap and the Row record to match the query you "
+                    + "actually need.");
+        }
+
+        // Honest about a real v1 gap rather than letting `required` look like it does more than it does.
+        boolean anyOptionalBodyField = spec.operations().stream()
+                .flatMap(op -> op.requestBody().stream())
+                .anyMatch(f -> !f.required());
+        if (anyOptionalBodyField) {
+            warnings.add("required is documentation for now: the generated DTOs carry "
+                    + "@Schema(requiredMode = REQUIRED) but no runtime check, because Bean Validation is not on "
+                    + "the host classpath yet. Validate in the service body where it matters.");
+        }
+        return warnings;
+    }
+
+    private static String summaryText(String moduleId, String specId, SkeletonBundle skeleton,
+                                      List<String> warnings) {
+        StringBuilder out = new StringBuilder();
+        out.append("Interface defined for module '").append(moduleId).append("'. specId=").append(specId)
+                .append("\n\nGenerated ").append(skeleton.files().size()).append(" files.\n")
+                .append("Write these:\n");
+        skeleton.authored().forEach(f -> out.append("  - ").append(f.filename()).append('\n'));
+        out.append("Do not edit these — deploy regenerates them from the spec:\n");
+        skeleton.serverOwned().forEach(f -> out.append("  - ").append(f.filename()).append('\n'));
+        out.append("\nThen call protean.deploy_module with specId=").append(specId)
+                .append(" plus your files; components and needsSharedBeans are in the structured result.\n");
+        if (!warnings.isEmpty()) {
+            out.append("\nWarnings:\n  - ").append(String.join("\n  - ", warnings)).append('\n');
+        }
+        return out.toString();
+    }
+
+    private static String text(JsonNode args, String field) {
+        if (!args.hasNonNull(field)) {
+            return null;
+        }
+        String value = args.get(field).asText();
+        return value.isBlank() ? null : value;
+    }
+
+    /** Jackson wraps the useful part; the innermost message is what tells the caller which field is wrong. */
+    private static String rootMessage(Throwable e) {
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        return root.getMessage() == null ? root.toString() : root.getMessage();
+    }
+}

@@ -1,0 +1,210 @@
+// The strongest available check on the export layout: write what the tool returns to disk, then compile it with
+// the real javac using ONLY -sourcepath to resolve the cross-file references.
+//
+// Asserting on path strings proves the paths match my expectation. Compiling proves they match javac's: a class
+// is found on the sourcepath only when its directory mirrors its package, so HelloController resolving
+// HelloService and GetHelloResponse this way is a direct test that the FQCN-to-path mapping is correct. Nothing
+// else in the suite can catch an off-by-one-directory mapping.
+//
+// Uses the committed real descriptor rather than a fixture, so the sources carry genuine Spring/Swagger imports
+// and are resolved against the same java.class.path protean's RuntimeCompiler inherits at deploy time. Skipped
+// when that sample is absent — this project must stay buildable alone.
+//
+// SKIPPED ALSO WHEN swagger-annotations IS ABSENT. That is not incidental: the sample module annotates its DTOs
+// with @Schema/@Operation, and those imports resolve only when the `swagger_annotations` module_classpath entry is
+// selected. Without the guard this test fails in a perfectly valid project that simply chose not to put Swagger on
+// the module classpath — a red build reporting someone else's configuration choice as a defect in the export
+// layout. Skipping keeps the strong assertion where it means something and stays quiet where it does not.
+package {{PKG}}.source;
+
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import javax.tools.Diagnostic;
+import javax.tools.DiagnosticCollector;
+import javax.tools.JavaCompiler;
+import javax.tools.JavaFileObject;
+import javax.tools.StandardJavaFileManager;
+import javax.tools.ToolProvider;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class ExportedTreeCompilesTest {
+
+    private static final Path SAMPLE = Path.of("..", "..", "document", "testProject",
+            "generated-sample", "module-store", "hello.json");
+
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    private static ModuleDescriptor loadSample() throws IOException {
+        return new ObjectMapper()
+                .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                .readValue(SAMPLE.toFile(), ModuleDescriptor.class);
+    }
+
+    /** Runs the real export tool over the real descriptor. */
+    private JsonNode export(ModuleDescriptor descriptor, boolean buildFiles) {
+        ModulePlatform platform = mock(ModulePlatform.class);
+        when(platform.find(descriptor.id())).thenReturn(Optional.of(descriptor));
+        ExportModuleSourceTool tool = new ExportModuleSourceTool(mapper, new ModuleSourceResolver(platform));
+
+        ObjectNode args = mapper.createObjectNode().put("moduleId", descriptor.id());
+        if (buildFiles) {
+            args.put("includeBuildFiles", true);
+        }
+        McpToolResult result = tool.call(args, null);
+        assertFalse(result.isError(), () -> "export failed: " + result.text());
+        return result.structured();
+    }
+
+    /** Writes the returned map to disk exactly as a client would. */
+    private static List<Path> writeTree(JsonNode structured, Path root) throws IOException {
+        List<Path> written = new ArrayList<>();
+        Iterator<Map.Entry<String, JsonNode>> fields = structured.path("files").fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            Path file = root.resolve(entry.getKey());
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, entry.getValue().asText(), StandardCharsets.UTF_8);
+            written.add(file);
+        }
+        return written;
+    }
+
+    /**
+     * Whether the host classpath carries the Swagger annotations the committed sample module imports.
+     *
+     * <p>Probed by name rather than by a direct reference, so this test source compiles whether or not the
+     * dependency is present — a direct import would turn a skip into a compile error.
+     */
+    private static boolean hasSwaggerAnnotations() {
+        try {
+            Class.forName("io.swagger.v3.oas.annotations.media.Schema");
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Compiles the given files, resolving everything else through {@code -sourcepath} only.
+     *
+     * @return javac's error diagnostics; empty means the tree compiles
+     */
+    private static List<String> compile(List<Path> files, List<Path> sourcePaths, Path classOutput)
+            throws IOException {
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        assumeTrue(compiler != null, "no system Java compiler — this test needs a JDK");
+        assumeTrue(hasSwaggerAnnotations(),
+                "swagger-annotations is not on the classpath — the sample module's DTOs import @Schema, so the "
+                        + "exported tree cannot compile here. Select the `swagger_annotations` module_classpath "
+                        + "entry to exercise this test.");
+
+        Files.createDirectories(classOutput);
+        String sourcePath = sourcePaths.stream().map(Path::toString)
+                .reduce((a, b) -> a + java.io.File.pathSeparator + b).orElseThrow();
+
+        DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+        try (StandardJavaFileManager fileManager =
+                     compiler.getStandardFileManager(diagnostics, null, StandardCharsets.UTF_8)) {
+            Iterable<? extends JavaFileObject> units =
+                    fileManager.getJavaFileObjectsFromFiles(files.stream().map(Path::toFile).toList());
+            List<String> options = List.of(
+                    "-proc:none",
+                    "-classpath", System.getProperty("java.class.path"),
+                    "-sourcepath", sourcePath,
+                    "-d", classOutput.toString());
+            compiler.getTask(null, fileManager, diagnostics, options, null, units).call();
+        }
+        return diagnostics.getDiagnostics().stream()
+                .filter(d -> d.getKind() == Diagnostic.Kind.ERROR)
+                .map(d -> (d.getSource() == null ? "" : d.getSource().getName() + ":" + d.getLineNumber() + " ")
+                        + d.getMessage(null))
+                .toList();
+    }
+
+    @Test
+    void exportedMainSourcesCompileFromTheirLayout(@TempDir Path root) throws IOException {
+        assumeTrue(Files.isReadable(SAMPLE), () -> "sample descriptor absent: " + SAMPLE.toAbsolutePath());
+
+        JsonNode structured = export(loadSample(), false);
+        writeTree(structured, root);
+
+        Path mainJava = root.resolve("src/main/java");
+        // Hand javac ONLY the controller. Everything it references — the service interface, the DTO — has to be
+        // found on the sourcepath, which happens only if each file sits in the directory its package names.
+        Path controller = mainJava.resolve("module/hello/HelloController.java");
+        assertTrue(Files.isRegularFile(controller), "the controller is not at its expected path");
+
+        List<String> errors = compile(List.of(controller), List.of(mainJava), root.resolve("classes"));
+
+        assertEquals(List.of(), errors, "the exported tree does not compile");
+        // Proof the sourcepath resolution actually happened rather than the references being unused.
+        assertTrue(Files.exists(root.resolve("classes/module/hello/HelloService.class")),
+                "HelloService was never resolved from the sourcepath — the layout did not carry the reference");
+    }
+
+    @Test
+    void exportedTestSourcesCompileAgainstTheMainTree(@TempDir Path root) throws IOException {
+        assumeTrue(Files.isReadable(SAMPLE), () -> "sample descriptor absent: " + SAMPLE.toAbsolutePath());
+
+        JsonNode structured = export(loadSample(), false);
+        writeTree(structured, root);
+
+        Path mainJava = root.resolve("src/main/java");
+        Path testJava = root.resolve("src/test/java");
+        List<Path> tests;
+        try (var stream = Files.walk(testJava)) {
+            tests = stream.filter(p -> p.toString().endsWith(".java")).toList();
+        }
+        assertFalse(tests.isEmpty(), "the sample module carries a contract test");
+
+        List<String> errors = compile(tests, List.of(mainJava, testJava), root.resolve("classes"));
+
+        assertEquals(List.of(), errors, "the exported test tree does not compile against the main tree");
+    }
+
+    /** Resources have to land where the classpath expects them, or the mapper XML is invisible at runtime. */
+    @Test
+    void exportedResourcesLandUnderTheResourceRoot(@TempDir Path root) throws IOException {
+        assumeTrue(Files.isReadable(SAMPLE), () -> "sample descriptor absent: " + SAMPLE.toAbsolutePath());
+
+        writeTree(export(loadSample(), false), root);
+
+        assertTrue(Files.isRegularFile(root.resolve("src/main/resources/META-INF/protean/interface.json")));
+    }
+
+    @Test
+    void buildFilesLandAtTheProjectRoot(@TempDir Path root) throws IOException {
+        assumeTrue(Files.isReadable(SAMPLE), () -> "sample descriptor absent: " + SAMPLE.toAbsolutePath());
+
+        writeTree(export(loadSample(), true), root);
+
+        assertTrue(Files.isRegularFile(root.resolve("build.gradle")));
+        assertTrue(Files.isRegularFile(root.resolve("settings.gradle")));
+        assertTrue(Files.readString(root.resolve("settings.gradle"), StandardCharsets.UTF_8).contains("hello"));
+    }
+}

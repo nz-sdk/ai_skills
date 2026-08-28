@@ -1,0 +1,19 @@
+package {{PKG}};
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+/**
+ * Minimal server that consumes the Protean library (from a published jar).
+ *
+ * <p>Protean's features are wired automatically by {@code ProteanAutoConfiguration} once the library is on the
+ * classpath, so this app only declares itself — there is no Protean-specific code here. Modules are deployed at
+ * runtime (over MCP or the admin REST); nothing is auto-deployed at startup.
+ */
+@SpringBootApplication
+public class Application {
+
+    public static void main(String[] args) {
+        SpringApplication.run(Application.class, args);
+    }
+}

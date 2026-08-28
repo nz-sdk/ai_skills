@@ -1,0 +1,110 @@
+// The off switch, verified rather than assumed.
+//
+// Embedded auth trades a security boundary for convenience (the signing key ends up inside the MCP RCE surface),
+// so "off by default" is the feature's main safety property — and a default nobody tests is a default that drifts.
+// This is the counterpart to EmbeddedAuthFlowTest: same app, amoeba.auth.enabled left alone, and everything the
+// embedded server would have added must be absent.
+package {{PKG}}.auth;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.ApplicationContext;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+
+import java.nio.file.Path;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class EmbeddedAuthDisabledTest {
+
+    static final Path storeDir = Path.of("build", "test-noauth-store-" + System.nanoTime());
+
+    @DynamicPropertySource
+    static void props(DynamicPropertyRegistry r) {
+        // An ordinary external-issuer deployment.
+        //
+        // enabled=false is pinned HERE rather than relied on from application.yml. Selecting the embedded_auth
+        // capability is exactly what turns amoeba.auth.enabled ON in the generated yml, so a test that inherited
+        // the value would silently become a second copy of EmbeddedAuthFlowTest and stop guarding anything. The
+        // property is what the whole feature hangs off, so the test that proves "off means off" must set it.
+        r.add("amoeba.auth.enabled", () -> false);
+        r.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> "https://example-idp.invalid/realms/x");
+        r.add("protean.mcp.authorization.resource", () -> "http://localhost:8080/platform/mcp");
+        r.add("protean.module-store.dir", storeDir::toString);
+        // If application.yml uses protean.module-store.backend=jdbc, the store's startup reconcile calls
+        // listActive() against the DataSource and drags this test onto a live database. Forcing filesystem keeps
+        // `./gradlew test` offline and is also what makes the dir override above mean anything.
+        r.add("protean.module-store.backend", () -> "filesystem");
+    }
+
+    @LocalServerPort
+    int port;
+
+    @Autowired
+    TestRestTemplate rest;
+
+    @Autowired
+    ApplicationContext context;
+
+    @Test
+    void noEmbeddedAuthBeansAreRegistered() {
+        // The most direct evidence — not "the route 404s" but "the machinery does not exist".
+        assertTrue(context.getBeansOfType(EmbeddedAuthServerConfig.class).isEmpty(),
+                "the embedded Authorization Server must not be wired when amoeba.auth.enabled is false");
+        assertTrue(context.getBeansOfType(LoginSuccessHandler.class).isEmpty(),
+                "no login handler means SecurityConfig chain #2 adds no form (and stays STATELESS)");
+    }
+
+    @Test
+    void bootStillUsesTheExternalIssuerDecoder() {
+        // With no local JwtDecoder bean, Boot's @ConditionalOnMissingBean(JwtDecoder) configuration applies and
+        // builds the issuer-uri decoder. If embedded auth ever leaked a decoder into this configuration, token
+        // validation would silently switch to the in-process key.
+        JwtDecoder decoder = context.getBean(JwtDecoder.class);
+        assertTrue(decoder.getClass().getSimpleName().contains("Supplier"),
+                "expected Boot's lazy issuer-uri decoder (SupplierJwtDecoder), got " + decoder.getClass().getName());
+    }
+
+    @Test
+    void authorizationServerEndpointsAreAbsent() {
+        // /oauth2/token would be served by the embedded AS. Without it the request falls through to chain #2
+        // (permitAll service plane), where nothing is mapped.
+        ResponseEntity<String> res = rest.postForEntity(
+                "http://localhost:" + port + "/oauth2/token", new HttpEntity<>(new HttpHeaders()), String.class);
+        assertNotEquals(200, res.getStatusCode().value(),
+                "no token endpoint should exist with embedded auth off: " + res.getBody());
+    }
+
+    @Test
+    void thereIsNoLoginForm() {
+        ResponseEntity<String> res = rest.getForEntity("http://localhost:" + port + "/login", String.class);
+        // Chain #2 is permitAll with nothing mapped at /login, so this must not be a rendered login page.
+        assertTrue(res.getBody() == null || !res.getBody().contains("name=\"password\""),
+                "a login form appeared with embedded auth off: " + res.getBody());
+    }
+
+    @Test
+    void controlPlaneIsStillProtected() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        ResponseEntity<String> res = rest.exchange(
+                "http://localhost:" + port + "/platform/mcp", HttpMethod.POST,
+                new HttpEntity<>("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", headers), String.class);
+
+        assertEquals(401, res.getStatusCode().value(),
+                "the control plane must still demand a bearer token: " + res.getBody());
+    }
+}

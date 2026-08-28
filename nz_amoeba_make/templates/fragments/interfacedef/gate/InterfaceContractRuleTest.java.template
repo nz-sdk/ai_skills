@@ -1,0 +1,321 @@
+// L3 is the only layer that covers the admin REST path, so each rule gets a positive and a negative case against
+// real javac output. The most important single assertion is that the GENERATED skeleton passes: if the generator and
+// the gate disagree, every deploy through the intended flow fails and the whole feature is unusable.
+package {{PKG}}.interfacedef.gate;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.SpecFixtures;
+import {{PKG}}.interfacedef.gen.GeneratedFile;
+import {{PKG}}.interfacedef.gen.SkeletonBundle;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator;
+import org.junit.jupiter.api.Test;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class InterfaceContractRuleTest {
+
+    private static final Pattern PACKAGE = Pattern.compile("package\\s+([\\w.]+)\\s*;");
+
+    private final InterfaceContractRule rule = new InterfaceContractRule(true);
+
+    /** Runs the rule over every class compiled from the given sources, the way RuleSystem does. */
+    private List<String> check(Map<String, String> sources) {
+        return BytecodeCompiler.compile(sources).entrySet().stream()
+                .flatMap(e -> rule.check(e.getKey(), e.getValue()).stream())
+                .toList();
+    }
+
+    private static Map<String, String> sources(String... classBodies) {
+        Map<String, String> sources = new LinkedHashMap<>();
+        for (String body : classBodies) {
+            Matcher m = PACKAGE.matcher(body);
+            if (!m.find()) {
+                throw new IllegalArgumentException("fixture has no package declaration");
+            }
+            Matcher type = Pattern.compile("(?:class|interface|record)\\s+(\\w+)").matcher(body);
+            if (!type.find()) {
+                throw new IllegalArgumentException("fixture declares no type");
+            }
+            sources.put(m.group(1) + "." + type.group(1), body);
+        }
+        return sources;
+    }
+
+    private void rejects(Map<String, String> sources, String fragment) {
+        List<String> violations = check(sources);
+        assertTrue(violations.stream().anyMatch(v -> v.contains(fragment)),
+                () -> "expected a violation containing '" + fragment + "' but got " + violations);
+    }
+
+    /**
+     * The generator and the gate must agree, or the intended flow can never deploy. Compiles the real skeleton and
+     * runs the real rule over every emitted class, nested records included.
+     */
+    @Test
+    void theGeneratedSkeletonPassesItsOwnGate() {
+        assertEquals(List.of(), check(sourcesOf(SpecFixtures.orders())));
+    }
+
+    /**
+     * The interface-less shape has to clear the same gate. The rule reads {@code @RestController} / {@code @Mapper}
+     * / documented-record classes and never looks at the service type, so this should pass for the same reasons —
+     * asserted rather than assumed, because "the gate happens to ignore it" is exactly the kind of thing a later
+     * rule addition breaks silently.
+     */
+    @Test
+    void theInterfaceLessSkeletonPassesItsOwnGate() {
+        assertEquals(List.of(), check(sourcesOf(SpecFixtures.orders().withServiceInterface(false))));
+    }
+
+    /** Compiles the real skeleton into FQCN -> source, the way protean derives it at deploy time. */
+    private static Map<String, String> sourcesOf(InterfaceSpec spec) {
+        SkeletonBundle skeleton = SkeletonGenerator.generate(
+                new SkeletonGenerator.Request("orders", "module.orders", spec));
+        Map<String, String> sources = new LinkedHashMap<>();
+        for (GeneratedFile file : skeleton.files()) {
+            if (file.kind() == GeneratedFile.Kind.RESOURCE) {
+                continue;
+            }
+            Matcher m = PACKAGE.matcher(file.content());
+            assertTrue(m.find(), () -> file.filename() + " has no package declaration");
+            String stem = file.filename().substring(0, file.filename().length() - ".java".length());
+            sources.put(m.group(1) + "." + stem, file.content());
+        }
+        return sources;
+    }
+
+    // --- controllers ---
+
+    private static final String CONTROLLER_HEAD = """
+            package module.demo;
+            import io.swagger.v3.oas.annotations.Operation;
+            import org.springframework.web.bind.annotation.GetMapping;
+            import org.springframework.web.bind.annotation.RestController;
+            import org.springframework.http.ResponseEntity;
+            import java.util.Map;
+            @RestController
+            public class DemoController {
+            """;
+
+    private static String controller(String methods) {
+        return CONTROLLER_HEAD + methods + "}\n";
+    }
+
+    @Test
+    void aDocumentedControllerReturningAConcreteTypePasses() {
+        assertEquals(List.of(), check(sources(controller("""
+                    @Operation(summary = "조회", description = "값을 조회한다")
+                    @GetMapping("/demo")
+                    public String get() { return "x"; }
+                """))));
+    }
+
+    /** The whole reason the description channel is an annotation: this is checkable, a Javadoc comment is not. */
+    @Test
+    void aMappingWithoutOperationIsRejected() {
+        rejects(sources(controller("""
+                    /** 값을 조회한다 — a comment cannot be seen from bytecode. */
+                    @GetMapping("/demo")
+                    public String get() { return "x"; }
+                """)), "without @io.swagger.v3.oas.annotations.Operation");
+    }
+
+    @Test
+    void anOpaqueReturnTypeIsRejected() {
+        rejects(sources(controller("""
+                    @Operation(summary = "조회", description = "값을 조회한다")
+                    @GetMapping("/a")
+                    public ResponseEntity<String> a() { return null; }
+                """)), "returns org.springframework.http.ResponseEntity");
+        rejects(sources(controller("""
+                    @Operation(summary = "조회", description = "값을 조회한다")
+                    @GetMapping("/b")
+                    public Map<String, Object> b() { return null; }
+                """)), "returns java.util.Map");
+        rejects(sources(controller("""
+                    @Operation(summary = "조회", description = "값을 조회한다")
+                    @GetMapping("/c")
+                    public Object c() { return null; }
+                """)), "returns java.lang.Object");
+    }
+
+    /** void is allowed: a 204 has no body, and that is a concrete answer, not an erased one. */
+    @Test
+    void aVoidHandlerIsAllowed() {
+        assertEquals(List.of(), check(sources(controller("""
+                    @Operation(summary = "삭제", description = "대상을 삭제한다")
+                    @GetMapping("/demo")
+                    public void remove() { }
+                """))));
+    }
+
+    /** Non-mapping methods on a controller are none of this rule's business. */
+    @Test
+    void helperMethodsOnAControllerAreIgnored() {
+        assertEquals(List.of(), check(sources(controller("""
+                    @Operation(summary = "조회", description = "값을 조회한다")
+                    @GetMapping("/demo")
+                    public String get() { return helper(); }
+
+                    private String helper() { return "x"; }
+                """))));
+    }
+
+    /** A class with no controller annotation is not checked at all. */
+    @Test
+    void aPlainClassIsIgnored() {
+        assertEquals(List.of(), check(sources("""
+                package module.demo;
+                import java.util.Map;
+                public class PlainService {
+                    public Map<String, Object> anything() { return null; }
+                }
+                """)));
+    }
+
+    // --- mappers ---
+
+    @Test
+    void aDocumentedMapperPasses() {
+        assertEquals(List.of(), check(sources("""
+                package module.demo;
+                import io.swagger.v3.oas.annotations.media.Schema;
+                import org.apache.ibatis.annotations.Mapper;
+                @Mapper
+                public interface DemoMapper {
+                    @Schema(description = "행 수를 센다")
+                    int count();
+                }
+                """)));
+    }
+
+    @Test
+    void aMapperMethodWithoutSchemaIsRejected() {
+        rejects(sources("""
+                package module.demo;
+                import org.apache.ibatis.annotations.Mapper;
+                @Mapper
+                public interface DemoMapper {
+                    int count();
+                }
+                """), "@Mapper method without");
+    }
+
+    @Test
+    void aMapperReturningAnOpaqueTypeIsRejected() {
+        rejects(sources("""
+                package module.demo;
+                import io.swagger.v3.oas.annotations.media.Schema;
+                import org.apache.ibatis.annotations.Mapper;
+                import java.util.Map;
+                @Mapper
+                public interface DemoMapper {
+                    @Schema(description = "한 행을 읽는다")
+                    Map<String, Object> row();
+                }
+                """), "must return a concrete row type");
+    }
+
+    /** A default method has a body and no statement behind it, so it carries no data-access contract. */
+    @Test
+    void aDefaultMapperMethodIsIgnored() {
+        assertEquals(List.of(), check(sources("""
+                package module.demo;
+                import io.swagger.v3.oas.annotations.media.Schema;
+                import org.apache.ibatis.annotations.Mapper;
+                @Mapper
+                public interface DemoMapper {
+                    @Schema(description = "행 수를 센다")
+                    int count();
+
+                    default boolean isEmpty() { return count() == 0; }
+                }
+                """)));
+    }
+
+    // --- published record types ---
+
+    /**
+     * Depends on the JLS propagating a record-component annotation onto the backing field, since @Schema has no
+     * RECORD_COMPONENT target. Compiled with the real javac precisely to pin that.
+     */
+    @Test
+    void aDocumentedResponseRecordPasses() {
+        assertEquals(List.of(), check(sources("""
+                package module.demo.dto;
+                import io.swagger.v3.oas.annotations.media.Schema;
+                @Schema(description = "조회 응답")
+                public record DemoResponse(
+                        @Schema(description = "식별자") Long id,
+                        @Schema(description = "표시 이름") String name) {
+                }
+                """)));
+    }
+
+    @Test
+    void anUndocumentedFieldOnAResponseRecordIsRejected() {
+        rejects(sources("""
+                package module.demo.dto;
+                import io.swagger.v3.oas.annotations.media.Schema;
+                @Schema(description = "조회 응답")
+                public record DemoResponse(
+                        @Schema(description = "식별자") Long id,
+                        String name) {
+                }
+                """), "DemoResponse.name has no");
+    }
+
+    /** A nested DTO is as much part of the request body as its parent, so it is checked too. */
+    @Test
+    void anUndocumentedFieldOnANestedRecordIsRejected() {
+        rejects(sources("""
+                package module.demo.dto;
+                import io.swagger.v3.oas.annotations.media.Schema;
+                import java.util.List;
+                @Schema(description = "생성 요청")
+                public record DemoRequest(
+                        @Schema(description = "항목 목록") List<Item> items) {
+                    @Schema(description = "항목 하나")
+                    public record Item(String sku) {
+                    }
+                }
+                """), "Item.sku has no");
+    }
+
+    /** The rule is suffix-scoped, so an author's internal value type is not dragged in. */
+    @Test
+    void anInternalRecordWithoutAPublishedSuffixIsIgnored() {
+        assertEquals(List.of(), check(sources("""
+                package module.demo;
+                public record InternalTally(long hits, long misses) {
+                }
+                """)));
+    }
+
+    // --- the off switch ---
+
+    /** A gate that applies to every module with no per-module opt-out needs one global switch. */
+    @Test
+    void theRuleCanBeDisabled() {
+        InterfaceContractRule disabled = new InterfaceContractRule(false);
+        Map<String, byte[]> classes = BytecodeCompiler.compile(sources(controller("""
+                    @GetMapping("/demo")
+                    public Object get() { return null; }
+                """)));
+        assertEquals(List.of(), classes.entrySet().stream()
+                .flatMap(e -> disabled.check(e.getKey(), e.getValue()).stream()).toList());
+    }
+
+    @Test
+    void emptyBytecodeIsNotAnError() {
+        assertEquals(List.of(), rule.check("module.demo.Whatever", new byte[0]));
+        assertEquals(List.of(), rule.check("module.demo.Whatever", null));
+    }
+}

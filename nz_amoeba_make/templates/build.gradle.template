@@ -1,0 +1,96 @@
+// Standalone server that consumes Protean as a published jar (not from source).
+// Publish the library once from the protean repo first (only for a SNAPSHOT / not-yet-on-Central version):
+//     cd <protean repo> && ./gradlew publishToMavenLocal
+// Modules compile at runtime with javac, so a JDK (not a JRE) is required.
+
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.5.16'
+    id 'io.spring.dependency-management' version '1.1.7'
+    id 'application'
+    // [OPTIONAL worker.runtime=sidecar] flat uber-jar for the sidecar process track:
+    // id 'com.gradleup.shadow' version '8.3.6'
+}
+
+repositories {
+    mavenLocal()   // resolves the locally-published SNAPSHOT
+    mavenCentral() // resolves a released version + everything else
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21) // runtime javac → JDK required
+    }
+}
+
+dependencies {
+    implementation '{{COORD}}:{{VERSION}}'
+    // Also module-facing (module_classpath `rest_mvc`): protean registers module routes at runtime, and module
+    // sources import @RestController/@GetMapping from here.
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+
+    // [OPTIONAL data-access] JDBC + the chosen vendor driver (host-bundled; modules are source-only).
+    // The driver dep comes from db-vendors.yaml (mysql: com.mysql:mysql-connector-j, postgresql:
+    // org.postgresql:postgresql, h2: com.h2database:h2, other: user-provided coordinate).
+    // implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+    // runtimeOnly '<vendor driver coordinate>'
+
+    // [OPTIONAL mcp.strict-schema] full-schema tool I/O validation (core keeps this compileOnly)
+    // runtimeOnly 'com.networknt:json-schema-validator:1.5.9'
+
+    // [OPTIONAL mcp.authorization / secured MCP] consumer-owned Spring Security. These two are the `build_deps`
+    // of protean.mcp.authorization.resource, so the engine adds them automatically when that key is set — the
+    // lines below are only the manual fallback. Do not emit both (duplicate dependency lines).
+    // implementation 'org.springframework.boot:spring-boot-starter-security'
+    // implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
+
+    // ===== [module-facing host classpath] =========================================================
+    // Everything below is here for the DEPLOYED MODULES, not for this app. A module deploys as SOURCE and
+    // RuntimeCompiler builds its classpath from java.class.path, inherited from this JVM — so every package a
+    // module's source imports must resolve HERE. There is no per-module dependency declaration.
+    //
+    // Consequences worth knowing before you edit this block:
+    //   - Always `implementation`. `compileOnly` never reaches java.class.path, so the module would fail to
+    //     compile at its first deploy — long after the app started cleanly.
+    //   - Same reason the server must run via `./gradlew run` and not `java -jar` (see the NOTE below).
+    // Driven by reference/protean-options.yaml `module_classpath:`; ConfigMatchesSelectionTest asserts each of
+    // these is actually resolvable.
+    //
+    // [OPTIONAL swagger_annotations] module sources use @Schema / @Operation to describe their I/O. Annotations
+    // survive into bytecode where Javadoc does not, so a CodeRule at review gate 2 CAN require them — but only one
+    // you write yourself (the built-in ForbiddenApiRule bans four calls and checks no documentation). Adding this
+    // jar makes annotated module sources compile; it enforces nothing on its own.
+    // implementation 'io.swagger.core.v3:swagger-annotations:2.2.22'
+    //
+    // [OPTIONAL mybatis] module sources declare a Mapper interface + mapper XML. Versions match protean's own
+    // end-to-end tests, NOT docs/guide/07-data-access.md (which pins 3.5.16 and omits mybatis-spring). Inside a
+    // module's child context @MapperScan is unproven — wire one explicit MapperFactoryBean per Mapper.
+    // implementation 'org.mybatis:mybatis:3.5.19'
+    // implementation 'org.mybatis:mybatis-spring:3.0.4'
+    // ==============================================================================================
+
+    // Self-check test (ConfigMatchesSelectionTest: application.yml == selected options). Brings JUnit 5 + snakeyaml.
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+application {
+    mainClass = '{{PKG}}.Application'
+}
+
+// Pin the JDK 21 launcher for `run` (runtime javac).
+// NOTE: run the server with `./gradlew run` (exploded classpath). Do NOT `java -jar` the bootJar — the runtime
+// module compiler reads java.class.path and cannot see a fat jar's nested BOOT-INF/lib.
+tasks.named('run') {
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+// [OPTIONAL isolation=container] The container track explodes a host bootJar and auto-detects it by the literal
+// `-boot.jar` suffix in build/libs. Give the bootJar that classifier so it is found (else set
+// protean.worker.container.jar explicitly). Not needed for in-process or worker(embed process).
+// tasks.named('bootJar') { archiveClassifier = 'boot' }

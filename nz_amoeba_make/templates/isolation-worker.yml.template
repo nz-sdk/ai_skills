@@ -1,0 +1,38 @@
+# [ISOLATION: worker] Merge into application.yml under `protean:`. Replaces `isolation.mode: in-process`.
+# Modules run in a SEPARATE JVM behind a ReverseProxy → crash-isolated (a crashed module → 502, not a server
+# crash). NOTE: worker/container modules CANNOT inject host beans (no data-access / shared beans / library
+# modules) — those need in-process. Use the RPC bridge for shared-bean calls instead.
+#
+# Prerequisite (embed runtime): build the boot jar the worker JVM explodes → `./gradlew bootJar`.
+# Reserved-profile note: `worker` is a reserved Spring profile — name any demo profile `worker-demo`, never `worker`.
+  isolation:
+    mode: worker
+  worker:
+    runtime: embed              # embed (default: explode this app's bootJar) | sidecar (external artifact)
+    modules-per-worker: 4       # 1 = a dedicated JVM per module
+    min-warm: 0                 # empty workers kept warm for reuse
+    auto-restart: false         # restart a crashed worker's modules (process track)
+    shutdown-grace-ms: 5000     # SIGTERM grace before force-kill
+    # [OPTIONAL rpc-bridge] let workers call host shared beans over /__bridge/* (declare bridgedInterfaces per module)
+    # rpc-bridge: true
+    #
+    # [OPTIONAL sidecar runtime] runtime: sidecar  — launch an external worker artifact instead of exploding bootJar.
+    # Requires published artifacts: the release publishes the flat uber-jar as the `worker` classifier
+    # (org.htcom:protean:<ver>:worker) and the image as ghcr.io/htcom-code/protean-worker:<ver> — or build the
+    # jar yourself with the shadow plugin. shared-api is consumer-curated.
+    # REQUIRED per track (protean throws at the first worker spawn if blank): this worker/process track needs
+    # `jar`; the container track (isolation.mode: container) needs `image` instead. `shared-api` is process-only.
+    # sidecar:
+    #   jar: /path/to/protean-worker.jar
+    #   image: ghcr.io/htcom-code/protean-worker:0.0.1
+    #   shared-api: /path/to/shared-api.jar
+    #
+    # [OPTIONAL worker admin-auth] harden the main→worker control plane (hmac|token)
+    # admin-auth:
+    #   enabled: true
+    #   mode: hmac
+# [OPTIONAL rpc-bridge] main bridge URL injected into workers (+ auth)
+#  bridge:
+#    url: http://host.docker.internal:8080
+#    auth-enabled: true
+#    auth-mode: hmac

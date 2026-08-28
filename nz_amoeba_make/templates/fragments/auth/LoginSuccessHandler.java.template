@@ -1,0 +1,70 @@
+// [CAPABILITY: embedded auth — login success action] Ported from nz_oauth, where the constraint below was found
+// the hard way.
+//
+// ── MUST extend SavedRequestAwareAuthenticationSuccessHandler and call super ────────────────────────────────────
+// Login here almost always starts from a SavedRequest that /oauth2/authorize put there, so success has to return
+// to that original request for the authorization_code flow to continue. Replacing this with, say,
+// defaultSuccessUrl("/") produces a silent failure: the login works, and a token is never issued.
+// ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// This is also the seam for post-login side effects — last-login timestamps, anomaly alerts. Keep them cheap or
+// push them off-thread; anything slow here delays the redirect the user is waiting on.
+package {{PKG}}.auth;
+
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.web.authentication.SavedRequestAwareAuthenticationSuccessHandler;
+import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
+import org.springframework.security.web.savedrequest.RequestCache;
+import org.springframework.security.web.savedrequest.SavedRequest;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+
+@Component
+@ConditionalOnProperty(prefix = "amoeba.auth", name = "enabled", havingValue = "true")
+public class LoginSuccessHandler extends SavedRequestAwareAuthenticationSuccessHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(LoginSuccessHandler.class);
+
+    // Sharing the parent's cache lets us read the pending request before super consumes it. getRequest() does not
+    // remove anything (removeRequest does), so the parent still finds it.
+    private final RequestCache requestCache = new HttpSessionRequestCache();
+
+    public LoginSuccessHandler() {
+        setRequestCache(requestCache);
+    }
+
+    @Override
+    public void onAuthenticationSuccess(HttpServletRequest request, HttpServletResponse response,
+                                        Authentication authentication) throws IOException, ServletException {
+        SavedRequest saved = requestCache.getRequest(request, response);
+
+        // Audit trail. On a control plane that can deploy code, "who logged in and for which client" is the
+        // record you want when a module turns up that nobody remembers deploying.
+        log.info("Login success — user={} authorities={} from={} next={}",
+                authentication.getName(),
+                authentication.getAuthorities().stream().map(GrantedAuthority::getAuthority).toList(),
+                request.getRemoteAddr(),
+                describeTarget(saved));
+
+        super.onAuthenticationSuccess(request, response, authentication); // ★ must stay last
+    }
+
+    private static String describeTarget(SavedRequest saved) {
+        if (saved == null) {
+            return "(none — direct login)";
+        }
+        String[] clientIds = saved.getParameterValues("client_id");
+        return (clientIds == null || clientIds.length == 0)
+                ? saved.getRedirectUrl()
+                : "client_id=" + clientIds[0];
+    }
+}

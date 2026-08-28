@@ -1,0 +1,36 @@
+// [CAPABILITY: custom module-store dialect] Requires protean.module-store.backend=jdbc.
+// A @Component implementing ModuleStoreDialect supplies the per-vendor DDL fragments for the jdbc module store
+// (JdbcModuleStore): the large-text type for descriptor_json and the auto-increment definition for
+// module_version.seq. Built-in h2/mysql/postgresql already work; register this to add a vendor (e.g. Oracle) or,
+// by returning an existing id(), to override a built-in. Selected by protean.module-store.dialect or DB detection.
+//
+// NOT to be confused with db.DbDialect (that provisions a per-SCOPE DB; this shapes the module-store's own schema).
+// jsonTextColumnType() MUST be an unbounded large-character type — a bounded VARCHAR is rejected by the store's
+// startup self-check (a 128KB value must round-trip).
+package {{PKG}};
+
+import org.htcom.protean.module.ModuleStoreDialect;
+import org.springframework.stereotype.Component;
+
+@Component
+public class ExampleModuleStoreDialect implements ModuleStoreDialect {
+
+    @Override
+    public String id() {
+        return "example"; // matches protean.module-store.dialect (or the detected DB product name, lowercased)
+    }
+
+    @Override
+    public String jsonTextColumnType() {
+        // Unbounded large-character type for descriptor_json (H2 CLOB, MySQL LONGTEXT, PostgreSQL TEXT, Oracle CLOB).
+        return "LONGTEXT";
+    }
+
+    @Override
+    public String autoIncrementColumnDefinition() {
+        // Full definition placed right after the `seq` column name (H2/MySQL style shown; Postgres = "BIGSERIAL PRIMARY KEY").
+        return "BIGINT AUTO_INCREMENT PRIMARY KEY";
+    }
+
+    // preTableDdl() / postTableDdl() default to empty — override to add a sequence or trigger the column default needs.
+}

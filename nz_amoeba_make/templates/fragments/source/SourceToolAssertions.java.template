@@ -1,0 +1,38 @@
+// Assertions shared by the three source-tool tests.
+package {{PKG}}.source;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolResult;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+final class SourceToolAssertions {
+
+    private SourceToolAssertions() {
+    }
+
+    /**
+     * Asserts a successful result actually satisfies the {@code required} fields of the tool's own
+     * {@code outputSchema()}.
+     *
+     * <p>Worth asserting because the failure is invisible in-process: {@code McpDispatcher} checks conformance on
+     * the way out and rewrites a non-conforming success into an {@code OUTPUT_SCHEMA_VIOLATION} error, so a tool
+     * that omits a field it declared required works in a unit test and fails over the wire.
+     */
+    static void assertSatisfiesOutputSchema(McpTool tool, McpToolResult result) {
+        assertFalse(result.isError(), () -> "expected a successful result, got: " + result.text());
+        JsonNode structured = result.structured();
+        assertNotNull(structured, "a tool declaring an outputSchema must return structuredContent");
+        assertTrue(structured.isObject(), "structuredContent must be an object per the MCP spec");
+
+        for (JsonNode field : tool.outputSchema().path("required")) {
+            String name = field.asText();
+            assertTrue(structured.hasNonNull(name),
+                    () -> "structuredContent is missing the required field '" + name + "'");
+        }
+    }
+}

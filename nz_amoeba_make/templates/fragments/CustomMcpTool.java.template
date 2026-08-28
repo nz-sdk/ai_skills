@@ -1,0 +1,79 @@
+// [CAPABILITY: custom MCP tool] Requires protean.mcp.enabled=true.
+// A @Component implementing McpTool is auto-collected by McpDispatcher and listed in tools/list alongside the
+// built-in protean.* tools — no server change. This example benchmarks a SQL statement (needs data-access);
+// adapt name/schema/call to your own tool. See reference/protean-capabilities.md (Axis B).
+package {{PKG}};
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+
+import org.springframework.stereotype.Component;
+
+@Component
+public class ExampleTool implements McpTool {
+
+    private final ObjectMapper mapper;
+
+    public ExampleTool(ObjectMapper mapper) {
+        this.mapper = mapper;
+    }
+
+    @Override
+    public String name() {
+        return "{{NAME}}.example";
+    }
+
+    @Override
+    public String description() {
+        return "Example custom MCP tool for the {{NAME}} sample: echoes and uppercases its input.";
+    }
+
+    @Override
+    public ObjectNode inputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        ObjectNode p = schema.putObject("properties");
+        p.putObject("text").put("type", "string").put("description", "Text to echo");
+        schema.putArray("required").add("text");
+        return schema;
+    }
+
+    @Override
+    public ObjectNode outputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        ObjectNode p = schema.putObject("properties");
+        p.putObject("echoed").put("type", "string");
+        schema.putArray("required").add("echoed");
+        return schema;
+    }
+
+    @Override
+    public String title() {
+        return "Example Echo Tool";
+    }
+
+    @Override
+    public ModuleActionAuthorizer.ModuleAction action() {
+        return ModuleActionAuthorizer.ModuleAction.CUSTOM;
+    }
+
+    @Override
+    public McpToolResult call(JsonNode arguments, McpCallContext ctx) {
+        JsonNode args = arguments == null ? mapper.missingNode() : arguments;
+        String text = args.hasNonNull("text") ? args.get("text").asText() : "";
+        if (text.isEmpty()) {
+            return McpToolResult.error("text is required");
+        }
+        String echoed = text.toUpperCase();
+        ObjectNode out = mapper.createObjectNode();
+        out.put("echoed", echoed);
+        return McpToolResult.ok("echoed: " + echoed, out);
+    }
+}

@@ -1,0 +1,23 @@
+# Local PostgreSQL for the {{NAME}} sample. Database/user/password match application.yml ({{DB}} / {{DB}} / {{PW}}).
+#   docker compose up -d   |   docker compose down   |   docker compose down -v  (wipe)
+services:
+  postgres:
+    image: postgres:16
+    container_name: protean-{{NAME}}-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: {{DB}}
+      POSTGRES_USER: {{DB}}
+      POSTGRES_PASSWORD: {{PW}}
+    volumes:
+      - protean-{{NAME}}-postgres-data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro   # *.sql runs on FIRST boot of a fresh volume
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{DB}} -d {{DB}}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  protean-{{NAME}}-postgres-data:

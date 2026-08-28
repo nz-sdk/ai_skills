@@ -1,0 +1,121 @@
+// Compiles generated module sources in memory with the real javac, against this test's classpath.
+//
+// This is the test that matters for a code generator. Asserting on emitted substrings proves the text contains what
+// was expected; only a compiler proves the text is valid Java that resolves against the classes a deployed module
+// will actually see. It mirrors what protean's RuntimeCompiler does at deploy time, so a generator bug surfaces
+// here in a unit test instead of inside promotion gate 1 on a live server.
+package {{PKG}}.interfacedef.gen;
+
+import javax.tools.Diagnostic;
+import javax.tools.DiagnosticCollector;
+import javax.tools.FileObject;
+import javax.tools.ForwardingJavaFileManager;
+import javax.tools.JavaCompiler;
+import javax.tools.JavaFileManager;
+import javax.tools.JavaFileObject;
+import javax.tools.SimpleJavaFileObject;
+import javax.tools.ToolProvider;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+final class GeneratedSourceCompiler {
+
+    private static final Pattern PACKAGE_DECLARATION =
+            Pattern.compile("^\\s*package\\s+([a-zA-Z0-9_.]+)\\s*;", Pattern.MULTILINE);
+
+    private GeneratedSourceCompiler() {
+    }
+
+    /** An in-memory source file, named by the FQCN javac expects. */
+    private static final class InMemorySource extends SimpleJavaFileObject {
+        private final String code;
+
+        InMemorySource(String fqcn, String code) {
+            super(URI.create("string:///" + fqcn.replace('.', '/') + Kind.SOURCE.extension), Kind.SOURCE);
+            this.code = code;
+        }
+
+        @Override
+        public CharSequence getCharContent(boolean ignoreEncodingErrors) {
+            return code;
+        }
+    }
+
+    /** Swallows class output so the compile leaves nothing on disk. Only diagnostics are of interest. */
+    private static final class DiscardingOutput extends SimpleJavaFileObject {
+        DiscardingOutput(String name, Kind kind) {
+            super(URI.create("mem:///" + name.replace('.', '/') + kind.extension), kind);
+        }
+
+        @Override
+        public OutputStream openOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+    }
+
+    /**
+     * Compiles every SOURCE and TEST file in the bundle.
+     *
+     * @return javac's error diagnostics, formatted one per line; empty means the skeleton compiles
+     */
+    static List<String> compile(SkeletonBundle bundle) {
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        if (compiler == null) {
+            throw new IllegalStateException("no system Java compiler — tests must run on a JDK, not a JRE");
+        }
+
+        List<JavaFileObject> units = new ArrayList<>();
+        for (GeneratedFile file : bundle.files()) {
+            if (file.kind() == GeneratedFile.Kind.RESOURCE) {
+                continue;
+            }
+            units.add(new InMemorySource(fqcnOf(file), file.content()));
+        }
+
+        DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+        // The classpath is inherited exactly as protean's RuntimeCompiler inherits java.class.path, so a generated
+        // import that is missing from the host's dependencies fails here too. -proc:none keeps any annotation
+        // processor on the test classpath out of the way.
+        List<String> options = List.of("-proc:none", "-classpath", System.getProperty("java.class.path"));
+
+        JavaFileManager standard =
+                compiler.getStandardFileManager(diagnostics, null, StandardCharsets.UTF_8);
+        try (JavaFileManager fileManager = new ForwardingJavaFileManager<>(standard) {
+            @Override
+            public JavaFileObject getJavaFileForOutput(Location location, String className,
+                                                       JavaFileObject.Kind kind, FileObject sibling) {
+                return new DiscardingOutput(className, kind);
+            }
+        }) {
+            compiler.getTask(null, fileManager, diagnostics, options, null, units).call();
+        } catch (IOException e) {
+            throw new IllegalStateException("failed to set up the in-memory compiler", e);
+        }
+
+        return diagnostics.getDiagnostics().stream()
+                .filter(d -> d.getKind() == Diagnostic.Kind.ERROR)
+                .map(d -> (d.getSource() == null ? "" : d.getSource().getName() + ":" + d.getLineNumber() + " ")
+                        + d.getMessage(null))
+                .toList();
+    }
+
+    /** FQCN = the file's package declaration plus its filename stem — the same derivation protean uses. */
+    private static String fqcnOf(GeneratedFile file) {
+        Matcher m = PACKAGE_DECLARATION.matcher(file.content());
+        if (!m.find()) {
+            throw new IllegalStateException("generated file has no package declaration: " + file.filename());
+        }
+        String stem = file.filename().endsWith(".java")
+                ? file.filename().substring(0, file.filename().length() - 5)
+                : file.filename();
+        return m.group(1) + "." + stem;
+    }
+}

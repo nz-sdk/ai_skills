@@ -1,0 +1,144 @@
+// [MODULE SOURCE] Descriptors for the source-tool tests.
+//
+// The Hangul sample is built from code points instead of written literally: build.gradle sets no compileJava
+// encoding, so a literal would be read with the platform default and the UTF-8 byte-count assertions would depend
+// on which machine ran the build. Code points make those assertions mean the same thing everywhere.
+package {{PKG}}.source;
+
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModuleResource;
+
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+final class SourceFixtures {
+
+    static final String MODULE_ID = "hello";
+    static final String VERSION = "1.0.0";
+
+    static final String CONTROLLER_FQCN = "module.hello.HelloController";
+    static final String SERVICE_FQCN = "module.hello.HelloService";
+    static final String DTO_FQCN = "module.hello.dto.GetHelloResponse";
+    static final String TEST_FQCN = "module.hello.HelloContractTest";
+
+    static final String MAPPER_XML_PATH = "mapper/hello/HelloMapper.xml";
+    static final String SPEC_PATH = "META-INF/protean/interface.json";
+    static final String KEYSTORE_PATH = "cert/hello.p12";
+
+    /**
+     * "annyeonghaseyo" in Hangul — 5 syllables, 15 bytes in UTF-8 (3 each).
+     *
+     * <p>Built from code points rather than written literally so the byte-count assertions do not depend on which
+     * encoding javac used to read this file.
+     */
+    static final String GREETING = new String(new int[]{0xC548, 0xB155, 0xD558, 0xC138, 0xC694}, 0, 5);
+
+    static final String CONTROLLER_SOURCE = """
+            package module.hello;
+
+            import org.springframework.web.bind.annotation.GetMapping;
+
+            public class HelloController {
+
+                @GetMapping("/hello")
+                public String hello() {
+                    return "%s";
+                }
+            }
+            """.formatted(GREETING);
+
+    static final String SERVICE_SOURCE = """
+            package module.hello;
+
+            public interface HelloService {
+                String hello();
+            }
+            """;
+
+    static final String DTO_SOURCE = """
+            package module.hello.dto;
+
+            public record GetHelloResponse(String message) {
+            }
+            """;
+
+    static final String TEST_SOURCE = """
+            package module.hello;
+
+            import org.junit.jupiter.api.Test;
+
+            class HelloContractTest {
+                @Test
+                void respondsToGetHello() {
+                }
+            }
+            """;
+
+    static final String MAPPER_XML = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <mapper namespace="module.hello.HelloMapper">
+                <select id="findGreeting" resultType="string">
+                    SELECT greeting FROM hello
+                </select>
+            </mapper>
+            """;
+
+    static final String SPEC_JSON = "{\"title\":\"Hello API\",\"dataAccess\":\"mybatis\"}";
+
+    static final byte[] KEYSTORE_BYTES = {0x30, 0x1f, 0x00, (byte) 0xff, 0x7a};
+
+    private SourceFixtures() {
+    }
+
+    /**
+     * A module with all three maps populated, including a binary resource.
+     *
+     * <p>Insertion order is deliberately not alphabetical, so a test asserting sorted output is actually testing
+     * the sort rather than the map's iteration order.
+     */
+    static ModuleDescriptor helloModule() {
+        Map<String, String> sources = new LinkedHashMap<>();
+        sources.put(SERVICE_FQCN, SERVICE_SOURCE);
+        sources.put(CONTROLLER_FQCN, CONTROLLER_SOURCE);
+        sources.put(DTO_FQCN, DTO_SOURCE);
+
+        Map<String, ModuleResource> resources = new LinkedHashMap<>();
+        resources.put(MAPPER_XML_PATH, ModuleResource.text(MAPPER_XML));
+        resources.put(SPEC_PATH, ModuleResource.text(SPEC_JSON));
+        resources.put(KEYSTORE_PATH, ModuleResource.binary(KEYSTORE_BYTES));
+
+        return ModuleDescriptor.builder()
+                .id(MODULE_ID)
+                .version(VERSION)
+                .controllerFqcn(CONTROLLER_FQCN)
+                .componentFqcns(List.of(CONTROLLER_FQCN))
+                .sources(sources)
+                .tests(Map.of(TEST_FQCN, TEST_SOURCE))
+                .resources(resources)
+                .needsSharedBeans(true)
+                .build();
+    }
+
+    /**
+     * A module deployed without the interface-definition wrapper: no resources at all.
+     *
+     * <p>This shape exists in the wild (see document/designSystem/front/server-modules), and the source tools must
+     * treat a missing sealed spec as ordinary rather than as an error.
+     */
+    static ModuleDescriptor bareModule(String id) {
+        return ModuleDescriptor.builder()
+                .id(id)
+                .version("2.0.0")
+                .controllerFqcn("module." + id + ".Controller")
+                .componentFqcns(List.of("module." + id + ".Controller"))
+                .sources(Map.of("module." + id + ".Controller",
+                        "package module." + id + ";\n\npublic class Controller {\n}\n"))
+                .build();
+    }
+
+    static int utf8Length(String s) {
+        return s.getBytes(StandardCharsets.UTF_8).length;
+    }
+}

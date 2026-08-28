@@ -1,0 +1,320 @@
+// [INTERFACE DEFINITION] The structured request/response contract a module declares BEFORE its Java exists.
+//
+// This is the single source of truth for three products that used to have none:
+//   1. the DTO / Mapper / Controller skeletons the server generates (so their shape cannot drift from the contract),
+//   2. the promotion-gate-3 probes that prove the declared routes are actually live,
+//   3. the interface definition document (markdown / OpenAPI).
+//
+// Nested records in one file, following org.htcom.protean.module.VerificationPlan.
+//
+// Wire format: enum values travel as their JSON Schema spelling (lowercase for types and parameter locations,
+// uppercase for HTTP methods) via @JsonValue, and parse case-insensitively via @JsonCreator. Keeping `type` to the
+// JSON Schema primitives is what makes the OpenAPI conversion mechanical.
+//
+// Deviation from document/inout/module-inout-api-review.md §3: FieldSpec gains `items` alongside `children`. The
+// reviewed model had `children` carry both "the fields of this object" and "the shape of this array's elements",
+// which cannot express List<String> — an array of scalars is indistinguishable from an object with one field. So
+// OBJECT uses `children` and ARRAY uses `items`. `dataAccess` and `serviceInterface` are the other additions —
+// both decide WHICH ARTIFACTS the generator emits, which is why they live in the contract rather than in a call
+// parameter: the deploy wrapper regenerates the server-owned files from this spec on every redeploy, so a choice
+// that is not in here cannot survive one.
+package {{PKG}}.interfacedef;
+
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonValue;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
+import java.util.stream.Collectors;
+
+/**
+ * A module's declared HTTP interface: name, attributes and description for every request and response field.
+ *
+ * <p>Every component is nullable on the wire and normalized here — {@code operations} to an empty list,
+ * {@code dataAccess} to {@link DataAccess#NONE} — so a partially-filled JSON body binds without NPEs and
+ * {@link InterfaceSpecValidator} is the one place that decides what is actually missing.
+ *
+ * @param title            document title (falls back to the module id when blank)
+ * @param description      module-level description
+ * @param dataAccess       whether the module reaches a database, which decides whether MyBatis artifacts are
+ *                         required
+ * @param serviceInterface whether the generator emits a separate Service interface. {@code null} = not stated, to
+ *                         be resolved against the project default — read it through
+ *                         {@link #generatesServiceInterface()} rather than directly.
+ * @param operations       one entry per endpoint
+ */
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record InterfaceSpec(
+        String title,
+        String description,
+        DataAccess dataAccess,
+        Boolean serviceInterface,
+        List<OperationSpec> operations
+) {
+
+    public InterfaceSpec {
+        dataAccess = dataAccess == null ? DataAccess.NONE : dataAccess;
+        operations = operations == null ? List.of() : List.copyOf(operations);
+        // serviceInterface is deliberately NOT normalized: null means "the caller did not state a preference", and
+        // only the tool holding the project default can turn that into a decision. Normalizing here would erase
+        // the distinction between "asked for the default" and "asked for the interface".
+    }
+
+    /**
+     * A spec that states no service-interface preference.
+     *
+     * <p>Exists so the many places that build a spec in code — tests, fixtures — keep reading as the four things a
+     * contract is about, without a {@code null} threaded through every call to say "no opinion". Jackson still
+     * binds through the canonical constructor, so the wire format is unaffected.
+     */
+    public InterfaceSpec(String title, String description, DataAccess dataAccess,
+                         List<OperationSpec> operations) {
+        this(title, description, dataAccess, null, operations);
+    }
+
+    /**
+     * Whether the skeleton has a separate Service interface alongside its implementation.
+     *
+     * <p>An unstated preference reads as {@code true} — the historical shape — so a spec assembled in code without
+     * naming the field keeps generating what it always did. The MCP tool resolves {@code null} against the project
+     * default before the spec is stored, so a spec that has been through {@code amoeba.define_interface} always
+     * carries an explicit value; that is what makes a redeploy regenerate the same structure it shipped with.
+     */
+    public boolean generatesServiceInterface() {
+        return serviceInterface == null || serviceInterface;
+    }
+
+    /** This spec with {@code serviceInterface} pinned, for resolving an unstated preference against a default. */
+    public InterfaceSpec withServiceInterface(boolean resolved) {
+        return new InterfaceSpec(title, description, dataAccess, resolved, operations);
+    }
+
+    /**
+     * Whether the module declares database access, and therefore whether the generator emits — and the wrapper
+     * requires — a {@code @Mapper} interface, its mapper XML and a {@code SqlSessionFactory} configuration.
+     *
+     * <p>This exists because Mapper enforcement must be conditional: demanding a Mapper from a module with no
+     * external dependency (a healthcheck, say) would be meaningless, and {@code MYBATIS} additionally makes a
+     * reachable database a deploy-time prerequisite (gate 3 probes run real queries).
+     */
+    public enum DataAccess {
+        NONE, MYBATIS;
+
+        @JsonValue
+        public String wire() {
+            return Enums.wire(this);
+        }
+
+        @JsonCreator
+        public static DataAccess from(String value) {
+            return Enums.parse(DataAccess.class, values(), value, "dataAccess");
+        }
+    }
+
+    /** JSON Schema primitive types. Restricting to these is what keeps the OpenAPI conversion mechanical. */
+    public enum FieldType {
+        STRING, INTEGER, NUMBER, BOOLEAN, OBJECT, ARRAY;
+
+        @JsonValue
+        public String wire() {
+            return Enums.wire(this);
+        }
+
+        @JsonCreator
+        public static FieldType from(String value) {
+            return Enums.parse(FieldType.class, values(), value, "type");
+        }
+
+        /** True when the type needs a nested shape: {@code children} for OBJECT, {@code items} for ARRAY. */
+        public boolean isComposite() {
+            return this == OBJECT || this == ARRAY;
+        }
+    }
+
+    /** Where a request parameter travels. Body fields are not parameters — they are {@code requestBody}. */
+    public enum ParamIn {
+        PATH, QUERY, HEADER;
+
+        @JsonValue
+        public String wire() {
+            return Enums.wire(this);
+        }
+
+        @JsonCreator
+        public static ParamIn from(String value) {
+            return Enums.parse(ParamIn.class, values(), value, "in");
+        }
+    }
+
+    /** HTTP methods that map to a Spring {@code @XxxMapping}. Travels uppercase, unlike the other enums. */
+    public enum HttpMethod {
+        GET, POST, PUT, PATCH, DELETE;
+
+        @JsonValue
+        public String wire() {
+            return name();
+        }
+
+        @JsonCreator
+        public static HttpMethod from(String value) {
+            return Enums.parse(HttpMethod.class, values(), value, "method");
+        }
+
+        /**
+         * Whether a request body is meaningful for this method. Only body-less operations can be verified by a
+         * generated gate-3 probe, because {@code VerificationPlan.Probe} has no request-body field — the rest fall
+         * back to post-install reflection.
+         */
+        public boolean allowsRequestBody() {
+            return this == POST || this == PUT || this == PATCH;
+        }
+    }
+
+    /**
+     * One endpoint.
+     *
+     * @param operationId unique identifier — the document anchor, the generated DTO name stem and the Mapper
+     *                    method name, so it must be a valid Java identifier
+     * @param method      HTTP method, matched against the controller mapping
+     * @param path        e.g. {@code /orders/{id}} — the key compared with the live route
+     * @param summary     one-line summary for the operation table
+     * @param description prose description
+     * @param parameters  path / query / header parameters (never body fields)
+     * @param requestBody body field tree; {@code null} or empty means no body
+     * @param responses   one entry per status code
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record OperationSpec(
+            String operationId,
+            HttpMethod method,
+            String path,
+            String summary,
+            String description,
+            List<ParamSpec> parameters,
+            List<FieldSpec> requestBody,
+            List<ResponseSpec> responses
+    ) {
+        public OperationSpec {
+            parameters = parameters == null ? List.of() : List.copyOf(parameters);
+            requestBody = requestBody == null ? List.of() : List.copyOf(requestBody);
+            responses = responses == null ? List.of() : List.copyOf(responses);
+        }
+
+        /** True when this operation carries a request body, so gate-3 probing is not possible for it. */
+        public boolean hasRequestBody() {
+            return !requestBody.isEmpty();
+        }
+
+        /** The lowest 2xx response, which is what a generated probe expects. Empty when none is declared. */
+        public java.util.Optional<ResponseSpec> successResponse() {
+            return responses.stream()
+                    .filter(r -> r.status() >= 200 && r.status() < 300)
+                    .min(java.util.Comparator.comparingInt(ResponseSpec::status));
+        }
+    }
+
+    /**
+     * A request parameter that has a location: name + attributes + description.
+     *
+     * @param example used to substitute {@code {var}} when generating a gate-3 probe path, so a path parameter
+     *                without an example makes its operation unprobeable
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record ParamSpec(
+            String name,
+            ParamIn in,
+            FieldType type,
+            boolean required,
+            String description,
+            String example
+    ) {
+    }
+
+    /**
+     * A recursive field definition — name, attributes ({@code type} / {@code format} / {@code required}) and
+     * description. Exactly one of {@code children} (OBJECT) or {@code items} (ARRAY) applies; both are empty/null
+     * for scalars.
+     *
+     * @param format optional refinement of {@code type} (e.g. {@code date-time}, {@code int64}) carried straight
+     *               through to OpenAPI
+     * @param children named fields, when {@code type} is OBJECT
+     * @param items    the shape of one element, when {@code type} is ARRAY (its own {@code name} is ignored)
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record FieldSpec(
+            String name,
+            FieldType type,
+            String format,
+            boolean required,
+            String description,
+            String example,
+            List<FieldSpec> children,
+            FieldSpec items
+    ) {
+        public FieldSpec {
+            children = children == null ? List.of() : List.copyOf(children);
+        }
+
+        /** Scalar convenience factory (tests and the skeleton generator). */
+        public static FieldSpec scalar(String name, FieldType type, boolean required, String description) {
+            return scalar(name, type, null, required, description);
+        }
+
+        /** Scalar with a {@code format} refinement, which narrows the generated Java type. */
+        public static FieldSpec scalar(String name, FieldType type, String format,
+                                       boolean required, String description) {
+            return new FieldSpec(name, type, format, required, description, null, List.of(), null);
+        }
+    }
+
+    /**
+     * One response status.
+     *
+     * @param status HTTP status code
+     * @param body   response field tree; {@code null} or empty means no body (e.g. 204)
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record ResponseSpec(int status, String description, List<FieldSpec> body) {
+        public ResponseSpec {
+            body = body == null ? List.of() : List.copyOf(body);
+        }
+    }
+
+    /**
+     * Shared enum wire handling. Kept private so the wire spelling ({@code lower_case}) and the parse tolerance
+     * (case-insensitive, hyphen/underscore-equivalent) are defined once instead of per enum.
+     */
+    private static final class Enums {
+
+        private Enums() {
+        }
+
+        static String wire(Enum<?> value) {
+            return value.name().toLowerCase(Locale.ROOT);
+        }
+
+        static <E extends Enum<E>> E parse(Class<E> type, E[] values, String value, String field) {
+            if (value != null) {
+                String needle = value.trim().replace('-', '_');
+                for (E candidate : values) {
+                    if (candidate.name().equalsIgnoreCase(needle)) {
+                        return candidate;
+                    }
+                }
+            }
+            // The message names the field and lists the alternatives: with strict-schema off this exception is the
+            // only feedback the caller gets, and Jackson's default ("not one of declared Enum instance names")
+            // spells the constants in Java case, which is not what the wire format accepts.
+            throw new IllegalArgumentException(field + ": unknown value '" + value + "' (expected one of "
+                    + Arrays.stream(values).map(e -> "'" + wireOf(e) + "'").collect(Collectors.joining(", "))
+                    + ") for " + type.getSimpleName());
+        }
+
+        /** HttpMethod overrides {@code wire()} to stay uppercase, so read it back through the constant itself. */
+        private static String wireOf(Enum<?> value) {
+            return value instanceof HttpMethod method ? method.wire() : wire(value);
+        }
+    }
+}

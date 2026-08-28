@@ -1,0 +1,252 @@
+// [CAPABILITY: custom MCP tool] amoeba.export_module_source — pull a deployed module back out as a project tree.
+//
+// A deployed module lives as one descriptor JSON of FQCN-to-text maps, so protean.get_module_source can only hand
+// back that flat shape — and it omits the `resources` map entirely, which is where mapper XML lives. This tool
+// returns the same files keyed by the path they would occupy in a Gradle/Java project, so writing the map to disk
+// produces a tree that compiles and opens in an IDE.
+//
+// Text and binary are returned in SEPARATE maps rather than one map with a flag: a single map would leave the
+// client unable to tell, per entry, whether the string is content or Base64.
+package {{PKG}}.source;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.source.ModuleSourceLayout.Kind;
+import {{PKG}}.source.ModuleSourceLayout.Layout;
+import {{PKG}}.source.ModuleSourceLayout.SourceFile;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolAnnotations;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+
+@Component
+public class ExportModuleSourceTool implements McpTool {
+
+    static final String LAYOUT = "gradle-java";
+
+    private static final int DEFAULT_MAX_BYTES = 4 * 1024 * 1024;
+    private static final int MAX_MAX_BYTES = 16 * 1024 * 1024;
+
+    private final ObjectMapper mapper;
+    private final ModuleSourceResolver resolver;
+
+    public ExportModuleSourceTool(ObjectMapper mapper, ModuleSourceResolver resolver) {
+        this.mapper = mapper;
+        this.resolver = resolver;
+    }
+
+    @Override
+    public String name() {
+        return "amoeba.export_module_source";
+    }
+
+    @Override
+    public String title() {
+        return "Export Module Source";
+    }
+
+    @Override
+    public String description() {
+        return "Exports a deployed module's original source as a project-layout file map (src/main/java, "
+                + "src/test/java, src/main/resources) ready to write to disk. Includes mapper XML and other "
+                + "classpath resources, and can emit build.gradle/settings.gradle so the result opens as a "
+                + "project. Use amoeba.list_module_files first for large modules, then narrow with 'paths'.";
+    }
+
+    @Override
+    public ModuleActionAuthorizer.ModuleAction action() {
+        return ModuleActionAuthorizer.ModuleAction.READ;
+    }
+
+    @Override
+    public String targetModuleId(JsonNode arguments) {
+        return arguments != null && arguments.hasNonNull("moduleId") ? arguments.get("moduleId").asText() : null;
+    }
+
+    @Override
+    public McpToolAnnotations annotations() {
+        return McpToolAnnotations.readOnly();
+    }
+
+    @Override
+    public ObjectNode inputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        schema.put("additionalProperties", false);
+        ObjectNode p = schema.putObject("properties");
+        SourceToolSchemas.putModuleId(p, "Deployed module id.");
+        SourceToolSchemas.putVersion(p);
+        SourceToolSchemas.putInclude(p);
+        ObjectNode paths = p.putObject("paths");
+        paths.put("type", "array")
+                .put("description", "Optional. Exports only these project-layout paths, exactly as reported by "
+                        + "amoeba.list_module_files. All files when omitted.");
+        paths.putObject("items").put("type", "string");
+        paths.put("uniqueItems", true);
+        p.putObject("includeBuildFiles").put("type", "boolean")
+                .put("description", "Also emit build.gradle and settings.gradle so the exported tree opens as a "
+                        + "project. These are an IDE-editing aid reconstructed from the module's shape, NOT the "
+                        + "classpath the server compiles against. Defaults to false.");
+        p.putObject("maxBytes").put("type", "integer")
+                .put("description", "Response size budget in bytes (default " + DEFAULT_MAX_BYTES + ", max "
+                        + MAX_MAX_BYTES + "). Files beyond it are listed in 'omitted' instead of returned.");
+        schema.putArray("required").add("moduleId");
+        return schema;
+    }
+
+    @Override
+    public ObjectNode outputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        ObjectNode p = schema.putObject("properties");
+        p.putObject("moduleId").put("type", "string");
+        p.putObject("version").put("type", "string");
+        p.putObject("layout").put("type", "string")
+                .put("description", "Layout the paths follow. Currently always '" + LAYOUT + "'.");
+        p.putObject("files").put("type", "object")
+                .put("description", "Project-relative path -> UTF-8 text content.");
+        p.putObject("binaryFiles").put("type", "object")
+                .put("description", "Project-relative path -> Base64 content. Absent when the module has none.");
+        p.putObject("fileCount").put("type", "integer");
+        p.putObject("totalBytes").put("type", "integer");
+        p.putObject("truncated").put("type", "boolean")
+                .put("description", "True when the size budget stopped the export.");
+        ObjectNode omitted = p.putObject("omitted");
+        omitted.put("type", "array")
+                .put("description", "Paths left out because the size budget ran out.");
+        omitted.putObject("items").put("type", "string");
+        SourceToolSchemas.putSkipped(p);
+
+        // binaryFiles / truncated / omitted / skipped stay out of required — they are conditional, and a missing
+        // required field would be rewritten into an OUTPUT_SCHEMA_VIOLATION error by the dispatcher.
+        schema.putArray("required")
+                .add("moduleId").add("version").add("layout").add("files").add("fileCount").add("totalBytes");
+        return schema;
+    }
+
+    @Override
+    public McpToolResult call(JsonNode arguments, McpCallContext ctx) {
+        JsonNode args = arguments == null ? mapper.missingNode() : arguments;
+        String moduleId = SourceToolSchemas.text(args, "moduleId");
+        if (moduleId == null) {
+            return McpToolResult.error("moduleId is required");
+        }
+        String version = SourceToolSchemas.text(args, "version");
+        Set<Kind> include = SourceToolSchemas.parseInclude(args);
+        Set<String> wanted = parsePaths(args.path("paths"));
+        boolean buildFiles = args.path("includeBuildFiles").asBoolean(false);
+        int maxBytes = SourceToolSchemas.clampLimit(args.path("maxBytes"), DEFAULT_MAX_BYTES, MAX_MAX_BYTES);
+
+        Optional<ModuleDescriptor> found = resolver.find(moduleId, version);
+        if (found.isEmpty()) {
+            return resolver.notFound(moduleId, version);
+        }
+        ModuleDescriptor descriptor = found.get();
+        Layout layout = ModuleSourceLayout.of(descriptor, include);
+
+        List<SourceFile> selected = layout.files().stream()
+                .filter(f -> wanted.isEmpty() || wanted.contains(f.path()))
+                .toList();
+
+        ObjectNode out = mapper.createObjectNode();
+        out.put("moduleId", moduleId);
+        out.put("version", descriptor.version());
+        out.put("layout", LAYOUT);
+        ObjectNode files = out.putObject("files");
+        ObjectNode binaryFiles = mapper.createObjectNode();
+        List<String> omitted = new ArrayList<>();
+
+        long totalBytes = 0;
+        int fileCount = 0;
+        for (SourceFile file : selected) {
+            if (totalBytes + file.bytes() > maxBytes && fileCount > 0) {
+                // fileCount > 0 so a single oversized file is still returned rather than producing an empty
+                // export that looks like "the module has no files".
+                omitted.add(file.path());
+                continue;
+            }
+            if (file.binary()) {
+                binaryFiles.put(file.path(), file.content());
+            } else {
+                files.put(file.path(), file.content());
+            }
+            totalBytes += file.bytes();
+            fileCount++;
+        }
+
+        if (buildFiles) {
+            // Not subject to the size budget: they are a few hundred bytes each, and an export asked to be
+            // openable as a project is not openable without them.
+            for (BuildFileWriter.BuildFile generated : BuildFileWriter.of(descriptor)) {
+                files.put(generated.path(), generated.content());
+                totalBytes += generated.bytes();
+                fileCount++;
+            }
+        }
+
+        if (!binaryFiles.isEmpty()) {
+            out.set("binaryFiles", binaryFiles);
+        }
+        out.put("fileCount", fileCount);
+        out.put("totalBytes", totalBytes);
+        if (!omitted.isEmpty()) {
+            out.put("truncated", true);
+            ArrayNode node = out.putArray("omitted");
+            omitted.forEach(node::add);
+        }
+        if (!layout.skipped().isEmpty()) {
+            ArrayNode skipped = out.putArray("skipped");
+            layout.skipped().forEach(skipped::add);
+        }
+
+        return McpToolResult.ok(
+                renderText(moduleId, descriptor.version(), fileCount, totalBytes, omitted, layout.skipped()), out);
+    }
+
+    private static Set<String> parsePaths(JsonNode node) {
+        if (!node.isArray() || node.isEmpty()) {
+            return Set.of();
+        }
+        Set<String> paths = new HashSet<>();
+        node.forEach(element -> {
+            String value = element.asText(null);
+            if (value != null && !value.isBlank()) {
+                paths.add(value.trim());
+            }
+        });
+        return paths;
+    }
+
+    private String renderText(String moduleId, String version, int fileCount, long totalBytes,
+                              List<String> omitted, List<String> skipped) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Exported ").append(moduleId).append(" v").append(version).append(" — ")
+                .append(fileCount).append(" file(s), ").append(totalBytes).append(" bytes, layout ")
+                .append(LAYOUT).append('\n');
+        if (!omitted.isEmpty()) {
+            sb.append("\nOmitted ").append(omitted.size())
+                    .append(" file(s) — the size budget ran out. Narrow with 'paths' (or raise 'maxBytes'):\n");
+            omitted.forEach(path -> sb.append("  ").append(path).append('\n'));
+        }
+        if (!skipped.isEmpty()) {
+            sb.append("\nSkipped ").append(skipped.size())
+                    .append(" resource(s) whose path escapes the classpath root: ")
+                    .append(String.join(", ", skipped)).append('\n');
+        }
+        return sb.toString();
+    }
+}

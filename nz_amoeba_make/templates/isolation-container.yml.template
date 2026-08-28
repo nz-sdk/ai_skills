@@ -1,0 +1,19 @@
+# [ISOLATION: container] Merge into application.yml under `protean:`. Replaces `isolation.mode: in-process`.
+# Each module runs in its OWN hardened Docker container (one per module, no pooling): separate JVM inside an
+# OS sandbox (cgroup memory cap, read-only rootfs, dropped caps, optional seccomp/egress). Strongest isolation.
+# No shared beans, no RPC bridge, no pool. Like worker, it CANNOT inject host beans (data-access needs in-process).
+#
+# Prerequisites: a running Docker daemon + the boot jar the container explodes → `./gradlew bootJar`.
+  isolation:
+    mode: container
+  worker:
+    modules-per-worker: 1       # container track = one container per module
+    auto-restart: false
+    container:
+      image: eclipse-temurin:21-jdk
+      memory: 256m
+      pids-limit: 512           # fork-bomb protection
+      db-host: host.docker.internal   # hostname rewrite so the container reaches the host DB
+      # jar: ""                 # explicit worker jar (empty = auto-detect the -boot.jar in build/libs)
+      # network: internal       # egress isolation network (empty = default)
+      # seccomp: /path/profile.json   # seccomp profile (empty = Docker default)

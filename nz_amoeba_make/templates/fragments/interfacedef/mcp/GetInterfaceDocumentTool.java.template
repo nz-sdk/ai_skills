@@ -1,0 +1,168 @@
+// [CAPABILITY: custom MCP tool] amoeba.get_interface_document — the interface definition service, read side.
+//
+// Reads the spec straight out of the module descriptor's sealed resource, which is why version history comes for
+// free: platform.history(id) carries the descriptor as it shipped, so "the interface as of v1.2" is answerable with
+// no second store and no DDL. Rendering is a pure function of the spec, so the document can never disagree with the
+// declared contract — the thing it CAN disagree with is the running code, and that is what the deploy wrapper's
+// route comparison is for.
+package {{PKG}}.interfacedef.mcp;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.deploy.SpecResource;
+import {{PKG}}.interfacedef.render.MarkdownRenderer;
+import {{PKG}}.interfacedef.render.OpenApiRenderer;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolAnnotations;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+
+import org.springframework.stereotype.Component;
+
+import java.util.Locale;
+import java.util.Optional;
+
+@Component
+public class GetInterfaceDocumentTool implements McpTool {
+
+    private final ObjectMapper mapper;
+    private final ModulePlatform platform;
+    private final OpenApiRenderer openApiRenderer;
+
+    public GetInterfaceDocumentTool(ObjectMapper mapper, ModulePlatform platform) {
+        this.mapper = mapper;
+        this.platform = platform;
+        this.openApiRenderer = new OpenApiRenderer(mapper);
+    }
+
+    @Override
+    public String name() {
+        return "amoeba.get_interface_document";
+    }
+
+    @Override
+    public String title() {
+        return "Get Interface Definition Document";
+    }
+
+    @Override
+    public String description() {
+        return "Renders a deployed module's declared interface as a markdown definition document or an OpenAPI 3.0.3 "
+                + "document. Reads the spec sealed into the module descriptor, so a specific version can be "
+                + "requested and gets the interface that shipped with it.";
+    }
+
+    /** A pure read of stored state, so it belongs on {@code mcp.read} rather than the CUSTOM/admin bucket. */
+    @Override
+    public ModuleActionAuthorizer.ModuleAction action() {
+        return ModuleActionAuthorizer.ModuleAction.READ;
+    }
+
+    @Override
+    public String targetModuleId(JsonNode arguments) {
+        return arguments != null && arguments.hasNonNull("moduleId") ? arguments.get("moduleId").asText() : null;
+    }
+
+    @Override
+    public McpToolAnnotations annotations() {
+        return McpToolAnnotations.builder()
+                .readOnly(true).destructive(false).idempotent(true).openWorld(false).build();
+    }
+
+    @Override
+    public ObjectNode inputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        schema.put("additionalProperties", false);
+        ObjectNode p = schema.putObject("properties");
+        p.putObject("moduleId").put("type", "string")
+                .put("pattern", InterfaceSpecSchema.MODULE_ID_PATTERN)
+                .put("description", "Deployed module id.");
+        p.putObject("version").put("type", "string")
+                .put("description", "Optional. Renders the interface that shipped with this version instead of the "
+                        + "current one.");
+        ObjectNode format = p.putObject("format");
+        format.put("type", "string").put("description", "Output format. Defaults to markdown.");
+        format.putArray("enum").add("markdown").add("openapi");
+        schema.putArray("required").add("moduleId");
+        return schema;
+    }
+
+    @Override
+    public ObjectNode outputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        ObjectNode p = schema.putObject("properties");
+        p.putObject("moduleId").put("type", "string");
+        p.putObject("version").put("type", "string");
+        p.putObject("format").put("type", "string");
+        p.putObject("document").put("type", "string")
+                .put("description", "The rendered document. Markdown text, or the OpenAPI document as JSON text.");
+        p.putObject("operationCount").put("type", "integer");
+        schema.putArray("required").add("moduleId").add("version").add("format").add("document");
+        return schema;
+    }
+
+    @Override
+    public McpToolResult call(JsonNode arguments, McpCallContext ctx) {
+        JsonNode args = arguments == null ? mapper.missingNode() : arguments;
+        if (!args.hasNonNull("moduleId")) {
+            return McpToolResult.error("moduleId is required");
+        }
+        String moduleId = args.get("moduleId").asText();
+        String requestedVersion = args.hasNonNull("version") ? args.get("version").asText() : null;
+        String format = args.path("format").asText("markdown").toLowerCase(Locale.ROOT);
+
+        Optional<ModuleDescriptor> descriptor = resolve(moduleId, requestedVersion);
+        if (descriptor.isEmpty()) {
+            return McpToolResult.error(requestedVersion == null
+                    ? "module '" + moduleId + "' is not installed"
+                    : "module '" + moduleId + "' has no version '" + requestedVersion + "' in its history");
+        }
+
+        Optional<InterfaceSpec> spec = SpecResource.read(mapper, descriptor.get().resources());
+        if (spec.isEmpty()) {
+            return McpToolResult.error("module '" + moduleId + "' carries no readable interface definition. It was "
+                    + "deployed before the interface requirement, or through a path that does not seal one — "
+                    + "redeploy it with a specId from amoeba.define_interface.");
+        }
+
+        String version = descriptor.get().version();
+        String document;
+        if ("openapi".equals(format)) {
+            try {
+                document = mapper.writerWithDefaultPrettyPrinter()
+                        .writeValueAsString(openApiRenderer.render(moduleId, version, spec.get()));
+            } catch (Exception e) {
+                return McpToolResult.error("failed to render the OpenAPI document: " + e.getMessage());
+            }
+        } else {
+            document = MarkdownRenderer.render(moduleId, version, spec.get());
+        }
+
+        ObjectNode out = mapper.createObjectNode();
+        out.put("moduleId", moduleId);
+        out.put("version", version);
+        out.put("format", format);
+        out.put("document", document);
+        out.put("operationCount", spec.get().operations().size());
+        return McpToolResult.ok(document, out);
+    }
+
+    /**
+     * The current descriptor, or the one that shipped as a given version.
+     *
+     * <p>{@code findVersion} keys on the version string the caller actually deployed, not on protean's internal
+     * sequence number, which is exactly the lookup an interface document needs.
+     */
+    private Optional<ModuleDescriptor> resolve(String moduleId, String version) {
+        return version == null ? platform.find(moduleId) : platform.findVersion(moduleId, version);
+    }
+}

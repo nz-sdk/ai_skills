@@ -1,0 +1,98 @@
+// [INTERFACE DEFINITION] Signatures -> a JUnit test that re-checks the controller against the declared spec.
+//
+// Two jobs, and the second is the interesting one.
+//
+// 1. Promotion gate 1 rejects a module with no tests at all, so a skeleton that shipped without one could never
+//    deploy. This seeds a real test instead of an empty placeholder.
+//
+// 2. It moves the route check EARLIER than anything else in the pipeline. The wrapper's reflection comparison and
+//    the generated gate-3 probes both run after install; this runs inside gate 1, in the module's own
+//    ClassLoader, before the module is deployed at all. A controller whose mapping does not match the declared
+//    method+path fails here, and the failure names the operation.
+//
+// Authored, not server-owned: it is the natural place for the module's real tests to accumulate, and locking it
+// would push the author into a second file for no reason. The generated assertions are cheap to keep alongside.
+package {{PKG}}.interfacedef.gen;
+
+import {{PKG}}.interfacedef.gen.SkeletonGenerator.Layout;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator.Signature;
+
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+final class ContractTestWriter {
+
+    private ContractTestWriter() {
+    }
+
+    static String write(Layout layout, List<Signature> signatures) {
+        Set<String> imports = new LinkedHashSet<>();
+        imports.add("org.junit.jupiter.api.Test");
+        imports.add("java.lang.reflect.Method");
+        imports.addAll(SkeletonGenerator.dtoImports(layout, signatures));
+        if (SkeletonGenerator.usesList(signatures)) {
+            imports.add("java.util.List");
+        }
+        for (Signature sig : signatures) {
+            imports.add(ControllerWriter.SPRING_WEB
+                    + ControllerWriter.mappingAnnotation(sig.operation().method()));
+        }
+
+        StringBuilder out = new StringBuilder();
+        out.append("// Seeded from the module's interface definition; add your own tests here.\n")
+                .append("// The assertions below pin each declared route onto the controller, and they run in\n")
+                .append("// promotion gate 1 — before the module is deployed.\n")
+                .append("package ").append(layout.basePackage()).append(";\n\n")
+                .append(SkeletonGenerator.imports(imports, layout.basePackage()))
+                .append('\n')
+                .append("import static org.junit.jupiter.api.Assertions.assertArrayEquals;\n")
+                .append("import static org.junit.jupiter.api.Assertions.assertEquals;\n")
+                .append("import static org.junit.jupiter.api.Assertions.assertNotNull;\n\n")
+                .append("class ").append(layout.contractTest()).append(" {\n");
+
+        for (Signature sig : signatures) {
+            appendRouteTest(out, layout, sig);
+        }
+        return out.append("}\n").toString();
+    }
+
+    private static void appendRouteTest(StringBuilder out, Layout layout, Signature sig) {
+        String operationId = sig.operation().operationId();
+        String annotation = ControllerWriter.mappingAnnotation(sig.operation().method());
+        String parameterTypes = sig.javaTypes().stream()
+                .map(ContractTestWriter::classLiteral)
+                .reduce((a, b) -> a + ", " + b)
+                .map(s -> ", " + s)
+                .orElse("");
+
+        out.append('\n')
+                .append("    @Test\n")
+                .append("    void ").append(operationId).append("_isMappedAsDeclared() throws Exception {\n")
+                // getDeclaredMethod with the exact parameter types is itself an assertion: a signature that drifted
+                // from the spec throws NoSuchMethodException and the test fails by name.
+                .append("        Method method = ").append(layout.controller())
+                .append(".class.getDeclaredMethod(").append(JavaNames.literal(operationId))
+                .append(parameterTypes).append(");\n")
+                .append("        ").append(annotation).append(" mapping = method.getAnnotation(")
+                .append(annotation).append(".class);\n")
+                .append("        assertNotNull(mapping, ")
+                .append(JavaNames.literal(operationId + " must carry @" + annotation)).append(");\n")
+                .append("        assertArrayEquals(new String[] {")
+                .append(JavaNames.literal(sig.operation().path())).append("}, mapping.value());\n")
+                .append("        assertEquals(").append(classLiteral(sig.returnType()))
+                .append(", method.getReturnType(), ")
+                .append(JavaNames.literal(operationId + " must return " + sig.returnType())).append(");\n")
+                .append("    }\n");
+    }
+
+    /**
+     * A {@code .class} literal for a declared Java type. Generics are erased first — {@code List<String>} is
+     * {@code List.class} — which is exactly what {@code getDeclaredMethod} matches on.
+     */
+    private static String classLiteral(String javaType) {
+        int generics = javaType.indexOf('<');
+        String raw = generics < 0 ? javaType : javaType.substring(0, generics);
+        return raw + ".class";
+    }
+}

@@ -1,0 +1,70 @@
+// [CAPABILITY: embedded Authorization Server] amoeba.auth.* binding. OPT-IN — default off.
+//
+// Everything under this prefix is inert unless amoeba.auth.enabled=true. When off, the app is exactly what it
+// was before: a pure Resource Server validating tokens from an external issuer.
+package {{PKG}}.auth;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.DefaultValue;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+
+// ★ The prefix is a FIXED literal, not derived from the project name. Spring requires a @ConfigurationProperties
+// prefix in canonical form (lowercase alphanumeric and '-'), and a generated sample name may legally contain an
+// underscore (nz_amoeba) — interpolating it here would fail at startup with InvalidConfigurationPropertyNameException.
+@ConfigurationProperties("amoeba.auth")
+public record EmbeddedAuthProperties(
+
+        /**
+         * Turn this app into its own Authorization Server as well as a Resource Server.
+         *
+         * <p><b>Security:</b> the signing key then sits inside the MCP RCE surface. protean deliberately provides
+         * no sandbox, so a module deployed with {@code mcp.write} can read the key and mint {@code mcp.admin}.
+         * Dev/standalone only. See README §Security.
+         */
+        @DefaultValue("false") boolean enabled,
+
+        /** Where users come from. {@code memory} = accounts declared below; {@code jdbc} = standard users/authorities tables. */
+        @DefaultValue("memory") Store store,
+
+        /**
+         * Signing key file. Persisted so tokens survive a restart (a fresh key invalidates every issued token).
+         * <b>Contains the private key</b> — gitignored, and never baked into an image.
+         */
+        @DefaultValue("data/amoeba-auth-jwks.json") String jwksPath,
+
+        /** Public client for MCP clients (Claude Code, mcp-remote): authorization_code + PKCE, no secret. */
+        @DefaultValue("nz-mcp-agent") String mcpClientId,
+
+        /**
+         * Callback URLs, compared byte-for-byte by Spring Authorization Server — it does not implement RFC 8252
+         * loopback port wildcarding, so the client's callback port has to be pinned to a value listed here.
+         */
+        @DefaultValue("http://127.0.0.1:3334/oauth/callback") List<String> mcpRedirectUris,
+
+        /** Confidential client for scripts/CI (client_credentials). Left unset = not registered. */
+        @DefaultValue("") String serviceClientId,
+        @DefaultValue("") String serviceClientSecret,
+
+        @DefaultValue("1h") Duration accessTokenTtl,
+
+        /** Accounts for {@code store=memory}. Declared here only — there are no accounts hardcoded in Java. */
+        @DefaultValue Map<String, User> users) {
+
+    public enum Store {
+        /** In-memory accounts from {@link #users()}. No database needed. */
+        MEMORY,
+        /** Standard Spring Security {@code users} / {@code authorities} tables via JdbcUserDetailsManager. */
+        JDBC
+    }
+
+    /**
+     * @param password    ★ plaintext, dev only — same standing as a {@code {noop}} client secret. Encoded at boot.
+     * @param authorities Comma/space separated. MUST match the scope names ({@code mcp.read} …) or the
+     *                    token-scope intersection in {@link EmbeddedAuthServerConfig} cannot line up.
+     */
+    public record User(String password, @DefaultValue("") String authorities) {
+    }
+}

@@ -1,0 +1,113 @@
+// The asymmetry is the policy under test: a DECLARED route that is not served blocks the deploy, an UNDECLARED route
+// that is served only warns. Getting that backwards either lets broken modules go live or forces every incidental
+// route into the published contract.
+package {{PKG}}.interfacedef.deploy;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.SpecFixtures;
+import org.htcom.protean.dynamic.DynamicEndpointRegistrar.RouteInfo;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class InterfaceVerifierTest {
+
+    private static final InterfaceSpec SPEC = SpecFixtures.orders();
+
+    private static RouteInfo route(String method, String pattern) {
+        return new RouteInfo(Set.of(method), List.of(pattern));
+    }
+
+    /** A mapping with no method condition answers every method. */
+    private static RouteInfo anyMethod(String pattern) {
+        return new RouteInfo(Set.of(), List.of(pattern));
+    }
+
+    @Test
+    void everythingDeclaredAndNothingElseIsVerified() {
+        InterfaceVerifier.Verification v = InterfaceVerifier.compare(
+                List.of(route("GET", "/orders/{orderId}"), route("POST", "/orders")), SPEC);
+        assertEquals("VERIFIED", v.status());
+        assertTrue(v.matches());
+    }
+
+    @Test
+    void aDeclaredRouteThatIsNotServedBlocks() {
+        InterfaceVerifier.Verification v = InterfaceVerifier.compare(
+                List.of(route("GET", "/orders/{orderId}")), SPEC);
+        assertEquals("MISMATCH", v.status());
+        assertEquals(List.of("POST /orders (operationId createOrder)"), v.missing());
+    }
+
+    /** Right path, wrong method is still a missing route. */
+    @Test
+    void aRouteServedUnderTheWrongMethodIsMissing() {
+        InterfaceVerifier.Verification v = InterfaceVerifier.compare(
+                List.of(route("GET", "/orders/{orderId}"), route("PUT", "/orders")), SPEC);
+        assertEquals(List.of("POST /orders (operationId createOrder)"), v.missing());
+        assertEquals(List.of("PUT /orders"), v.extra());
+    }
+
+    /** Nothing registered at all — the "ACTIVE but 404" case routesOf exists to surface. */
+    @Test
+    void nothingRegisteredReportsEveryDeclaredRoute() {
+        InterfaceVerifier.Verification v = InterfaceVerifier.compare(List.of(), SPEC);
+        assertEquals(2, v.missing().size());
+        assertEquals(List.of(), v.extra());
+    }
+
+    @Test
+    void anUndeclaredRouteOnlyWarns() {
+        InterfaceVerifier.Verification v = InterfaceVerifier.compare(
+                List.of(route("GET", "/orders/{orderId}"), route("POST", "/orders"),
+                        route("GET", "/orders/internal/debug")), SPEC);
+        assertEquals("VERIFIED_WITH_EXTRAS", v.status());
+        assertEquals(List.of(), v.missing());
+        assertEquals(List.of("GET /orders/internal/debug"), v.extra());
+        assertFalse(v.matches());
+    }
+
+    /** An all-methods mapping satisfies the declared method rather than being reported missing. */
+    @Test
+    void anAllMethodsMappingSatisfiesADeclaredRoute() {
+        InterfaceVerifier.Verification v = InterfaceVerifier.compare(
+                List.of(anyMethod("/orders/{orderId}"), route("POST", "/orders")), SPEC);
+        assertEquals(List.of(), v.missing());
+        assertEquals(List.of(), v.extra());
+    }
+
+    /**
+     * An all-methods mapping must be reported once, not once per HTTP method. Expanding it for the extras report
+     * would invent four phantom routes for a path that has one real mapping.
+     */
+    @Test
+    void anUndeclaredAllMethodsMappingIsReportedOnce() {
+        InterfaceVerifier.Verification v = InterfaceVerifier.compare(
+                List.of(route("GET", "/orders/{orderId}"), route("POST", "/orders"), anyMethod("/orders/any")),
+                SPEC);
+        assertEquals(List.of("* /orders/any"), v.extra());
+    }
+
+    /** One mapping can carry several patterns; each is compared separately. */
+    @Test
+    void multiplePatternsOnOneMappingAreAllChecked() {
+        InterfaceVerifier.Verification v = InterfaceVerifier.compare(
+                List.of(new RouteInfo(Set.of("GET"), List.of("/orders/{orderId}", "/orders/alias/{orderId}")),
+                        route("POST", "/orders")), SPEC);
+        assertEquals(List.of(), v.missing());
+        assertEquals(List.of("GET /orders/alias/{orderId}"), v.extra());
+    }
+
+    /** Method case from the live mapping is normalized before comparison. */
+    @Test
+    void methodCaseIsNormalized() {
+        InterfaceVerifier.Verification v = InterfaceVerifier.compare(
+                List.of(route("get", "/orders/{orderId}"), route("post", "/orders")), SPEC);
+        assertEquals("VERIFIED", v.status());
+    }
+}

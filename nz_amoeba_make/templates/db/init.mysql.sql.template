@@ -1,0 +1,10 @@
+-- Seeded into `{{DB}}` on the FIRST boot of a fresh MySQL data volume (mounted at /docker-entrypoint-initdb.d).
+-- Re-apply: `docker compose down -v` (clean boot) or
+--   docker exec -i protean-{{NAME}}-mysql mysql -u{{DB}} -p{{PW}} {{DB}} < init/01-schema.sql
+
+CREATE TABLE IF NOT EXISTS items (
+    id         BIGINT       NOT NULL AUTO_INCREMENT,
+    name       VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id)
+);

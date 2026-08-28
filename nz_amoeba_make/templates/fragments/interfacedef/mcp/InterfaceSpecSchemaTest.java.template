@@ -1,0 +1,228 @@
+// Validates the L1 schema with the SAME validator the server uses — networknt, draft 2020-12, the version
+// NetworkntSchemaValidator pins. A schema that only looks right is worthless: $ref recursion either resolves in
+// that engine or the whole layer silently accepts everything.
+package {{PKG}}.interfacedef.mcp;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion;
+import com.networknt.schema.ValidationMessage;
+
+import {{PKG}}.interfacedef.DraftStore;
+import org.junit.jupiter.api.Test;
+
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class InterfaceSpecSchemaTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectNode schema = new DefineInterfaceTool(mapper, new DraftStore(), true).inputSchema();
+
+    private Set<ValidationMessage> validate(String json) {
+        try {
+            JsonNode instance = mapper.readTree(json);
+            return JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012)
+                    .getSchema(schema).validate(instance);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private void accepts(String json) {
+        Set<ValidationMessage> messages = validate(json);
+        assertTrue(messages.isEmpty(), () -> "expected the schema to accept this, but got " + messages);
+    }
+
+    /**
+     * Asserts a violation was reported AT the given instance location.
+     *
+     * <p>Deliberately not asserting on message text: networknt localizes its messages to the JVM default locale, so
+     * on this host they come back in Korean. The instance location is the stable part — and the same fact is worth
+     * knowing in production, since an agent calling the tool sees whatever locale the server runs under.
+     */
+    private void rejectsAt(String json, String instanceLocation) {
+        Set<ValidationMessage> messages = validate(json);
+        assertTrue(messages.stream()
+                        .anyMatch(msg -> msg.getInstanceLocation().toString().equals(instanceLocation)),
+                () -> "expected a violation at '" + instanceLocation + "' but got locations "
+                        + messages.stream().map(m -> m.getInstanceLocation().toString()).toList());
+    }
+
+    /** A body field tree three levels deep, which only validates if $ref recursion resolves. */
+    private static String nested(String body) {
+        return """
+                {
+                  "moduleId": "orders",
+                  "version": "1.0.0",
+                  "packageName": "module.orders",
+                  "interface": {
+                    "description": "주문을 생성한다",
+                    "dataAccess": "mybatis",
+                    "operations": [{
+                      "operationId": "createOrder",
+                      "method": "POST",
+                      "path": "/orders",
+                      "summary": "주문 생성",
+                      "description": "주문 한 건을 만든다",
+                      "requestBody": %s,
+                      "responses": [
+                        {"status": 201, "description": "생성 성공"}
+                      ]
+                    }]
+                  }
+                }
+                """.formatted(body);
+    }
+
+    @Test
+    void acceptsAMinimalValidInput() {
+        accepts(nested("""
+                [{"name": "customerId", "type": "integer", "required": true, "description": "고객 번호"}]"""));
+    }
+
+    /**
+     * The recursion check. FieldSpec refers to itself through both `children` and `items`, and $ref points at the
+     * tool input's root $defs — if that pointer does not resolve, every nested field would be unchecked.
+     */
+    @Test
+    void resolvesRecursiveFieldReferencesThroughChildrenAndItems() {
+        accepts(nested("""
+                [{
+                  "name": "outer", "type": "object", "required": true, "description": "겉 객체",
+                  "children": [{
+                    "name": "items", "type": "array", "required": true, "description": "상품 목록",
+                    "items": {
+                      "name": "item", "type": "object", "required": true, "description": "상품 한 건",
+                      "children": [
+                        {"name": "sku", "type": "string", "required": true, "description": "상품 코드"}
+                      ]
+                    }
+                  }]
+                }]"""));
+    }
+
+    /** A bad type deep inside the recursion must still be caught, not just at the top level. */
+    @Test
+    void rejectsABadTypeInsideANestedField() {
+        rejectsAt(nested("""
+                [{
+                  "name": "outer", "type": "object", "required": true, "description": "겉 객체",
+                  "children": [
+                    {"name": "sku", "type": "str", "required": true, "description": "상품 코드"}
+                  ]
+                }]"""), "$.interface.operations[0].requestBody[0].children[0].type");
+    }
+
+    @Test
+    void rejectsAMisspelledPropertyName() {
+        // additionalProperties:false is what turns a silently-dropped description into an error.
+        rejectsAt(nested("""
+                [{"name": "sku", "type": "string", "required": true, "descripton": "상품 코드"}]"""),
+                "$.interface.operations[0].requestBody[0]");
+    }
+
+    @Test
+    void rejectsAFieldWithNoDescription() {
+        rejectsAt(nested("""
+                [{"name": "sku", "type": "string", "required": true}]"""), "$.interface.operations[0].requestBody[0]");
+    }
+
+    @Test
+    void rejectsABlankDescription() {
+        rejectsAt(nested("""
+                [{"name": "sku", "type": "string", "required": true, "description": ""}]"""), "$.interface.operations[0].requestBody[0].description");
+    }
+
+    @Test
+    void rejectsAnUnknownHttpMethod() {
+        rejectsAt("""
+                {
+                  "moduleId": "orders", "version": "1", "packageName": "module.orders",
+                  "interface": {
+                    "description": "설명 문장",
+                    "operations": [{
+                      "operationId": "op", "method": "FETCH", "path": "/x",
+                      "summary": "요약", "description": "설명 문장",
+                      "responses": [{"status": 200, "description": "성공"}]
+                    }]
+                  }
+                }
+                """, "$.interface.operations[0].method");
+    }
+
+    @Test
+    void rejectsAnOperationIdThatIsNotAJavaIdentifier() {
+        rejectsAt("""
+                {
+                  "moduleId": "orders", "version": "1", "packageName": "module.orders",
+                  "interface": {
+                    "description": "설명 문장",
+                    "operations": [{
+                      "operationId": "get-order", "method": "GET", "path": "/x",
+                      "summary": "요약", "description": "설명 문장",
+                      "responses": [{"status": 200, "description": "성공"}]
+                    }]
+                  }
+                }
+                """, "$.interface.operations[0].operationId");
+    }
+
+    @Test
+    void rejectsAnEmptyOperationList() {
+        rejectsAt("""
+                {
+                  "moduleId": "orders", "version": "1", "packageName": "module.orders",
+                  "interface": {"description": "설명 문장", "operations": []}
+                }
+                """, "$.interface.operations");
+    }
+
+    @Test
+    void rejectsABadModuleIdAndBadPackageName() {
+        rejectsAt("""
+                {
+                  "moduleId": "Orders", "version": "1", "packageName": "module.orders",
+                  "interface": {
+                    "description": "설명 문장",
+                    "operations": [{
+                      "operationId": "op", "method": "GET", "path": "/x",
+                      "summary": "요약", "description": "설명 문장",
+                      "responses": [{"status": 200, "description": "성공"}]
+                    }]
+                  }
+                }
+                """, "$.moduleId");
+        rejectsAt("""
+                {
+                  "moduleId": "orders", "version": "1", "packageName": "Module.Orders",
+                  "interface": {
+                    "description": "설명 문장",
+                    "operations": [{
+                      "operationId": "op", "method": "GET", "path": "/x",
+                      "summary": "요약", "description": "설명 문장",
+                      "responses": [{"status": 200, "description": "성공"}]
+                    }]
+                  }
+                }
+                """, "$.packageName");
+    }
+
+    /** The enum values in the schema must be the wire spellings, or a valid spec would be rejected. */
+    @Test
+    void enumValuesAreTheWireSpellings() {
+        JsonNode fieldType = schema.at("/$defs/field/properties/type/enum");
+        assertEquals("[\"string\",\"integer\",\"number\",\"boolean\",\"object\",\"array\"]",
+                fieldType.toString());
+        assertEquals("[\"GET\",\"POST\",\"PUT\",\"PATCH\",\"DELETE\"]",
+                schema.at("/$defs/operation/properties/method/enum").toString());
+        assertEquals("[\"path\",\"query\",\"header\"]",
+                schema.at("/$defs/param/properties/in/enum").toString());
+        assertEquals("[\"none\",\"mybatis\"]",
+                schema.at("/$defs/interfaceSpec/properties/dataAccess/enum").toString());
+    }
+}

@@ -1,0 +1,456 @@
+// [INTERFACE DEFINITION] Semantic validation of an InterfaceSpec — the layer that makes "name / attributes /
+// description" actually enforced rather than merely requested.
+//
+// Division of labour with the other layers:
+//   L1 (protean.mcp.strict-schema + networknt) rejects the WRONG SHAPE — a misspelled type, a missing required
+//      property, a string where an object belongs. It cannot see across fields.
+//   THIS class rejects the wrong MEANING — a path variable with no matching parameter, a description that is just
+//      the field name again, a name that is not a legal Java identifier, two operations on the same route.
+//   L3 (CodeRule at promotion gate 2) rejects the wrong BYTECODE, on every deploy path including admin REST.
+//
+// Why descriptions get a quality check and not just a presence check: presence is trivially satisfied by "/** DTO */"
+// and the whole point of the spec is to be the source of the interface document. A placeholder that passes review is
+// worse than a rejection, because it ships as documentation.
+//
+// Returns a list of violation messages rather than throwing per-problem, matching org.htcom.protean.gate.rules.CodeRule
+// so a caller reports every problem in one round trip instead of one per retry.
+package {{PKG}}.interfacedef;
+
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/** Static validator. Stateless and side-effect free, so every input path can share one call. */
+public final class InterfaceSpecValidator {
+
+    /** Generated identifiers must be legal Java, so the name rule is stricter than JSON's. */
+    private static final Pattern NAME = Pattern.compile("^[a-zA-Z][a-zA-Z0-9_]{0,63}$");
+
+    /**
+     * Query and header names may additionally contain {@code -}, because real HTTP spellings do
+     * ({@code X-Request-Id}, {@code page-size}) and Spring binds them by name via
+     * {@code @RequestParam(name = ...)} / {@code @RequestHeader(name = ...)} rather than by identifier. The
+     * generator derives the Java variable name by camel-casing, so the wire name never has to be a legal
+     * identifier. Path variables stay on {@link #NAME}: they must match the {@code {var}} token in the path.
+     */
+    private static final Pattern PARAM_NAME = Pattern.compile("^[a-zA-Z][a-zA-Z0-9_-]{0,63}$");
+
+    /** A path segment variable: {@code {id}}. Nested braces and empty names are rejected by the name rule. */
+    private static final Pattern PATH_VAR = Pattern.compile("\\{([^{}]*)}");
+
+    /** Deployed module routes live at the root; the control plane is protean's and must not be shadowed. */
+    private static final String RESERVED_PATH_PREFIX = "/platform";
+
+    /**
+     * Bound on the request/response field tree. Not a JSON limit — a guard on the generator, which emits one nested
+     * record per OBJECT level, and on the document, which becomes unreadable well before this.
+     */
+    private static final int MAX_FIELD_DEPTH = 8;
+
+    private static final int MIN_DESCRIPTION_LENGTH = 2;
+
+    /**
+     * Placeholder markers, already in {@link #normalize} form (lowercase, letters and digits only) so they are
+     * compared without re-normalizing.
+     *
+     * <p>Split by match mode on purpose. Short markers must match the WHOLE description: {@code "n/a"} normalizes
+     * to {@code "na"}, and as a substring that would reject "financial account number". Long markers are safe as
+     * substrings because they do not occur inside real words.
+     */
+    private static final List<String> PLACEHOLDER_EXACT =
+            List.of("na", "tbd", "xxx", "none", "없음", "미정", "설명", "desc", "description");
+
+    private static final List<String> PLACEHOLDER_CONTAINS = List.of("todo", "fixme");
+
+    /**
+     * Reserved words that would not compile as an identifier. {@code var}/{@code record}/{@code yield} are
+     * contextual and legal as names, so they are deliberately absent.
+     */
+    private static final Set<String> JAVA_RESERVED = Set.of(
+            "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
+            "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
+            "for", "goto", "if", "implements", "import", "instanceof", "int", "interface", "long", "native",
+            "new", "package", "private", "protected", "public", "return", "short", "static", "strictfp",
+            "super", "switch", "synchronized", "this", "throw", "throws", "transient", "try", "void",
+            "volatile", "while", "true", "false", "null", "_");
+
+    private InterfaceSpecValidator() {
+    }
+
+    /**
+     * Validates the whole spec.
+     *
+     * @return every violation found, most-structural first; empty means valid
+     */
+    public static List<String> validate(InterfaceSpec spec) {
+        List<String> violations = new ArrayList<>();
+        if (spec == null) {
+            violations.add("interface: spec is required");
+            return violations;
+        }
+
+        checkDescription(violations, "interface.description", spec.description(), spec.title());
+
+        if (spec.operations().isEmpty()) {
+            violations.add("interface.operations: at least one operation is required");
+            return violations;
+        }
+
+        Set<String> operationIds = new HashSet<>();
+        Set<String> routes = new HashSet<>();
+        for (int i = 0; i < spec.operations().size(); i++) {
+            OperationSpec op = spec.operations().get(i);
+            String at = "operations[" + i + "]";
+            if (op == null) {
+                violations.add(at + ": operation is required");
+                continue;
+            }
+            checkOperation(violations, at, op);
+            if (op.operationId() != null && !operationIds.add(op.operationId())) {
+                violations.add(at + ".operationId: duplicate '" + op.operationId()
+                        + "' (it names the generated DTOs and the document anchor, so it must be unique)");
+            }
+            // Two operations on the same method+path cannot both be routed, and Spring fails the whole child
+            // context on the ambiguity rather than the offending handler — so catch it here.
+            if (op.method() != null && op.path() != null && !routes.add(op.method() + " " + op.path())) {
+                violations.add(at + ": duplicate route '" + op.method() + " " + op.path() + "'");
+            }
+        }
+        return violations;
+    }
+
+    /** Convenience wrapper for call sites that want a single failure. Message lists every violation. */
+    public static void validateOrThrow(InterfaceSpec spec) {
+        List<String> violations = validate(spec);
+        if (!violations.isEmpty()) {
+            throw new IllegalArgumentException("interface spec is invalid:\n  - "
+                    + String.join("\n  - ", violations));
+        }
+    }
+
+    private static void checkOperation(List<String> violations, String at, OperationSpec op) {
+        checkIdentifier(violations, at + ".operationId", op.operationId());
+        checkDescription(violations, at + ".summary", op.summary(), op.operationId());
+        checkDescription(violations, at + ".description", op.description(), op.operationId());
+
+        if (op.method() == null) {
+            violations.add(at + ".method: required");
+        }
+        Set<String> pathVars = checkPath(violations, at + ".path", op.path());
+        checkParameters(violations, at, op, pathVars);
+        checkRequestBody(violations, at, op);
+        checkResponses(violations, at, op);
+    }
+
+    /**
+     * Validates the path and returns the {@code {var}} names it declares.
+     *
+     * <p>Returns the declared set even when individual problems were reported, so the parameter cross-check still
+     * runs and the caller sees both halves of a mismatch in one pass.
+     */
+    private static Set<String> checkPath(List<String> violations, String at, String path) {
+        Set<String> vars = new HashSet<>();
+        if (path == null || path.isBlank()) {
+            violations.add(at + ": required");
+            return vars;
+        }
+        if (!path.startsWith("/")) {
+            violations.add(at + ": must start with '/' (was '" + path + "')");
+        }
+        if (path.contains("//")) {
+            violations.add(at + ": must not contain an empty segment '//' (was '" + path + "')");
+        }
+        if (path.length() > 1 && path.endsWith("/")) {
+            violations.add(at + ": must not end with '/' (was '" + path + "')");
+        }
+        // Deployed modules register at the root alongside protean's control plane. A module claiming /platform/**
+        // would shadow the admin REST and MCP surfaces that gate deployment in the first place.
+        if (path.equals(RESERVED_PATH_PREFIX) || path.startsWith(RESERVED_PATH_PREFIX + "/")) {
+            violations.add(at + ": '" + RESERVED_PATH_PREFIX + "' is reserved for the protean control plane");
+        }
+        int matched = 0;
+        Matcher m = PATH_VAR.matcher(path);
+        while (m.find()) {
+            matched++;
+            String var = m.group(1);
+            if (!NAME.matcher(var).matches()) {
+                violations.add(at + ": path variable '{" + var + "}' is not a valid name");
+            } else if (!vars.add(var)) {
+                violations.add(at + ": duplicate path variable '{" + var + "}'");
+            }
+        }
+        // Every brace must belong to a matched variable. Comparing against the MATCH count (not the unique-name
+        // count) keeps a legitimately-reported duplicate from also being reported as malformed braces.
+        long open = path.chars().filter(c -> c == '{').count();
+        long close = path.chars().filter(c -> c == '}').count();
+        if (open != matched || close != matched) {
+            violations.add(at + ": malformed path variable braces (was '" + path + "')");
+        }
+        return vars;
+    }
+
+    private static void checkParameters(List<String> violations, String at, OperationSpec op, Set<String> pathVars) {
+        Set<String> seen = new HashSet<>();
+        Set<String> declaredPathParams = new HashSet<>();
+
+        for (int i = 0; i < op.parameters().size(); i++) {
+            ParamSpec p = op.parameters().get(i);
+            String pAt = at + ".parameters[" + i + "]";
+            if (p == null) {
+                violations.add(pAt + ": parameter is required");
+                continue;
+            }
+            // A path parameter must match the {var} token, so it is held to the identifier rule; query and header
+            // names are bound by string and may carry the hyphenated HTTP spelling.
+            if (p.in() == ParamIn.PATH) {
+                checkIdentifier(violations, pAt + ".name", p.name());
+            } else {
+                checkWireName(violations, pAt + ".name", p.name());
+            }
+            checkDescription(violations, pAt + ".description", p.description(), p.name());
+
+            if (p.in() == null) {
+                violations.add(pAt + ".in: required");
+            }
+            if (p.type() == null) {
+                violations.add(pAt + ".type: required");
+            } else if (p.type().isComposite() && p.in() != ParamIn.QUERY) {
+                // Spring can bind a repeated query parameter to List<T>, but a path or header segment is one string.
+                violations.add(pAt + ".type: '" + p.type().wire() + "' is only valid for in=query");
+            }
+            if (p.in() != null && p.name() != null && !seen.add(p.in() + ":" + p.name())) {
+                violations.add(pAt + ": duplicate " + p.in().wire() + " parameter '" + p.name() + "'");
+            }
+            if (p.in() == ParamIn.PATH && p.name() != null) {
+                declaredPathParams.add(p.name());
+                if (!p.required()) {
+                    violations.add(pAt + ".required: a path parameter is always required");
+                }
+                // The generated gate-3 probe substitutes this example into the path. Without it the operation
+                // silently drops out of probe coverage, which is the cheapest enforcement available.
+                if (p.example() == null || p.example().isBlank()) {
+                    violations.add(pAt + ".example: required for a path parameter "
+                            + "(it is substituted into the generated verification probe path)");
+                }
+            }
+        }
+
+        for (String var : pathVars) {
+            if (!declaredPathParams.contains(var)) {
+                violations.add(at + ".parameters: path declares '{" + var
+                        + "}' but no parameter with in=path and that name exists");
+            }
+        }
+        for (String declared : declaredPathParams) {
+            if (!pathVars.contains(declared)) {
+                violations.add(at + ".parameters: in=path parameter '" + declared
+                        + "' does not appear in path '" + op.path() + "'");
+            }
+        }
+    }
+
+    private static void checkRequestBody(List<String> violations, String at, OperationSpec op) {
+        if (op.requestBody().isEmpty()) {
+            return;
+        }
+        if (op.method() != null && !op.method().allowsRequestBody()) {
+            violations.add(at + ".requestBody: " + op.method() + " must not declare a request body");
+        }
+        checkFields(violations, at + ".requestBody", op.requestBody(), 1);
+    }
+
+    private static void checkResponses(List<String> violations, String at, OperationSpec op) {
+        if (op.responses().isEmpty()) {
+            violations.add(at + ".responses: at least one response is required");
+            return;
+        }
+        Set<Integer> statuses = new HashSet<>();
+        for (int i = 0; i < op.responses().size(); i++) {
+            ResponseSpec r = op.responses().get(i);
+            String rAt = at + ".responses[" + i + "]";
+            if (r == null) {
+                violations.add(rAt + ": response is required");
+                continue;
+            }
+            if (r.status() < 100 || r.status() > 599) {
+                violations.add(rAt + ".status: '" + r.status() + "' is not an HTTP status code");
+            } else if (!statuses.add(r.status())) {
+                violations.add(rAt + ".status: duplicate '" + r.status() + "'");
+            }
+            checkDescription(violations, rAt + ".description", r.description(), String.valueOf(r.status()));
+            checkFields(violations, rAt + ".body", r.body(), 1);
+        }
+        if (op.successResponse().isEmpty()) {
+            // Without a 2xx there is no expectedStatus to generate a probe against, and the document cannot say
+            // what a successful call returns.
+            violations.add(at + ".responses: at least one 2xx response is required");
+        }
+    }
+
+    /** Validates one sibling level of the field tree and recurses. {@code depth} starts at 1. */
+    private static void checkFields(List<String> violations, String at, List<FieldSpec> fields, int depth) {
+        if (fields.isEmpty()) {
+            return;
+        }
+        if (depth > MAX_FIELD_DEPTH) {
+            violations.add(at + ": nesting exceeds the maximum depth of " + MAX_FIELD_DEPTH);
+            return;
+        }
+        Set<String> seen = new HashSet<>();
+        for (int i = 0; i < fields.size(); i++) {
+            FieldSpec f = fields.get(i);
+            String fAt = at + "[" + i + "]";
+            if (f == null) {
+                violations.add(fAt + ": field is required");
+                continue;
+            }
+            checkIdentifier(violations, fAt + ".name", f.name());
+            if (f.name() != null && !seen.add(f.name())) {
+                violations.add(fAt + ".name: duplicate sibling field '" + f.name() + "'");
+            }
+            checkField(violations, fAt, f, depth);
+        }
+    }
+
+    /** Validates one field's own attributes and its nested shape. Shared by sibling lists and array items. */
+    private static void checkField(List<String> violations, String at, FieldSpec f, int depth) {
+        checkDescription(violations, at + ".description", f.description(), f.name());
+
+        if (f.type() == null) {
+            violations.add(at + ".type: required");
+            return;
+        }
+        switch (f.type()) {
+            case OBJECT -> {
+                if (f.children().isEmpty()) {
+                    violations.add(at + ".children: required for type 'object'");
+                }
+                if (f.items() != null) {
+                    violations.add(at + ".items: only valid for type 'array'");
+                }
+                checkFields(violations, at + ".children", f.children(), depth + 1);
+            }
+            case ARRAY -> {
+                if (!f.children().isEmpty()) {
+                    violations.add(at + ".children: use 'items' to describe an array element, not 'children'");
+                }
+                if (f.items() == null) {
+                    violations.add(at + ".items: required for type 'array'");
+                } else if (depth + 1 > MAX_FIELD_DEPTH) {
+                    violations.add(at + ".items: nesting exceeds the maximum depth of " + MAX_FIELD_DEPTH);
+                } else {
+                    // An object element's name becomes the nested record's TYPE name (List<Item>), so it has to be
+                    // a legal identifier. A scalar element needs no name at all — its type is the whole story.
+                    if (f.items().type() == FieldType.OBJECT) {
+                        checkIdentifier(violations, at + ".items.name", f.items().name());
+                    }
+                    checkField(violations, at + ".items", f.items(), depth + 1);
+                }
+            }
+            default -> {
+                if (!f.children().isEmpty()) {
+                    violations.add(at + ".children: only valid for type 'object' (type is '"
+                            + f.type().wire() + "')");
+                }
+                if (f.items() != null) {
+                    violations.add(at + ".items: only valid for type 'array' (type is '"
+                            + f.type().wire() + "')");
+                }
+            }
+        }
+    }
+
+    /**
+     * A query/header name: an HTTP token that the generator camel-cases into a Java variable. Still bounded and
+     * still checked against reserved words, because the derived variable name has to compile.
+     */
+    private static void checkWireName(List<String> violations, String at, String name) {
+        if (name == null || name.isBlank()) {
+            violations.add(at + ": required");
+            return;
+        }
+        if (!PARAM_NAME.matcher(name).matches()) {
+            violations.add(at + ": '" + name + "' must match " + PARAM_NAME.pattern());
+            return;
+        }
+        String identifier = name.replace("-", "");
+        if (JAVA_RESERVED.contains(identifier)) {
+            violations.add(at + ": '" + name + "' becomes the Java reserved word '" + identifier + "'");
+        }
+    }
+
+    private static void checkIdentifier(List<String> violations, String at, String name) {
+        if (name == null || name.isBlank()) {
+            violations.add(at + ": required");
+            return;
+        }
+        if (!NAME.matcher(name).matches()) {
+            violations.add(at + ": '" + name + "' must match " + NAME.pattern()
+                    + " (it becomes a Java identifier)");
+            return;
+        }
+        if (JAVA_RESERVED.contains(name)) {
+            violations.add(at + ": '" + name + "' is a Java reserved word and cannot be generated as an identifier");
+        }
+    }
+
+    /**
+     * Rejects descriptions that are absent or are placeholders.
+     *
+     * @param subject the name this description is attached to — a description that merely repeats it carries no
+     *                information, which is the most common way a "has a description" check gets gamed
+     */
+    private static void checkDescription(List<String> violations, String at, String description, String subject) {
+        if (description == null || description.isBlank()) {
+            violations.add(at + ": required (it is the source of the interface document)");
+            return;
+        }
+        String trimmed = description.trim();
+        if (trimmed.length() < MIN_DESCRIPTION_LENGTH) {
+            violations.add(at + ": too short to be a description ('" + trimmed + "')");
+            return;
+        }
+        String normalized = normalize(trimmed);
+        if (normalized.isEmpty()) {
+            violations.add(at + ": must contain letters or digits, not only punctuation ('" + trimmed + "')");
+            return;
+        }
+        if (PLACEHOLDER_EXACT.contains(normalized)
+                || PLACEHOLDER_CONTAINS.stream().anyMatch(normalized::contains)) {
+            violations.add(at + ": looks like a placeholder ('" + trimmed + "')");
+            return;
+        }
+        if (subject != null && !subject.isBlank() && normalized.equals(normalize(subject))) {
+            violations.add(at + ": only repeats '" + subject + "' — describe what it means");
+            return;
+        }
+        for (FieldType type : FieldType.values()) {
+            if (normalized.equals(type.wire())) {
+                violations.add(at + ": only names the type ('" + trimmed + "')");
+                return;
+            }
+        }
+    }
+
+    /** Lowercases and strips everything that is not a letter or digit, so spacing and case cannot dodge a check. */
+    private static String normalize(String value) {
+        StringBuilder out = new StringBuilder(value.length());
+        value.codePoints().forEach(c -> {
+            if (Character.isLetterOrDigit(c)) {
+                out.appendCodePoint(c);
+            }
+        });
+        return out.toString().toLowerCase(Locale.ROOT);
+    }
+}

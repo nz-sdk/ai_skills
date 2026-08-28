@@ -1,0 +1,320 @@
+// [CAPABILITY: custom MCP tool] amoeba.search_module_source — grep across deployed module sources.
+//
+// Without this, finding "which module declares that controller" means pulling every module's full source and
+// reading it. Here the server does the matching and returns only matching lines, so the cost of the question is
+// proportional to the answer rather than to the corpus.
+//
+// Binary resources are excluded from the scan: their stored form is Base64, so a regex over that text matches
+// nothing meaningful and would only produce noise.
+package {{PKG}}.source;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.source.ModuleSourceLayout.Kind;
+import {{PKG}}.source.ModuleSourceLayout.Layout;
+import {{PKG}}.source.ModuleSourceLayout.SourceFile;
+
+import org.htcom.protean.error.ErrorCode;
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolAnnotations;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
+
+@Component
+public class SearchModuleSourceTool implements McpTool {
+
+    private static final int DEFAULT_LIMIT = 200;
+    private static final int MAX_LIMIT = 1000;
+    private static final int DEFAULT_MATCHES_PER_FILE = 20;
+    private static final int MAX_MATCHES_PER_FILE = 200;
+
+    /** A minified XML or generated file can hold one enormous line; a match must not drag it all along. */
+    private static final int MAX_LINE_LENGTH = 500;
+
+    private final ObjectMapper mapper;
+    private final ModuleSourceResolver resolver;
+
+    public SearchModuleSourceTool(ObjectMapper mapper, ModuleSourceResolver resolver) {
+        this.mapper = mapper;
+        this.resolver = resolver;
+    }
+
+    @Override
+    public String name() {
+        return "amoeba.search_module_source";
+    }
+
+    @Override
+    public String title() {
+        return "Search Module Source";
+    }
+
+    @Override
+    public String description() {
+        return "Searches deployed module sources with a regular expression and returns matching lines with their "
+                + "file path and line number. Scans one module when moduleId is given, otherwise every active "
+                + "module. Covers Java sources, tests and text resources such as mapper XML.";
+    }
+
+    @Override
+    public ModuleActionAuthorizer.ModuleAction action() {
+        return ModuleActionAuthorizer.ModuleAction.READ;
+    }
+
+    @Override
+    public String targetModuleId(JsonNode arguments) {
+        return arguments != null && arguments.hasNonNull("moduleId") ? arguments.get("moduleId").asText() : null;
+    }
+
+    @Override
+    public McpToolAnnotations annotations() {
+        return McpToolAnnotations.readOnly();
+    }
+
+    @Override
+    public ObjectNode inputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        schema.put("additionalProperties", false);
+        ObjectNode p = schema.putObject("properties");
+        p.putObject("pattern").put("type", "string").put("minLength", 1)
+                .put("description", "Java regular expression matched against each line.");
+        SourceToolSchemas.putModuleId(p, "Optional. Restricts the search to one module; every active module is "
+                + "scanned when omitted.");
+        SourceToolSchemas.putVersion(p);
+        SourceToolSchemas.putInclude(p);
+        p.putObject("ignoreCase").put("type", "boolean")
+                .put("description", "Case-insensitive matching. Defaults to false.");
+        p.putObject("maxMatchesPerFile").put("type", "integer")
+                .put("description", "Cap per file (default " + DEFAULT_MATCHES_PER_FILE + ", max "
+                        + MAX_MATCHES_PER_FILE + "), so one dense file cannot fill the response.");
+        p.putObject("limit").put("type", "integer")
+                .put("description", "Cap on total matches (default " + DEFAULT_LIMIT + ", max " + MAX_LIMIT
+                        + ", 0 = all).");
+        schema.putArray("required").add("pattern");
+        return schema;
+    }
+
+    @Override
+    public ObjectNode outputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        ObjectNode p = schema.putObject("properties");
+        ObjectNode matches = p.putObject("matches");
+        matches.put("type", "array");
+        ObjectNode item = matches.putObject("items");
+        item.put("type", "object");
+        ObjectNode ip = item.putObject("properties");
+        ip.putObject("moduleId").put("type", "string");
+        ip.putObject("version").put("type", "string");
+        ip.putObject("path").put("type", "string");
+        ip.putObject("fqcn").put("type", "string");
+        ip.putObject("lineNumber").put("type", "integer").put("description", "1-based.");
+        ip.putObject("line").put("type", "string")
+                .put("description", "The matching line, truncated at " + MAX_LINE_LENGTH + " characters.");
+        item.putArray("required").add("moduleId").add("path").add("lineNumber").add("line");
+
+        p.putObject("matchCount").put("type", "integer");
+        p.putObject("filesScanned").put("type", "integer");
+        p.putObject("modulesScanned").put("type", "integer");
+        p.putObject("truncated").put("type", "boolean")
+                .put("description", "True when a cap stopped the search before it was exhausted.");
+        SourceToolSchemas.putSkipped(p);
+
+        schema.putArray("required").add("matches").add("matchCount").add("filesScanned").add("modulesScanned");
+        return schema;
+    }
+
+    @Override
+    public McpToolResult call(JsonNode arguments, McpCallContext ctx) {
+        JsonNode args = arguments == null ? mapper.missingNode() : arguments;
+
+        String rawPattern = SourceToolSchemas.text(args, "pattern");
+        if (rawPattern == null) {
+            return McpToolResult.error("pattern is required");
+        }
+        boolean ignoreCase = args.path("ignoreCase").asBoolean(false);
+        Pattern pattern;
+        try {
+            pattern = Pattern.compile(rawPattern, ignoreCase ? Pattern.CASE_INSENSITIVE : 0);
+        } catch (PatternSyntaxException e) {
+            // A caller-supplied regex failing to compile is an ordinary outcome, not a server fault — it comes
+            // back as a tool error so the caller can correct it.
+            return McpToolResult.error(ErrorCode.INVALID_ARGUMENT,
+                            "invalid regular expression: " + e.getMessage())
+                    .with("pattern", rawPattern);
+        }
+
+        String moduleId = SourceToolSchemas.text(args, "moduleId");
+        String version = SourceToolSchemas.text(args, "version");
+        if (moduleId == null && version != null) {
+            return McpToolResult.error("version requires moduleId — a version only identifies a file set within "
+                    + "one module's history");
+        }
+        Set<Kind> include = SourceToolSchemas.parseInclude(args);
+        int limit = SourceToolSchemas.clampLimit(args.path("limit"), DEFAULT_LIMIT, MAX_LIMIT);
+        int perFile = SourceToolSchemas.clampLimit(
+                args.path("maxMatchesPerFile"), DEFAULT_MATCHES_PER_FILE, MAX_MATCHES_PER_FILE);
+
+        List<ModuleDescriptor> targets;
+        if (moduleId != null) {
+            Optional<ModuleDescriptor> found = resolver.find(moduleId, version);
+            if (found.isEmpty()) {
+                return resolver.notFound(moduleId, version);
+            }
+            targets = List.of(found.get());
+        } else {
+            targets = resolver.listActive().stream()
+                    .sorted(Comparator.comparing(ModuleDescriptor::id))
+                    .toList();
+        }
+
+        Search search = new Search(pattern, include, limit, perFile);
+        for (ModuleDescriptor descriptor : targets) {
+            if (search.full()) {
+                break;
+            }
+            search.scan(descriptor);
+        }
+
+        ObjectNode out = mapper.createObjectNode();
+        ArrayNode matches = out.putArray("matches");
+        for (Match match : search.matches) {
+            ObjectNode node = matches.addObject();
+            node.put("moduleId", match.moduleId);
+            node.put("version", match.version);
+            node.put("path", match.path);
+            if (match.fqcn != null) {
+                node.put("fqcn", match.fqcn);
+            }
+            node.put("lineNumber", match.lineNumber);
+            node.put("line", match.line);
+        }
+        out.put("matchCount", search.matches.size());
+        out.put("filesScanned", search.filesScanned);
+        out.put("modulesScanned", targets.size());
+        if (search.truncated) {
+            out.put("truncated", true);
+        }
+        if (!search.skipped.isEmpty()) {
+            ArrayNode skipped = out.putArray("skipped");
+            search.skipped.forEach(skipped::add);
+        }
+
+        return McpToolResult.ok(renderText(rawPattern, search, targets.size()), out);
+    }
+
+    /** Accumulates matches across modules while honouring both caps. */
+    private static final class Search {
+
+        private final Pattern pattern;
+        private final Set<Kind> include;
+        private final int limit;
+        private final int perFile;
+
+        private final List<Match> matches = new ArrayList<>();
+        private final Set<String> skipped = new LinkedHashSet<>();
+        private int filesScanned;
+        private boolean truncated;
+
+        Search(Pattern pattern, Set<Kind> include, int limit, int perFile) {
+            this.pattern = pattern;
+            this.include = include;
+            this.limit = limit;
+            this.perFile = perFile;
+        }
+
+        boolean full() {
+            return matches.size() >= limit;
+        }
+
+        void scan(ModuleDescriptor descriptor) {
+            Layout layout = ModuleSourceLayout.of(descriptor, include);
+            skipped.addAll(layout.skipped());
+            for (SourceFile file : layout.files()) {
+                if (full()) {
+                    truncated = true;
+                    return;
+                }
+                if (file.binary()) {
+                    continue;
+                }
+                filesScanned++;
+                scanFile(descriptor, file);
+            }
+        }
+
+        private void scanFile(ModuleDescriptor descriptor, SourceFile file) {
+            int inFile = 0;
+            int lineNumber = 0;
+            // split with -1 so a trailing blank line still counts, keeping line numbers aligned with an editor.
+            for (String line : file.content().split("\n", -1)) {
+                lineNumber++;
+                if (inFile >= perFile) {
+                    truncated = true;
+                    return;
+                }
+                if (full()) {
+                    truncated = true;
+                    return;
+                }
+                String candidate = line.endsWith("\r") ? line.substring(0, line.length() - 1) : line;
+                if (pattern.matcher(candidate).find()) {
+                    matches.add(new Match(descriptor.id(), descriptor.version(), file.path(), file.fqcn(),
+                            lineNumber, truncate(candidate)));
+                    inFile++;
+                }
+            }
+        }
+
+        private static String truncate(String line) {
+            return line.length() <= MAX_LINE_LENGTH
+                    ? line
+                    : line.substring(0, MAX_LINE_LENGTH) + "…";
+        }
+    }
+
+    private record Match(String moduleId, String version, String path, String fqcn, int lineNumber, String line) {
+    }
+
+    private String renderText(String pattern, Search search, int moduleCount) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(search.matches.size()).append(" match(es) for /").append(pattern).append("/ across ")
+                .append(search.filesScanned).append(" file(s) in ").append(moduleCount).append(" module(s)");
+        if (search.truncated) {
+            sb.append(" — truncated by a cap, narrow the pattern or raise limit/maxMatchesPerFile");
+        }
+        sb.append('\n');
+        String currentFile = null;
+        for (Match match : search.matches) {
+            String header = match.moduleId + " " + match.path;
+            if (!header.equals(currentFile)) {
+                sb.append("\n").append(header).append('\n');
+                currentFile = header;
+            }
+            sb.append("  ").append(match.lineNumber).append(": ").append(match.line).append('\n');
+        }
+        if (!search.skipped.isEmpty()) {
+            sb.append("\nSkipped ").append(search.skipped.size())
+                    .append(" resource(s) whose path escapes the classpath root: ")
+                    .append(String.join(", ", search.skipped)).append('\n');
+        }
+        return sb.toString();
+    }
+}

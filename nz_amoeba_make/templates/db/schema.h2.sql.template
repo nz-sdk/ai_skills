@@ -1,0 +1,9 @@
+-- Written to src/main/resources/schema.sql. Spring Boot auto-runs this against an EMBEDDED datasource (H2) at
+-- startup — no server, no docker. (For mem mode the schema is recreated every boot; for file mode it persists.)
+
+CREATE TABLE IF NOT EXISTS items (
+    id         BIGINT       NOT NULL AUTO_INCREMENT,
+    name       VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id)
+);

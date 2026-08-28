@@ -1,0 +1,102 @@
+// Compiles source to real bytecode in memory, so a bytecode rule is tested against what javac actually emits.
+//
+// This matters more than usual here: the rule depends on a JLS propagation detail — that an annotation written on a
+// record COMPONENT ends up on the backing FIELD, because @Schema targets FIELD but not RECORD_COMPONENT. Asserting
+// that from hand-built ASM would just be asserting my own assumption back at me.
+package {{PKG}}.interfacedef.gate;
+
+import javax.tools.DiagnosticCollector;
+import javax.tools.FileObject;
+import javax.tools.ForwardingJavaFileManager;
+import javax.tools.JavaCompiler;
+import javax.tools.JavaFileManager;
+import javax.tools.JavaFileObject;
+import javax.tools.SimpleJavaFileObject;
+import javax.tools.ToolProvider;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+final class BytecodeCompiler {
+
+    private BytecodeCompiler() {
+    }
+
+    private static final class InMemorySource extends SimpleJavaFileObject {
+        private final String code;
+
+        InMemorySource(String fqcn, String code) {
+            super(URI.create("string:///" + fqcn.replace('.', '/') + Kind.SOURCE.extension), Kind.SOURCE);
+            this.code = code;
+        }
+
+        @Override
+        public CharSequence getCharContent(boolean ignoreEncodingErrors) {
+            return code;
+        }
+    }
+
+    /** Captures emitted class bytes instead of writing them to disk. */
+    private static final class CapturedClass extends SimpleJavaFileObject {
+        private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+
+        CapturedClass(String name) {
+            super(URI.create("mem:///" + name.replace('.', '/') + Kind.CLASS.extension), Kind.CLASS);
+        }
+
+        @Override
+        public OutputStream openOutputStream() {
+            return bytes;
+        }
+    }
+
+    /**
+     * Compiles the given sources.
+     *
+     * @param sources FQCN to source text
+     * @return every emitted class, including nested ones, as FQCN to bytecode
+     * @throws IllegalStateException if the sources do not compile — a broken fixture, not a rule finding
+     */
+    static Map<String, byte[]> compile(Map<String, String> sources) {
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        if (compiler == null) {
+            throw new IllegalStateException("no system Java compiler — tests must run on a JDK");
+        }
+        List<JavaFileObject> units = new ArrayList<>();
+        sources.forEach((fqcn, code) -> units.add(new InMemorySource(fqcn, code)));
+
+        Map<String, CapturedClass> captured = new LinkedHashMap<>();
+        DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+        JavaFileManager standard = compiler.getStandardFileManager(diagnostics, null, StandardCharsets.UTF_8);
+        boolean ok;
+        try (JavaFileManager fileManager = new ForwardingJavaFileManager<>(standard) {
+            @Override
+            public JavaFileObject getJavaFileForOutput(Location location, String className,
+                                                       JavaFileObject.Kind kind, FileObject sibling) {
+                CapturedClass output = new CapturedClass(className);
+                captured.put(className, output);
+                return output;
+            }
+        }) {
+            ok = compiler.getTask(null, fileManager, diagnostics,
+                    List.of("-proc:none", "-classpath", System.getProperty("java.class.path")),
+                    null, units).call();
+        } catch (IOException e) {
+            throw new IllegalStateException("failed to set up the in-memory compiler", e);
+        }
+        if (!ok) {
+            throw new IllegalStateException("test fixture did not compile: " + diagnostics.getDiagnostics());
+        }
+
+        Map<String, byte[]> classes = new LinkedHashMap<>();
+        captured.forEach((name, output) -> classes.put(name, output.bytes.toByteArray()));
+        return classes;
+    }
+}

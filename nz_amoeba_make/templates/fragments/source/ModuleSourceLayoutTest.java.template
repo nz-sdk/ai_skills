@@ -1,0 +1,219 @@
+// Covers the mapping every source tool depends on: a descriptor's three maps become one sorted list of
+// project-layout paths. If this is wrong, list/search/export are all wrong in the same way — and consistently
+// wrong output is the failure mode most likely to be believed.
+package {{PKG}}.source;
+
+import {{PKG}}.source.ModuleSourceLayout.Kind;
+import {{PKG}}.source.ModuleSourceLayout.Layout;
+import {{PKG}}.source.ModuleSourceLayout.SourceFile;
+
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModuleResource;
+import org.junit.jupiter.api.Test;
+
+import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ModuleSourceLayoutTest {
+
+    private static final Set<Kind> ALL = EnumSet.allOf(Kind.class);
+
+    private static Optional<SourceFile> at(Layout layout, String path) {
+        return layout.files().stream().filter(f -> f.path().equals(path)).findFirst();
+    }
+
+    @Test
+    void mapsSourcesTestsAndResourcesOntoProjectPaths() {
+        Layout layout = ModuleSourceLayout.of(SourceFixtures.helloModule(), ALL);
+
+        assertEquals(List.of(
+                        "src/main/java/module/hello/HelloController.java",
+                        "src/main/java/module/hello/HelloService.java",
+                        "src/main/java/module/hello/dto/GetHelloResponse.java",
+                        "src/main/resources/META-INF/protean/interface.json",
+                        "src/main/resources/cert/hello.p12",
+                        "src/main/resources/mapper/hello/HelloMapper.xml",
+                        "src/test/java/module/hello/HelloContractTest.java"),
+                layout.files().stream().map(SourceFile::path).toList());
+    }
+
+    /** Path order is what makes offset paging stable, so it must be the sort and not the map's iteration order. */
+    @Test
+    void sortsByPathRegardlessOfInsertionOrder() {
+        Layout layout = ModuleSourceLayout.of(SourceFixtures.helloModule(), ALL);
+
+        List<String> paths = layout.files().stream().map(SourceFile::path).toList();
+        assertEquals(paths.stream().sorted(Comparator.naturalOrder()).toList(), paths);
+    }
+
+    @Test
+    void carriesFqcnForJavaFilesAndNoneForResources() {
+        Layout layout = ModuleSourceLayout.of(SourceFixtures.helloModule(), ALL);
+
+        SourceFile controller = at(layout, "src/main/java/module/hello/HelloController.java").orElseThrow();
+        assertEquals(SourceFixtures.CONTROLLER_FQCN, controller.fqcn());
+        assertEquals(Kind.SOURCE, controller.kind());
+
+        SourceFile test = at(layout, "src/test/java/module/hello/HelloContractTest.java").orElseThrow();
+        assertEquals(SourceFixtures.TEST_FQCN, test.fqcn());
+        assertEquals(Kind.TEST, test.kind());
+
+        SourceFile mapper = at(layout, "src/main/resources/mapper/hello/HelloMapper.xml").orElseThrow();
+        assertNull(mapper.fqcn());
+        assertEquals(Kind.RESOURCE, mapper.kind());
+    }
+
+    @Test
+    void includeFilterSelectsOnlyRequestedKinds() {
+        ModuleDescriptor descriptor = SourceFixtures.helloModule();
+
+        Layout sourcesOnly = ModuleSourceLayout.of(descriptor, EnumSet.of(Kind.SOURCE));
+        assertTrue(sourcesOnly.files().stream().allMatch(f -> f.kind() == Kind.SOURCE));
+        assertEquals(3, sourcesOnly.files().size());
+
+        Layout resourcesOnly = ModuleSourceLayout.of(descriptor, EnumSet.of(Kind.RESOURCE));
+        assertEquals(3, resourcesOnly.files().size());
+        assertTrue(resourcesOnly.files().stream().allMatch(f -> f.path().startsWith("src/main/resources/")));
+    }
+
+    /**
+     * The binary case: content stays Base64, {@code bytes} reports the DECODED size, and lines is 0. Reporting
+     * the Base64 length would overstate every binary resource by a third.
+     */
+    @Test
+    void reportsBinaryResourceWithDecodedSize() {
+        Layout layout = ModuleSourceLayout.of(SourceFixtures.helloModule(), ALL);
+
+        SourceFile keystore = at(layout, "src/main/resources/cert/hello.p12").orElseThrow();
+        assertTrue(keystore.binary());
+        assertEquals(SourceFixtures.KEYSTORE_BYTES.length, keystore.bytes());
+        assertEquals(0, keystore.lines());
+        assertEquals(ModuleResource.binary(SourceFixtures.KEYSTORE_BYTES).content(), keystore.content());
+    }
+
+    @Test
+    void countsUtf8BytesNotCharacters() {
+        Layout layout = ModuleSourceLayout.of(SourceFixtures.helloModule(), ALL);
+
+        SourceFile controller = at(layout, "src/main/java/module/hello/HelloController.java").orElseThrow();
+        assertEquals(SourceFixtures.utf8Length(SourceFixtures.CONTROLLER_SOURCE), controller.bytes());
+        assertTrue(controller.bytes() > SourceFixtures.CONTROLLER_SOURCE.length(),
+                "the Hangul greeting must make the UTF-8 byte count exceed the character count");
+        assertTrue(controller.content().contains(SourceFixtures.GREETING));
+    }
+
+    /** A trailing newline must not report a phantom final line — an editor showing 5 lines and a tool saying 6 is a bug. */
+    @Test
+    void countsLinesTheWayAnEditorDoes() {
+        Layout layout = ModuleSourceLayout.of(descriptorWith(Map.of(
+                "p.OneLine", "single",
+                "p.TrailingNewline", "a\nb\nc\n",
+                "p.NoTrailingNewline", "a\nb\nc",
+                "p.Empty", "")), EnumSet.of(Kind.SOURCE));
+
+        assertEquals(1, at(layout, "src/main/java/p/OneLine.java").orElseThrow().lines());
+        assertEquals(3, at(layout, "src/main/java/p/TrailingNewline.java").orElseThrow().lines());
+        assertEquals(3, at(layout, "src/main/java/p/NoTrailingNewline.java").orElseThrow().lines());
+        assertEquals(0, at(layout, "src/main/java/p/Empty.java").orElseThrow().lines());
+    }
+
+    @Test
+    void placesDefaultPackageClassAtTheSourceRoot() {
+        Layout layout = ModuleSourceLayout.of(
+                descriptorWith(Map.of("Rootish", "public class Rootish {}")), EnumSet.of(Kind.SOURCE));
+
+        assertEquals("src/main/java/Rootish.java", layout.files().get(0).path());
+    }
+
+    /**
+     * A resource path that escapes the classpath root is dropped and named, not silently omitted — the two call
+     * for different responses from the caller.
+     */
+    @Test
+    void skipsResourcePathsThatEscapeTheRoot() {
+        Map<String, ModuleResource> resources = new LinkedHashMap<>();
+        resources.put("../../etc/passwd", ModuleResource.text("nope"));
+        resources.put("C:/windows/system32/x", ModuleResource.text("nope"));
+        resources.put("mapper/ok.xml", ModuleResource.text("<mapper/>"));
+
+        Layout layout = ModuleSourceLayout.of(
+                ModuleDescriptor.builder().id("x").version("1").resources(resources).build(),
+                EnumSet.of(Kind.RESOURCE));
+
+        assertEquals(List.of("src/main/resources/mapper/ok.xml"),
+                layout.files().stream().map(SourceFile::path).toList());
+        assertEquals(List.of("../../etc/passwd", "C:/windows/system32/x"),
+                layout.skipped().stream().sorted().toList());
+    }
+
+    /** A leading slash is classpath-legal and must normalize rather than duplicate the resource root's slash. */
+    @Test
+    void normalizesLeadingSlashAndBackslashes() {
+        Map<String, ModuleResource> resources = new LinkedHashMap<>();
+        resources.put("/mapper/lead.xml", ModuleResource.text("<a/>"));
+        resources.put("mapper\\win\\back.xml", ModuleResource.text("<b/>"));
+
+        Layout layout = ModuleSourceLayout.of(
+                ModuleDescriptor.builder().id("x").version("1").resources(resources).build(),
+                EnumSet.of(Kind.RESOURCE));
+
+        assertEquals(List.of("src/main/resources/mapper/lead.xml", "src/main/resources/mapper/win/back.xml"),
+                layout.files().stream().map(SourceFile::path).toList());
+        assertTrue(layout.skipped().isEmpty());
+    }
+
+    /** The wrapper-free module shape: no resources is ordinary, not an error. */
+    @Test
+    void handlesModuleWithNoResources() {
+        Layout layout = ModuleSourceLayout.of(SourceFixtures.bareModule("emp"), ALL);
+
+        assertEquals(1, layout.files().size());
+        assertEquals("src/main/java/module/emp/Controller.java", layout.files().get(0).path());
+        assertTrue(layout.skipped().isEmpty());
+    }
+
+    @Test
+    void handlesDescriptorWithEveryMapEmpty() {
+        Layout layout = ModuleSourceLayout.of(ModuleDescriptor.builder().id("x").version("1").build(), ALL);
+
+        assertTrue(layout.files().isEmpty());
+        assertTrue(layout.skipped().isEmpty());
+    }
+
+    @Test
+    void wireNamesMatchDescriptorFieldNames() {
+        assertEquals("sources", Kind.SOURCE.wire());
+        assertEquals("tests", Kind.TEST.wire());
+        assertEquals("resources", Kind.RESOURCE.wire());
+
+        assertEquals(Optional.of(Kind.RESOURCE), Kind.fromWire("resources"));
+        assertEquals(Optional.of(Kind.SOURCE), Kind.fromWire("  SOURCES "));
+        assertFalse(Kind.fromWire("nonsense").isPresent());
+        assertFalse(Kind.fromWire(null).isPresent());
+    }
+
+    /** The returned lists must not be mutable views onto the builder's state. */
+    @Test
+    void returnsImmutableLists() {
+        Layout layout = ModuleSourceLayout.of(SourceFixtures.helloModule(), ALL);
+
+        org.junit.jupiter.api.Assertions.assertThrows(UnsupportedOperationException.class,
+                () -> layout.files().clear());
+        org.junit.jupiter.api.Assertions.assertThrows(UnsupportedOperationException.class,
+                () -> layout.skipped().add("x"));
+    }
+
+    private static ModuleDescriptor descriptorWith(Map<String, String> sources) {
+        return ModuleDescriptor.builder().id("x").version("1").sources(sources).build();
+    }
+}

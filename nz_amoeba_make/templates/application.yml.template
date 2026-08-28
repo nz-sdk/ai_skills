@@ -1,0 +1,48 @@
+# Minimal base. The skill's generation engine INJECTS the selected protean.* keys (from protean-options.yaml)
+# and, for data access, the spring.datasource block (from db-vendors.yaml). Unset keys keep their library
+# default; leave the most relevant ones as commented edit-points. See reference/protean-capabilities.md + guide 03.
+#
+# SECURITY: protean.mcp is an RCE surface (it compiles and hot-loads submitted sources). Enabling it with no auth
+# is a LOCAL demo only; production needs Bearer/OAuth (Spring Security) + a ModuleActionAuthorizer policy.
+server:
+  # ONE port concept. SERVER_PORT drives the bind port here AND the advertised address under
+  # protean.mcp.authorization.resource — splitting them would let discovery hand clients a port nothing listens on.
+  #
+  # The NAME is load-bearing, not just the value: SERVER_PORT is the env var Spring Boot already relaxed-binds to
+  # server.port, and OS environment variables outrank application.yml. Under any other name (MCP_PORT, …) a caller
+  # setting SERVER_PORT would still change the bind port WITHOUT updating the advertised URL, so the two could
+  # drift. Sharing the name collapses both paths onto one variable. setup.sh uses the same name.
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: protean-{{NAME}}-sample
+  # <<datasource>>  — engine injects spring.datasource here when data access is selected (see db-vendors.yaml)
+  #
+  # <<jwt-issuer>>  — engine injects spring.security.oauth2.resourceserver.jwt.issuer-uri here when
+  # protean.mcp.authorization.resource is set (its requires_when). NO DEFAULT on that placeholder on purpose:
+  # unset means the app will not start, because condition evaluation on Boot's jwtDecoderByIssuerUri resolves it
+  # through the Environment and rejects an unresolvable placeholder. Empty/malformed values DO get past Spring,
+  # which is why SecurityConfig's constructor rejects those.
+
+protean:
+  # <<protean-options>>  — engine injects every SET protean.* key here, grouped. Examples of common anchors:
+  isolation:
+    mode: in-process              # in-process | worker | container (data-access/shared-beans need in-process)
+  module-store:
+    dir: ${java.io.tmpdir}/protean-{{NAME}}-sample   # durable store; restored via reconcile on restart
+  # mcp:
+  #   authorization:
+  #     # The identifier MCP clients discover and then CALL, so it must be the EXTERNALLY visible address — hence
+  #     # SERVER_HOST/SERVER_PORT rather than a hardcoded localhost. protean emits the string verbatim (no
+  #     # validation). SERVER_HOST is the advertised hostname, NOT a bind address (that would be server.address);
+  #     # behind a reverse proxy the two diverge and want separate variables.
+  #     #
+  #     # The fallbacks are load-bearing: protean registers the metadata endpoint under
+  #     # @ConditionalOnProperty(name = "protean.mcp.authorization.resource"), so an empty value makes discovery
+  #     # SILENTLY DISAPPEAR rather than fail loudly. Keep a fallback on every placeholder here.
+  #     #
+  #     # LIMITATION: the scheme is fixed to http. Behind TLS termination this advertises http:// and a client that
+  #     # string-compares the resource identifier will reject it — switch to https (or add a SERVER_SCHEME
+  #     # variable) at that point. A standard-port deployment also still gets an explicit :443/:80 in the URL.
+  #     resource: http://${SERVER_HOST:localhost}:${SERVER_PORT:8080}/platform/mcp

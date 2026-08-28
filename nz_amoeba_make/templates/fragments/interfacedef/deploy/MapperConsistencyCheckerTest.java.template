@@ -1,0 +1,171 @@
+// This check exists because a namespace/id mismatch does NOT fail at startup — MapperFactoryBean resolves
+// <namespace>.<methodName> lazily, so the first call to that one method throws in production. Each failure mode gets
+// its own test, since a rule that quietly stops firing puts the failure back where it came from.
+package {{PKG}}.interfacedef.deploy;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class MapperConsistencyCheckerTest {
+
+    private static final String FQCN = "module.orders.OrdersMapper";
+    private static final String XML_PATH = "mapper/orders/OrdersMapper.xml";
+
+    private static final String MAPPER = """
+            package module.orders;
+
+            import io.swagger.v3.oas.annotations.media.Schema;
+            import org.apache.ibatis.annotations.Mapper;
+            import org.apache.ibatis.annotations.Param;
+
+            @Mapper
+            public interface OrdersMapper {
+
+                /** 주문 단건 조회 */
+                @Schema(description = "주문 단건 조회")
+                List<GetOrderRow> getOrder(@Param("orderId") Long orderId);
+
+                @Schema(description = "주문 생성")
+                int createOrder(@Param("request") CreateOrderRequest request);
+            }
+            """;
+
+    private static String xml(String namespace, String body) {
+        return """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <mapper namespace="%s">
+                %s
+                </mapper>
+                """.formatted(namespace, body);
+    }
+
+    private static final String STATEMENTS = """
+                <select id="getOrder" resultMap="getOrderResult">
+                    SELECT * FROM orders WHERE id = #{orderId}
+                </select>
+                <insert id="createOrder">
+                    INSERT INTO orders(customer_id) VALUES (#{request.customerId})
+                </insert>
+            """;
+
+    private static List<String> check(String mapper, String xmlContent) {
+        return MapperConsistencyChecker.check(FQCN, mapper, XML_PATH, xmlContent);
+    }
+
+    private static void rejects(List<String> violations, String fragment) {
+        assertTrue(violations.stream().anyMatch(v -> v.contains(fragment)),
+                () -> "expected a violation containing '" + fragment + "' but got " + violations);
+    }
+
+    @Test
+    void aConsistentPairPasses() {
+        assertEquals(List.of(), check(MAPPER, xml(FQCN, STATEMENTS)));
+    }
+
+    @Test
+    void missingArtifactsAreNamed() {
+        rejects(check(null, xml(FQCN, STATEMENTS)), "Mapper interface module.orders.OrdersMapper was not submitted");
+        rejects(check(MAPPER, null), "mapper XML mapper/orders/OrdersMapper.xml was not submitted");
+    }
+
+    /** The binding contract: namespace must equal the interface FQCN. */
+    @Test
+    void namespaceMismatchIsRejected() {
+        List<String> violations = check(MAPPER, xml("orders", STATEMENTS));
+        rejects(violations, "namespace is \"orders\"");
+        rejects(violations, "fails at first call, not at startup");
+    }
+
+    @Test
+    void missingNamespaceIsRejected() {
+        rejects(check(MAPPER, "<?xml version=\"1.0\"?>\n<mapper>\n</mapper>\n"), "no <mapper namespace");
+    }
+
+    @Test
+    void aMethodWithNoStatementIsRejected() {
+        String onlyOne = """
+                    <select id="getOrder" resultMap="getOrderResult">SELECT 1</select>
+                """;
+        rejects(check(MAPPER, xml(FQCN, onlyOne)),
+                "module.orders.OrdersMapper.createOrder has no matching statement id");
+    }
+
+    @Test
+    void aStatementWithNoMethodIsRejected() {
+        String extra = STATEMENTS + """
+                    <delete id="purgeOrders">DELETE FROM orders</delete>
+                """;
+        rejects(check(MAPPER, xml(FQCN, extra)),
+                "statement \"purgeOrders\" has no matching method");
+    }
+
+    /** The generated skeleton ships every statement empty; submitting it unchanged means the SQL was never written. */
+    @Test
+    void anEmptyStatementBodyIsRejected() {
+        String empty = """
+                    <select id="getOrder" resultMap="getOrderResult">
+                    </select>
+                    <insert id="createOrder">
+                    </insert>
+                """;
+        List<String> violations = check(MAPPER, xml(FQCN, empty));
+        rejects(violations, "statement \"getOrder\" has an empty body");
+        rejects(violations, "statement \"createOrder\" has an empty body");
+    }
+
+    @Test
+    void duplicateStatementIdIsRejected() {
+        String duplicated = STATEMENTS + """
+                    <select id="getOrder">SELECT 2</select>
+                """;
+        rejects(check(MAPPER, xml(FQCN, duplicated)), "duplicate statement id \"getOrder\"");
+    }
+
+    @Test
+    void aMapperWithoutTheAnnotationIsRejected() {
+        rejects(check(MAPPER.replace("@Mapper\n", ""), xml(FQCN, STATEMENTS)), "must be annotated @Mapper");
+    }
+
+    /** A statement inside an XML comment must not count as present. */
+    @Test
+    void commentedOutStatementsDoNotCount() {
+        String commented = """
+                    <select id="getOrder" resultMap="getOrderResult">SELECT 1</select>
+                    <!-- <insert id="createOrder">INSERT INTO orders VALUES (1)</insert> -->
+                """;
+        rejects(check(MAPPER, xml(FQCN, commented)), "createOrder has no matching statement id");
+    }
+
+    /** A commented-out method declaration must not be treated as one needing a statement. */
+    @Test
+    void commentedOutMethodsAreNotCounted() {
+        String withComment = MAPPER.replace(
+                "    @Schema(description = \"주문 생성\")\n    int createOrder(@Param(\"request\") CreateOrderRequest request);",
+                "    // int createOrder(@Param(\"request\") CreateOrderRequest request);");
+        assertEquals(java.util.Set.of("getOrder"), MapperConsistencyChecker.methodNames(withComment));
+    }
+
+    /** Annotation lines must not be mistaken for method declarations. */
+    @Test
+    void annotationsAreNotMistakenForMethods() {
+        assertEquals(java.util.Set.of("getOrder", "createOrder"),
+                MapperConsistencyChecker.methodNames(MAPPER));
+    }
+
+    /** A default method has a body and needs no statement, so it must not be collected. */
+    @Test
+    void defaultMethodsAreNotCounted() {
+        String withDefault = MAPPER.replace("}\n", """
+                    default int countOrders() {
+                        return 0;
+                    }
+                }
+                """);
+        assertEquals(java.util.Set.of("getOrder", "createOrder"),
+                MapperConsistencyChecker.methodNames(withDefault));
+    }
+}

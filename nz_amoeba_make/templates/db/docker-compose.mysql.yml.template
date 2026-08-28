@@ -1,0 +1,24 @@
+# Local MySQL for the {{NAME}} sample. Database/user/password match application.yml ({{DB}} / {{DB}} / {{PW}}).
+#   docker compose up -d   |   docker compose down   |   docker compose down -v  (wipe)
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: protean-{{NAME}}-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: {{DB}}
+      MYSQL_USER: {{DB}}
+      MYSQL_PASSWORD: {{PW}}
+    volumes:
+      - protean-{{NAME}}-mysql-data:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d:ro   # *.sql runs on FIRST boot of a fresh volume
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u{{DB}}", "-p{{PW}}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  protean-{{NAME}}-mysql-data:

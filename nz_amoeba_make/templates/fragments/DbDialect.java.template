@@ -1,0 +1,58 @@
+// [CAPABILITY: custom DB dialect] Requires protean.worker.db.auto-provision=true.
+// A @Component implementing DbDialect is overlaid onto the built-in mysql/postgresql dialects, keyed by id() — add
+// a vendor (e.g. Oracle) or override a built-in by returning its id. It provisions a SCOPE (tenant): a dedicated
+// DB/schema + user/role + GRANT. Same-scope modules share it. DDL identifiers are inlined (not bind params), so
+// pass sanitized names. NOT the module store (that is ModuleStoreDialect — a different axis).
+//
+// Lifecycle: createScope (provision), detachScope (data-SAFE — drop the login only, keep DB+data; reversible),
+// destroyScope (irreversible — DROP DATABASE/SCHEMA CASCADE + login; gated by protean.worker.db.allow-destroy),
+// dropScope (full drop; destroy delegates to it by default).
+package {{PKG}};
+
+import org.htcom.protean.db.DbDialect;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Component;
+
+@Component
+public class ExampleDialect implements DbDialect {
+
+    @Override
+    public String id() {
+        return "example"; // matches protean.worker.db.dialect (or overrides a built-in by its id)
+    }
+
+    @Override
+    public int maxNameLength() {
+        return 32; // MySQL user 32 / Postgres 63 — names longer than this must be hash-shortened by the caller
+    }
+
+    @Override
+    public void createScope(JdbcTemplate admin, String name, String password) {
+        // Provision (or re-enable) the scope's DB + login. Idempotent; sets/refreshes the password (WITH LOGIN).
+        admin.execute("CREATE DATABASE IF NOT EXISTS `" + name + "`");
+        admin.execute("CREATE USER IF NOT EXISTS '" + name + "'@'%' IDENTIFIED BY '" + password + "'");
+        admin.execute("ALTER USER '" + name + "'@'%' IDENTIFIED BY '" + password + "'");
+        admin.execute("GRANT ALL PRIVILEGES ON `" + name + "`.* TO '" + name + "'@'%'");
+    }
+
+    @Override
+    public void detachScope(JdbcTemplate admin, String name) {
+        // Data-SAFE: drop only the login. DATABASE + data are retained; a later createScope re-enables access.
+        admin.execute("DROP USER IF EXISTS '" + name + "'@'%'");
+    }
+
+    @Override
+    public void dropScope(JdbcTemplate admin, String name) {
+        // Full drop (destroy semantics) — DB and login together. destroyScope() delegates here by default.
+        admin.execute("DROP DATABASE IF EXISTS `" + name + "`");
+        admin.execute("DROP USER IF EXISTS '" + name + "'@'%'");
+    }
+
+    // destroyScope() default = dropScope() (irreversible). Override only if destroy differs from a full drop.
+
+    @Override
+    public String scopedUrl(String adminUrl, String name) {
+        // adminUrl e.g. jdbc:mysql://host:3306 → append the scoped DB name.
+        return adminUrl.replaceAll("/*$", "") + "/" + name;
+    }
+}

@@ -1,0 +1,235 @@
+// [INTERFACE DEFINITION] The JSON Schema for InterfaceSpec — layer L1 of the enforcement stack.
+//
+// This is where "name / attributes / description" stops being a request and becomes a rejection. A misspelled type
+// is not a lenient fallback here, it is an error, because `type` is an enum; a placeholder-free description is not a
+// convention, it is minLength; an unknown property is not ignored, it is additionalProperties:false. All of that is
+// checked BEFORE any Java is written or compiled, which is what makes a bad spec cheap to fix.
+//
+// Two things make this schema actually bite:
+//
+//   * protean.mcp.strict-schema=true plus com.networknt:json-schema-validator makes McpDispatcher validate tool
+//     input against it server-side. Without the jar the validator degrades to a no-op, so this schema would be
+//     documentation only — see McpConfiguration's warning.
+//   * The tools additionally deserialize with FAIL_ON_UNKNOWN_PROPERTIES, so a typo is caught even when the global
+//     strict-schema switch is off. Spring Boot's default ObjectMapper disables that feature.
+//
+// Draft 2020-12, matching NetworkntSchemaValidator, so $defs / $ref is the correct recursion spelling. FieldSpec is
+// recursive (an object has children, an array has an item), which is exactly what $ref exists for.
+package {{PKG}}.interfacedef.mcp;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.InterfaceSpec.DataAccess;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+
+/**
+ * Builds the InterfaceSpec JSON Schema.
+ *
+ * <p>{@code $ref} resolves against the ROOT of the schema document, so any tool embedding this must attach the
+ * shared definitions at its own root via {@link #attachDefs}. {@link #interfaceRef()} then points at them.
+ */
+public final class InterfaceSpecSchema {
+
+    /** Kept identical to InterfaceSpecValidator.NAME — L1 and the semantic pass must not disagree on names. */
+    public static final String NAME_PATTERN = "^[a-zA-Z][a-zA-Z0-9_]{0,63}$";
+
+    /** Query/header names may carry the hyphenated HTTP spelling. */
+    public static final String PARAM_NAME_PATTERN = "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$";
+
+    public static final String MODULE_ID_PATTERN = "^[a-z0-9][a-z0-9_-]{0,63}$";
+
+    public static final String PACKAGE_PATTERN = "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$";
+
+    /** Placeholder descriptions are caught semantically; the schema only enforces "not empty". */
+    private static final int MIN_DESCRIPTION_LENGTH = 2;
+
+    private InterfaceSpecSchema() {
+    }
+
+    /** Attaches {@code $defs} for the spec and all its nested shapes to a schema root. */
+    public static void attachDefs(ObjectNode root, ObjectMapper m) {
+        ObjectNode defs = root.putObject("$defs");
+        defs.set("interfaceSpec", interfaceSpec(m));
+        defs.set("operation", operation(m));
+        defs.set("param", param(m));
+        defs.set("response", response(m));
+        defs.set("field", field(m));
+    }
+
+    /** A reference to the attached spec definition, for use as a property schema. */
+    public static ObjectNode interfaceRef(ObjectMapper m) {
+        return m.createObjectNode().put("$ref", "#/$defs/interfaceSpec");
+    }
+
+    private static ObjectNode interfaceSpec(ObjectMapper m) {
+        ObjectNode s = object(m, "The module's declared HTTP interface: every request and response field, "
+                + "with its name, attributes and description.");
+        ObjectNode p = s.putObject("properties");
+        string(p, "title", "Document title. Defaults to the module id when omitted.");
+        described(p, "description", "What this module does. Becomes the document's overview paragraph.");
+        enumOf(p, "dataAccess", dataAccessValues(),
+                "NONE or MYBATIS. MYBATIS additionally requires a Mapper interface, its mapper XML and a "
+                        + "SqlSessionFactory configuration, and makes a reachable database a deploy prerequisite "
+                        + "(gate 3 probes run real queries).");
+        p.putObject("serviceInterface").put("type", "boolean")
+                .put("description", "Whether to generate a separate Service interface. true emits "
+                        + "<Base>Service (interface) plus <Base>ServiceImpl; false emits one <Base>Service class "
+                        + "for a three-layer Controller/Service/Mapper structure. Omit to use the project "
+                        + "default; the resolved value is then sealed into the spec, so a redeploy regenerates "
+                        + "the same structure. It cannot be changed on an already-deployed module.");
+        ObjectNode operations = p.putObject("operations");
+        operations.put("type", "array").put("minItems", 1)
+                .put("description", "One entry per endpoint.");
+        operations.putObject("items").put("$ref", "#/$defs/operation");
+        required(s, "description", "operations");
+        return s;
+    }
+
+    private static ObjectNode operation(ObjectMapper m) {
+        ObjectNode s = object(m, "One endpoint.");
+        ObjectNode p = s.putObject("properties");
+        p.putObject("operationId").put("type", "string").put("pattern", NAME_PATTERN)
+                .put("description", "Unique identifier. Becomes the controller method name, the generated DTO "
+                        + "name stem and the document anchor, so it must be a legal Java identifier.");
+        enumOf(p, "method", httpMethodValues(), "HTTP method.");
+        p.putObject("path").put("type", "string").put("pattern", "^/.*")
+                .put("description", "e.g. /orders/{id}. Every {var} must have a matching parameter with in=path. "
+                        + "/platform is reserved for the protean control plane.");
+        described(p, "summary", "One-line summary, shown in the document's operation table.");
+        described(p, "description", "What this operation does.");
+        arrayOf(p, "parameters", "#/$defs/param",
+                "Path, query and header parameters. Body fields belong in requestBody, not here.");
+        arrayOf(p, "requestBody", "#/$defs/field",
+                "Request body fields. Omit or leave empty for no body; only POST, PUT and PATCH may declare one.");
+        ObjectNode responses = p.putObject("responses");
+        responses.put("type", "array").put("minItems", 1)
+                .put("description", "One entry per status code. At least one 2xx is required — it supplies the "
+                        + "expected status for the generated verification probe.");
+        responses.putObject("items").put("$ref", "#/$defs/response");
+        required(s, "operationId", "method", "path", "summary", "description", "responses");
+        return s;
+    }
+
+    private static ObjectNode param(ObjectMapper m) {
+        ObjectNode s = object(m, "A request parameter that has a location.");
+        ObjectNode p = s.putObject("properties");
+        p.putObject("name").put("type", "string").put("pattern", PARAM_NAME_PATTERN)
+                .put("description", "Wire name. A path parameter must additionally match its {var} token; query "
+                        + "and header names may be hyphenated (X-Request-Id).");
+        enumOf(p, "in", paramInValues(), "Where the parameter travels.");
+        enumOf(p, "type", fieldTypeValues(),
+                "JSON Schema primitive. object and array are only valid for in=query (a repeated value).");
+        p.putObject("required").put("type", "boolean")
+                .put("description", "Whether the caller must supply it. A path parameter is always true.");
+        described(p, "description", "What this parameter means.");
+        string(p, "example", "Example value. REQUIRED for a path parameter: it is substituted into the "
+                + "generated verification probe path, and without it the operation drops out of probe coverage.");
+        required(s, "name", "in", "type", "required", "description");
+        return s;
+    }
+
+    private static ObjectNode response(ObjectMapper m) {
+        ObjectNode s = object(m, "One response status.");
+        ObjectNode p = s.putObject("properties");
+        p.putObject("status").put("type", "integer").put("minimum", 100).put("maximum", 599)
+                .put("description", "HTTP status code.");
+        described(p, "description", "What this status means.");
+        arrayOf(p, "body", "#/$defs/field", "Response body fields. Omit or leave empty for no body (204).");
+        required(s, "status", "description");
+        return s;
+    }
+
+    private static ObjectNode field(ObjectMapper m) {
+        ObjectNode s = object(m, "A request or response field: name, attributes and description. Recursive.");
+        ObjectNode p = s.putObject("properties");
+        p.putObject("name").put("type", "string").put("pattern", NAME_PATTERN)
+                .put("description", "Field name. Becomes a record component, so it must be a legal Java "
+                        + "identifier and unique among its siblings.");
+        enumOf(p, "type", fieldTypeValues(), "JSON Schema primitive.");
+        string(p, "format", "Optional refinement of type, carried through to OpenAPI. Narrows the generated Java "
+                + "type: int32 gives Integer (integer defaults to Long), float/double give Float/Double "
+                + "(number defaults to BigDecimal).");
+        p.putObject("required").put("type", "boolean").put("description", "Whether the field must be present.");
+        described(p, "description", "What this field means. This text becomes the @Schema description in the "
+                + "generated DTO and the description column in the document.");
+        string(p, "example", "Example value.");
+        ObjectNode children = p.putObject("children");
+        children.put("type", "array")
+                .put("description", "Named sub-fields. Required when type is object, forbidden otherwise.");
+        children.putObject("items").put("$ref", "#/$defs/field");
+        p.putObject("items").put("$ref", "#/$defs/field")
+                .put("description", "The shape of one element. Required when type is array, forbidden otherwise. "
+                        + "Its own name is only used when the element is an object, where it becomes the nested "
+                        + "record's type name.");
+        required(s, "name", "type", "required", "description");
+        return s;
+    }
+
+    // --- small builders, so the shape of every node above stays uniform ---
+
+    /**
+     * A closed object schema. {@code additionalProperties: false} is the point: an agent that writes
+     * {@code descripton} gets an error instead of a silently dropped description.
+     */
+    private static ObjectNode object(ObjectMapper m, String description) {
+        ObjectNode s = m.createObjectNode();
+        s.put("type", "object");
+        s.put("description", description);
+        s.put("additionalProperties", false);
+        return s;
+    }
+
+    private static void string(ObjectNode properties, String name, String description) {
+        properties.putObject(name).put("type", "string").put("description", description);
+    }
+
+    /** A description-bearing string: non-empty is enforced here, placeholder detection is semantic. */
+    private static void described(ObjectNode properties, String name, String description) {
+        properties.putObject(name).put("type", "string")
+                .put("minLength", MIN_DESCRIPTION_LENGTH).put("description", description);
+    }
+
+    private static void enumOf(ObjectNode properties, String name, String[] values, String description) {
+        ObjectNode node = properties.putObject(name);
+        node.put("type", "string").put("description", description);
+        ArrayNode allowed = node.putArray("enum");
+        for (String value : values) {
+            allowed.add(value);
+        }
+    }
+
+    private static void arrayOf(ObjectNode properties, String name, String ref, String description) {
+        ObjectNode node = properties.putObject(name);
+        node.put("type", "array").put("description", description);
+        node.putObject("items").put("$ref", ref);
+    }
+
+    private static void required(ObjectNode schema, String... names) {
+        ArrayNode array = schema.putArray("required");
+        for (String name : names) {
+            array.add(name);
+        }
+    }
+
+    // --- wire spellings, read off the enums so the schema cannot drift from the model ---
+
+    private static String[] fieldTypeValues() {
+        return java.util.Arrays.stream(FieldType.values()).map(FieldType::wire).toArray(String[]::new);
+    }
+
+    private static String[] paramInValues() {
+        return java.util.Arrays.stream(ParamIn.values()).map(ParamIn::wire).toArray(String[]::new);
+    }
+
+    private static String[] dataAccessValues() {
+        return java.util.Arrays.stream(DataAccess.values()).map(DataAccess::wire).toArray(String[]::new);
+    }
+
+    private static String[] httpMethodValues() {
+        return java.util.Arrays.stream(HttpMethod.values()).map(HttpMethod::wire).toArray(String[]::new);
+    }
+}

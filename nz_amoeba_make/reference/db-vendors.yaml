@@ -1,0 +1,72 @@
+# DB sub-flow spec — used when the `data_access` capability is selected (in-process only).
+#
+# Flow:
+#   1. Vendor  — mysql | postgresql | h2 | other   (typed name allowed for "other")
+#   2. Connection (server-backed vendors only) — existing | docker
+#        existing → the user TYPES host/port/db/user/password; generate datasource only, NO compose.
+#        docker   → generate datasource (localhost) + docker-compose + init SQL.
+#      H2 is embedded → no server/no compose; ask mem | file. "other" → user provides everything; NO compose.
+#   3. Generate: driver dep (build.gradle) + spring.datasource (application.yml) + (docker) compose+init / (h2) schema.sql.
+#
+# {{DB}} = database/schema name (default = sample <name>). {{PW}} = password (default = <DB>1234).
+
+vendors:
+
+  mysql:
+    embedded: false
+    driver_dep: "runtimeOnly 'com.mysql:mysql-connector-j'"          # version managed by the Spring Boot BOM
+    driver_class: com.mysql.cj.jdbc.Driver
+    default_port: 3306
+    url: "jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/{{DB}}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+    docker:
+      compose_template: templates/db/docker-compose.mysql.yml.template
+      init_template: templates/db/init.mysql.sql.template
+      note: "MySQL grants MYSQL_USER ALL PRIVILEGES on MYSQL_DATABASE automatically."
+
+  postgresql:
+    embedded: false
+    driver_dep: "runtimeOnly 'org.postgresql:postgresql'"
+    driver_class: org.postgresql.Driver
+    default_port: 5432
+    url: "jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/{{DB}}"
+    docker:
+      compose_template: templates/db/docker-compose.postgres.yml.template
+      init_template: templates/db/init.postgres.sql.template
+
+  h2:
+    embedded: true                                                    # no server, no docker
+    driver_dep: "runtimeOnly 'com.h2database:h2'"
+    driver_class: org.h2.Driver
+    modes:
+      mem:  "jdbc:h2:mem:{{DB}};DB_CLOSE_DELAY=-1;MODE=LEGACY"        # in-memory; resets on restart
+      file: "jdbc:h2:file:./data/{{DB}};MODE=LEGACY"                  # persisted under ./data
+    username: sa
+    password: ""
+    schema_template: templates/db/schema.h2.sql.template              # src/main/resources/schema.sql (Spring auto-runs for embedded DBs)
+    note: >-
+      H2 is bundled in-process — nothing to start. Spring Boot auto-runs src/main/resources/schema.sql for an
+      embedded datasource. Use mem for a throwaway demo, file to persist across restarts.
+
+  other:
+    embedded: false
+    typed_inputs: [driver_coordinate, driver_class, jdbc_url, username, password]   # user TYPES all of these
+    driver_dep: "runtimeOnly '{{driver_coordinate}}'"
+    note: >-
+      For any other vendor (MariaDB, Oracle, MSSQL, …): the user provides the driver Maven coordinate, the
+      driver-class-name, and the JDBC URL. No docker-compose is generated — the user points at their own server.
+
+# Provisioning admin (only when protean.worker.db.auto-provision=true, i.e. worker/container mode):
+#   docker DB    → also generate templates/db/init.provision-admin.<mysql|postgres>.sql.template as
+#                  init/00-provision-admin.sql (creates the admin account with CREATE DB/USER/GRANT). {{ADMIN_USER}}
+#                  / {{ADMIN_PW}} = protean.worker.db.admin-username / admin-password.
+#   existing DB  → do NOT generate; print the exact GRANT the admin account must already have.
+# A DataSource that ONLY backs the jdbc module-store gets NO items data init (Protean creates its own store tables).
+
+# spring.datasource block the skill writes into application.yml (server-backed vendors + other):
+#   spring:
+#     datasource:
+#       url: <vendor.url or typed>
+#       driver-class-name: <vendor.driver_class or typed>
+#       username: ${DB_USER:{{DB}}}
+#       password: ${DB_PASSWORD:{{PW}}}
+# For H2: url from modes.<mem|file>, driver-class-name org.h2.Driver, username sa, password "".

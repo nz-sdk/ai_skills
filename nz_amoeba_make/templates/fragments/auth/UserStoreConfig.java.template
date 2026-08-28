@@ -1,0 +1,105 @@
+// [CAPABILITY: embedded auth — user store] Supplies the ONE UserDetailsService the login form authenticates
+// against. Two shapes, chosen by amoeba.auth.store:
+//
+//   memory  accounts declared in application.yml       no database, nothing to provision
+//   jdbc    standard users / authorities tables        needs a DataSource (data-access must be on)
+//
+// The two are interchangeable because the rest of the feature only knows UserDetailsService. Swapping stores
+// changes nothing in EmbeddedAuthServerConfig or the filter chains.
+//
+// ★ AUTHORITY NAMING IS A CONTRACT, NOT A CONVENTION. Authorities must be spelled exactly like the scopes
+// (mcp.read / mcp.write / mcp.admin). EmbeddedAuthServerConfig#tokenCustomizer intersects requested scopes with
+// the user's mcp.* authorities; a user carrying ROLE_ADMIN or MCP_WRITE intersects to the empty set and gets a
+// scope-less token that ApiModuleActionAuthorizer then denies everything for — a confusing failure that looks
+// like a broken login rather than a misnamed authority.
+package {{PKG}}.auth;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.provisioning.InMemoryUserDetailsManager;
+import org.springframework.security.provisioning.JdbcUserDetailsManager;
+
+import javax.sql.DataSource;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+
+@Configuration(proxyBeanMethods = false)
+@ConditionalOnProperty(prefix = "amoeba.auth", name = "enabled", havingValue = "true")
+public class UserStoreConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(UserStoreConfig.class);
+
+    @Bean
+    PasswordEncoder passwordEncoder() {
+        return PasswordEncoderFactories.createDelegatingPasswordEncoder();
+    }
+
+    /**
+     * {@code store=memory} — accounts come from {@code amoeba.auth.users}, nowhere else. There are deliberately
+     * no accounts baked into this class: emptying the config must actually leave nobody able to log in.
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "amoeba.auth", name = "store", havingValue = "memory", matchIfMissing = true)
+    UserDetailsService inMemoryUserStore(EmbeddedAuthProperties props, PasswordEncoder encoder) {
+        List<UserDetails> users = new ArrayList<>();
+        props.users().forEach((username, config) -> {
+            List<String> authorities = splitAuthorities(config.authorities());
+            if (authorities.isEmpty()) {
+                // Allowed through with a warning rather than rejected: the account is harmless (it can only ever
+                // receive an empty-scope token), and failing startup over one misconfigured dev account is worse.
+                log.warn("amoeba.auth.users.{} has no authorities — it can log in but every token it gets "
+                        + "will be scope-less. Expected e.g. 'mcp.read,mcp.write'.", username);
+            }
+            users.add(User.withUsername(username)
+                    .password(encoder.encode(config.password()))
+                    .authorities(authorities.toArray(String[]::new))
+                    .build());
+        });
+
+        if (users.isEmpty()) {
+            log.warn("Embedded auth is on with store=memory but amoeba.auth.users is empty — nobody can log in. "
+                    + "Declare accounts under amoeba.auth.users, or switch to store=jdbc.");
+        } else {
+            log.info("Embedded auth user store: in-memory, accounts={}", props.users().keySet());
+        }
+        return new InMemoryUserDetailsManager(users);
+    }
+
+    /**
+     * {@code store=jdbc} — the standard Spring Security schema ({@code users} / {@code authorities}), so this is
+     * configuration rather than code: JdbcUserDetailsManager already speaks it.
+     *
+     * <p>Requires a DataSource, which this app only has because data-access is enabled. No schema is created here
+     * on purpose — the DDL ships as an init script so provisioning stays visible and reviewable rather than
+     * happening as a startup side effect. See README §Security.
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "amoeba.auth", name = "store", havingValue = "jdbc")
+    UserDetailsService jdbcUserStore(DataSource dataSource) {
+        log.info("Embedded auth user store: JDBC (standard users/authorities tables)");
+        return new JdbcUserDetailsManager(dataSource);
+    }
+
+    /** Accepts "mcp.read,mcp.write" and "mcp.read mcp.write" alike — both spellings are common in scope config. */
+    private static List<String> splitAuthorities(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(raw.split("[,\\s]+")).map(String::trim).filter(s -> !s.isEmpty()).toList();
+    }
+
+    /** Exposed for the startup log / tests to describe the active store without reaching into Spring internals. */
+    static Map<String, EmbeddedAuthProperties.User> accountsOf(EmbeddedAuthProperties props) {
+        return props.users();
+    }
+}

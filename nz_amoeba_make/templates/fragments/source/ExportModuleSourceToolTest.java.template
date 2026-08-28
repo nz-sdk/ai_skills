@@ -1,0 +1,277 @@
+// Covers the export contract: paths that form a real project tree, content that survives the round trip
+// byte-for-byte, text and binary kept apart, and a size budget that reports what it left out instead of
+// silently shortening the answer.
+package {{PKG}}.source;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+import org.htcom.protean.module.ModuleResource;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class ExportModuleSourceToolTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final ModulePlatform platform = mock(ModulePlatform.class);
+    private final ModuleSourceResolver resolver = new ModuleSourceResolver(platform);
+    private final ExportModuleSourceTool tool = new ExportModuleSourceTool(mapper, resolver);
+
+    @BeforeEach
+    void setUp() {
+        when(platform.find(SourceFixtures.MODULE_ID)).thenReturn(Optional.of(SourceFixtures.helloModule()));
+    }
+
+    private ObjectNode args() {
+        return mapper.createObjectNode().put("moduleId", SourceFixtures.MODULE_ID);
+    }
+
+    private static List<String> keys(JsonNode object) {
+        List<String> names = new ArrayList<>();
+        object.fieldNames().forEachRemaining(names::add);
+        names.sort(String::compareTo);
+        return names;
+    }
+
+    @Test
+    void exportsFilesAtProjectLayoutPaths() {
+        JsonNode structured = tool.call(args(), null).structured();
+
+        assertEquals(ExportModuleSourceTool.LAYOUT, structured.path("layout").asText());
+        assertEquals(List.of(
+                        "src/main/java/module/hello/HelloController.java",
+                        "src/main/java/module/hello/HelloService.java",
+                        "src/main/java/module/hello/dto/GetHelloResponse.java",
+                        "src/main/resources/META-INF/protean/interface.json",
+                        "src/main/resources/mapper/hello/HelloMapper.xml",
+                        "src/test/java/module/hello/HelloContractTest.java"),
+                keys(structured.path("files")));
+    }
+
+    /** The property that makes an export usable: what comes back must be what was deployed, unchanged. */
+    @Test
+    void roundTripsContentExactly() {
+        JsonNode files = tool.call(args(), null).structured().path("files");
+
+        assertEquals(SourceFixtures.CONTROLLER_SOURCE,
+                files.path("src/main/java/module/hello/HelloController.java").asText());
+        assertEquals(SourceFixtures.MAPPER_XML,
+                files.path("src/main/resources/mapper/hello/HelloMapper.xml").asText());
+        assertEquals(SourceFixtures.TEST_SOURCE,
+                files.path("src/test/java/module/hello/HelloContractTest.java").asText());
+        assertTrue(files.path("src/main/java/module/hello/HelloController.java").asText()
+                .contains(SourceFixtures.GREETING), "non-ASCII content must survive the round trip");
+    }
+
+    /**
+     * Two maps, not one with a flag: a client writing files to disk has to know per entry whether to write the
+     * string or to Base64-decode it first, and a single map cannot tell it that.
+     */
+    @Test
+    void keepsBinaryFilesInASeparateMap() {
+        JsonNode structured = tool.call(args(), null).structured();
+
+        assertEquals(List.of("src/main/resources/cert/hello.p12"), keys(structured.path("binaryFiles")));
+        assertEquals(ModuleResource.binary(SourceFixtures.KEYSTORE_BYTES).content(),
+                structured.path("binaryFiles").path("src/main/resources/cert/hello.p12").asText());
+        assertFalse(keys(structured.path("files")).contains("src/main/resources/cert/hello.p12"));
+        assertEquals(7, structured.path("fileCount").asInt());
+    }
+
+    /** A module with no binary resource must not carry an empty binaryFiles object. */
+    @Test
+    void omitsBinaryFilesKeyWhenThereAreNone() {
+        when(platform.find("emp")).thenReturn(Optional.of(SourceFixtures.bareModule("emp")));
+
+        JsonNode structured = tool.call(mapper.createObjectNode().put("moduleId", "emp"), null).structured();
+
+        assertFalse(structured.has("binaryFiles"));
+        assertEquals(1, structured.path("fileCount").asInt());
+    }
+
+    /** Paths come from list_module_files, so the two tools' spellings have to agree exactly. */
+    @Test
+    void exportsOnlyRequestedPaths() {
+        ObjectNode args = args();
+        args.putArray("paths")
+                .add("src/main/resources/mapper/hello/HelloMapper.xml")
+                .add("src/main/java/module/hello/HelloService.java");
+
+        JsonNode structured = tool.call(args, null).structured();
+
+        assertEquals(List.of(
+                        "src/main/java/module/hello/HelloService.java",
+                        "src/main/resources/mapper/hello/HelloMapper.xml"),
+                keys(structured.path("files")));
+        assertEquals(2, structured.path("fileCount").asInt());
+    }
+
+    @Test
+    void includeFilterNarrowsByKind() {
+        ObjectNode args = args();
+        args.putArray("include").add("tests");
+
+        JsonNode structured = tool.call(args, null).structured();
+
+        assertEquals(List.of("src/test/java/module/hello/HelloContractTest.java"), keys(structured.path("files")));
+    }
+
+    @Test
+    void sizeBudgetOmitsFilesAndFlagsTruncation() {
+        ObjectNode args = args();
+        args.put("maxBytes", 1);
+
+        JsonNode structured = tool.call(args, null).structured();
+
+        assertTrue(structured.path("truncated").asBoolean(false));
+        assertEquals(1, structured.path("fileCount").asInt(),
+                "the first file is returned even when it alone exceeds the budget");
+        assertEquals(6, structured.path("omitted").size());
+        assertTrue(structured.path("omitted").toString().contains("HelloMapper.xml"));
+    }
+
+    /** Omitting everything would look like "this module is empty", which is a worse answer than a partial one. */
+    @Test
+    void neverReturnsAnEmptyExportBecauseOfTheBudget() {
+        when(platform.find("big")).thenReturn(Optional.of(ModuleDescriptor.builder()
+                .id("big").version("1")
+                .sources(Map.of("p.Huge", "x".repeat(10_000)))
+                .build()));
+        ObjectNode args = mapper.createObjectNode().put("moduleId", "big").put("maxBytes", 10);
+
+        JsonNode structured = tool.call(args, null).structured();
+
+        assertEquals(1, structured.path("fileCount").asInt());
+        assertEquals(10_000, structured.path("totalBytes").asInt());
+        assertFalse(structured.path("truncated").asBoolean(false));
+    }
+
+    @Test
+    void noBuildFilesUnlessAsked() {
+        JsonNode files = tool.call(args(), null).structured().path("files");
+
+        assertFalse(files.has("build.gradle"));
+        assertFalse(files.has("settings.gradle"));
+    }
+
+    @Test
+    void emitsBuildFilesOnRequest() {
+        ObjectNode args = args();
+        args.put("includeBuildFiles", true);
+
+        JsonNode files = tool.call(args, null).structured().path("files");
+
+        assertTrue(files.has("build.gradle"));
+        assertEquals("hello", files.path("settings.gradle").asText()
+                .replaceAll("(?s).*rootProject\\.name = '([^']+)'.*", "$1"));
+        assertTrue(files.path("build.gradle").asText().contains("JavaLanguageVersion.of(21)"));
+        assertTrue(files.path("build.gradle").asText().contains("spring-boot-starter-web"));
+    }
+
+    /**
+     * The generated build file must state that it is not the deployment's classpath. A build.gradle that reads as
+     * authoritative but is a reconstruction would mislead exactly the person who trusts the export most.
+     */
+    @Test
+    void buildFileDisclaimsBeingAuthoritative() {
+        ObjectNode args = args();
+        args.put("includeBuildFiles", true);
+
+        String buildGradle = tool.call(args, null).structured().path("files").path("build.gradle").asText();
+
+        assertTrue(buildGradle.contains("EDITING AID ONLY"), buildGradle);
+        assertTrue(buildGradle.contains("NOT the classpath"), buildGradle);
+    }
+
+    /** The fixture has a mapper XML and needsSharedBeans, so the MyBatis dependencies belong in its build file. */
+    @Test
+    void buildFileAddsMyBatisForAMapperBearingModule() {
+        ObjectNode args = args();
+        args.put("includeBuildFiles", true);
+
+        String buildGradle = tool.call(args, null).structured().path("files").path("build.gradle").asText();
+
+        assertTrue(buildGradle.contains("org.mybatis:mybatis:"), buildGradle);
+        assertTrue(buildGradle.contains("mybatis-spring"), buildGradle);
+    }
+
+    @Test
+    void buildFileOmitsMyBatisForAModuleWithoutIt() {
+        when(platform.find("emp")).thenReturn(Optional.of(SourceFixtures.bareModule("emp")));
+        ObjectNode args = mapper.createObjectNode().put("moduleId", "emp").put("includeBuildFiles", true);
+
+        String buildGradle = tool.call(args, null).structured().path("files").path("build.gradle").asText();
+
+        assertFalse(buildGradle.contains("mybatis"), buildGradle);
+        assertFalse(buildGradle.contains("starter-test"), "the module carries no tests");
+    }
+
+    @Test
+    void readsAHistoricalVersion() {
+        when(platform.findVersion(SourceFixtures.MODULE_ID, "0.9.0"))
+                .thenReturn(Optional.of(SourceFixtures.bareModule(SourceFixtures.MODULE_ID)));
+        ObjectNode args = args();
+        args.put("version", "0.9.0");
+
+        JsonNode structured = tool.call(args, null).structured();
+
+        assertEquals("2.0.0", structured.path("version").asText());
+        assertEquals(1, structured.path("fileCount").asInt());
+    }
+
+    @Test
+    void unknownModuleAndVersionAreErrors() {
+        when(platform.find("nope")).thenReturn(Optional.empty());
+        when(platform.findVersion(SourceFixtures.MODULE_ID, "9.9.9")).thenReturn(Optional.empty());
+
+        assertTrue(tool.call(mapper.createObjectNode().put("moduleId", "nope"), null).isError());
+        McpToolResult versionError = tool.call(args().put("version", "9.9.9"), null);
+        assertTrue(versionError.isError());
+        assertTrue(versionError.text().contains("9.9.9"), versionError.text());
+    }
+
+    @Test
+    void missingModuleIdIsRejected() {
+        assertTrue(tool.call(mapper.createObjectNode(), null).isError());
+        assertTrue(tool.call(null, null).isError());
+    }
+
+    @Test
+    void classifiesAsReadSoItStaysOnMcpRead() {
+        assertEquals(ModuleActionAuthorizer.ModuleAction.READ, tool.action());
+        assertEquals(Boolean.TRUE, tool.annotations().readOnlyHint());
+    }
+
+    @Test
+    void satisfiesItsOwnOutputSchema() {
+        SourceToolAssertions.assertSatisfiesOutputSchema(tool, tool.call(args(), null));
+        SourceToolAssertions.assertSatisfiesOutputSchema(tool, tool.call(args().put("maxBytes", 1), null));
+    }
+
+    @Test
+    void doesNotRequireConditionalOutputFields() {
+        List<String> required = new ArrayList<>();
+        tool.outputSchema().path("required").forEach(n -> required.add(n.asText()));
+
+        assertFalse(required.contains("binaryFiles"));
+        assertFalse(required.contains("truncated"));
+        assertFalse(required.contains("omitted"));
+        assertFalse(required.contains("skipped"));
+    }
+}

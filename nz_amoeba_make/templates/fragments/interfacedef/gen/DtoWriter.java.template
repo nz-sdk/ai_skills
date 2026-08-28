@@ -1,0 +1,168 @@
+// [INTERFACE DEFINITION] Field tree -> one record source file.
+//
+// Records, not POJOs with get/set. The reason is not style: modules deploy as source only, so Lombok (an annotation
+// processor) is unavailable and every accessor would have to be written out by hand. A record's components ARE its
+// fields, and getRecordComponents() hands back their order, types and annotations in one call, which is what makes
+// the deployed module's actual shape checkable against the spec later.
+//
+// @Schema carries the description. It is @Retention(RUNTIME) and record-component annotations propagate to the
+// backing field, so promotion gate 2's bytecode rule can see it — a Javadoc comment cannot be seen there at all.
+//
+// Nested objects become nested records hoisted flat into the top-level record body: one file holds one top-level
+// type (protean derives the FQCN from the package declaration plus the filename stem), and flat nesting stays
+// readable where deep nesting does not.
+package {{PKG}}.interfacedef.gen;
+
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+/** Emits one DTO record. One instance per file — it carries the file's nested-name allocation state. */
+final class DtoWriter {
+
+    /**
+     * Simple names a nested record must not take. {@code List} and {@code Schema} are imported here, and shadowing
+     * either would break the file; the boxed types are what {@link JavaNames#scalarType} emits unqualified.
+     */
+    private static final Set<String> RESERVED_SIMPLE_NAMES = Set.of(
+            "List", "Schema", "String", "Boolean", "Integer", "Long", "Float", "Double");
+
+    private final Set<String> usedNames = new HashSet<>(RESERVED_SIMPLE_NAMES);
+    private final Deque<Nested> pending = new ArrayDeque<>();
+    private boolean usesList;
+
+    /** A nested record still to be emitted. */
+    private record Nested(String name, String description, List<FieldSpec> fields) {
+    }
+
+    private DtoWriter(String topLevelName) {
+        usedNames.add(topLevelName);
+    }
+
+    /**
+     * Renders a complete record source file.
+     *
+     * @param packageName package for the file (the DTO subpackage)
+     * @param recordName  top-level record name, which must equal the filename stem
+     * @param description type-level description, used for both the Javadoc and the {@code @Schema}
+     * @param fields      the top-level field list
+     */
+    static String write(String packageName, String recordName, String description, List<FieldSpec> fields) {
+        return new DtoWriter(recordName).render(packageName, recordName, description, fields);
+    }
+
+    private String render(String packageName, String recordName, String description, List<FieldSpec> fields) {
+        // Components are rendered first because rendering is what discovers the nested types and whether List is
+        // needed — the import block and the nested bodies both depend on that walk having already happened.
+        String components = renderComponents(fields, 8);
+        StringBuilder nestedBodies = new StringBuilder();
+        while (!pending.isEmpty()) {
+            renderNested(nestedBodies, pending.removeFirst());
+        }
+
+        StringBuilder out = new StringBuilder();
+        out.append("// GENERATED from the module's interface definition. Do not edit — the deploy wrapper replaces\n")
+                .append("// this file from the declared spec, so hand edits are silently discarded.\n")
+                .append("package ").append(packageName).append(";\n\n")
+                .append("import io.swagger.v3.oas.annotations.media.Schema;\n");
+        if (usesList) {
+            out.append("import java.util.List;\n");
+        }
+        out.append('\n');
+        appendJavadoc(out, 0, description);
+        out.append("@Schema(description = ").append(JavaNames.literal(JavaNames.oneLine(description))).append(")\n")
+                .append("public record ").append(recordName).append("(\n")
+                .append(components)
+                .append(") {\n");
+        out.append(nestedBodies);
+        out.append("}\n");
+        return out.toString();
+    }
+
+    private void renderNested(StringBuilder out, Nested nested) {
+        String components = renderComponents(nested.fields(), 12);
+        out.append('\n');
+        appendJavadoc(out, 4, nested.description());
+        out.append("    @Schema(description = ")
+                .append(JavaNames.literal(JavaNames.oneLine(nested.description()))).append(")\n")
+                .append("    public record ").append(nested.name()).append("(\n")
+                .append(components)
+                .append("    ) {\n    }\n");
+        // A nested record can itself contain objects; those were queued during renderComponents above and are
+        // drained by the caller's loop, which keeps every nested type flat in the top-level body.
+    }
+
+    /** Renders the comma-separated component list, one annotated component per pair of lines. */
+    private String renderComponents(List<FieldSpec> fields, int indentSpaces) {
+        String indent = " ".repeat(indentSpaces);
+        List<String> rendered = new ArrayList<>(fields.size());
+        for (FieldSpec f : fields) {
+            StringBuilder component = new StringBuilder();
+            component.append(indent).append("@Schema(description = ")
+                    .append(JavaNames.literal(JavaNames.oneLine(f.description())));
+            if (f.example() != null && !f.example().isBlank()) {
+                component.append(", example = ").append(JavaNames.literal(JavaNames.oneLine(f.example())));
+            }
+            if (f.required()) {
+                component.append(", requiredMode = Schema.RequiredMode.REQUIRED");
+            }
+            component.append(")\n")
+                    .append(indent).append(componentType(f)).append(' ').append(f.name());
+            rendered.add(component.toString());
+        }
+        return String.join(",\n", rendered) + (rendered.isEmpty() ? "" : "\n");
+    }
+
+    /** The Java type for a top-level-or-nested field, queueing a nested record when the field is an object. */
+    private String componentType(FieldSpec f) {
+        return switch (f.type()) {
+            case OBJECT -> queueNested(f.name(), f.description(), f.children());
+            case ARRAY -> {
+                usesList = true;
+                yield "List<" + elementType(f.items()) + ">";
+            }
+            default -> JavaNames.scalarType(f.type(), f.format());
+        };
+    }
+
+    /** The Java type for one array element. Its own name is only used when the element is an object. */
+    private String elementType(FieldSpec item) {
+        return switch (item.type()) {
+            case OBJECT -> queueNested(item.name(), item.description(), item.children());
+            case ARRAY -> {
+                usesList = true;
+                yield "List<" + elementType(item.items()) + ">";
+            }
+            default -> JavaNames.scalarType(item.type(), item.format());
+        };
+    }
+
+    private String queueNested(String fieldName, String description, List<FieldSpec> children) {
+        String name = allocate(JavaNames.pascal(fieldName));
+        pending.addLast(new Nested(name, description, children));
+        return name;
+    }
+
+    /**
+     * Claims a unique simple name within this file. Two object fields named {@code customer} at different levels
+     * would otherwise generate two records called {@code Customer}, which does not compile.
+     */
+    private String allocate(String preferred) {
+        String name = preferred;
+        for (int n = 2; !usedNames.add(name); n++) {
+            name = preferred + n;
+        }
+        return name;
+    }
+
+    private static void appendJavadoc(StringBuilder out, int indentSpaces, String description) {
+        String indent = " ".repeat(indentSpaces);
+        out.append(indent).append("/** ").append(JavaNames.oneLine(description).replace("*/", "*\\/"))
+                .append(" */\n");
+    }
+}

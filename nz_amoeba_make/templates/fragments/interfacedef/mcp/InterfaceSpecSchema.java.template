@@ -5,6 +5,11 @@
 // convention, it is minLength; an unknown property is not ignored, it is additionalProperties:false. All of that is
 // checked BEFORE any Java is written or compiled, which is what makes a bad spec cheap to fix.
 //
+// There are two minLength bars, not one. A parameter or a field description fills a COLUMN of the document and gets
+// the wider bar; an operation summary or a response status line gets the narrow one, because "조회 성공" is a
+// complete answer in a table cell. The wide bar here is only the part of InterfaceSpecValidator's column rule that
+// JSON Schema can express — see MIN_COLUMN_DESCRIPTION_LENGTH.
+//
 // Two things make this schema actually bite:
 //
 //   * protean.mcp.strict-schema=true plus com.networknt:json-schema-validator makes McpDispatcher validate tool
@@ -46,6 +51,16 @@ public final class InterfaceSpecSchema {
 
     /** Placeholder descriptions are caught semantically; the schema only enforces "not empty". */
     private static final int MIN_DESCRIPTION_LENGTH = 2;
+
+    /**
+     * The schema half of InterfaceSpecValidator's column rule (at least 4 letters or digits AND at least 2 words).
+     *
+     * <p>JSON Schema cannot count words, so this is the tightest bound it CAN express: the four characters plus
+     * the one separator they need in order to be two words. Keeping it at exactly that implication is what stops
+     * L1 from rejecting a description L2 would have accepted — the same "must not disagree" contract
+     * {@link #NAME_PATTERN} has with the validator's own name rule.
+     */
+    private static final int MIN_COLUMN_DESCRIPTION_LENGTH = 5;
 
     private InterfaceSpecSchema() {
     }
@@ -125,7 +140,9 @@ public final class InterfaceSpecSchema {
                 "JSON Schema primitive. object and array are only valid for in=query (a repeated value).");
         p.putObject("required").put("type", "boolean")
                 .put("description", "Whether the caller must supply it. A path parameter is always true.");
-        described(p, "description", "What this parameter means.");
+        describedColumn(p, "description", "What this parameter means. This fills the description column of the "
+                + "interface document, so write at least two words carrying at least four letters or digits — a "
+                + "bare noun that repeats the name documents nothing.");
         string(p, "example", "Example value. REQUIRED for a path parameter: it is substituted into the "
                 + "generated verification probe path, and without it the operation drops out of probe coverage.");
         required(s, "name", "in", "type", "required", "description");
@@ -154,8 +171,10 @@ public final class InterfaceSpecSchema {
                 + "type: int32 gives Integer (integer defaults to Long), float/double give Float/Double "
                 + "(number defaults to BigDecimal).");
         p.putObject("required").put("type", "boolean").put("description", "Whether the field must be present.");
-        described(p, "description", "What this field means. This text becomes the @Schema description in the "
-                + "generated DTO and the description column in the document.");
+        describedColumn(p, "description", "What this field means. This text becomes the @Schema description in "
+                + "the generated DTO and the description column in the document, so write at least two words "
+                + "carrying at least four letters or digits — a bare noun that repeats the name documents "
+                + "nothing.");
         string(p, "example", "Example value.");
         ObjectNode children = p.putObject("children");
         children.put("type", "array")
@@ -189,8 +208,20 @@ public final class InterfaceSpecSchema {
 
     /** A description-bearing string: non-empty is enforced here, placeholder detection is semantic. */
     private static void described(ObjectNode properties, String name, String description) {
+        describedAtLeast(properties, name, MIN_DESCRIPTION_LENGTH, description);
+    }
+
+    /**
+     * A description that fills a COLUMN of the document, held to the wider bar. The word-count half of the rule
+     * lives in InterfaceSpecValidator; this catches the cheap half before any Java is written.
+     */
+    private static void describedColumn(ObjectNode properties, String name, String description) {
+        describedAtLeast(properties, name, MIN_COLUMN_DESCRIPTION_LENGTH, description);
+    }
+
+    private static void describedAtLeast(ObjectNode properties, String name, int minLength, String description) {
         properties.putObject(name).put("type", "string")
-                .put("minLength", MIN_DESCRIPTION_LENGTH).put("description", description);
+                .put("minLength", minLength).put("description", description);
     }
 
     private static void enumOf(ObjectNode properties, String name, String[] values, String description) {

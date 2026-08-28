@@ -93,7 +93,7 @@ class InterfaceSpecSchemaTest {
     void resolvesRecursiveFieldReferencesThroughChildrenAndItems() {
         accepts(nested("""
                 [{
-                  "name": "outer", "type": "object", "required": true, "description": "겉 객체",
+                  "name": "outer", "type": "object", "required": true, "description": "바깥쪽 객체",
                   "children": [{
                     "name": "items", "type": "array", "required": true, "description": "상품 목록",
                     "items": {
@@ -106,12 +106,50 @@ class InterfaceSpecSchemaTest {
                 }]"""));
     }
 
+    /**
+     * The column bar, in the layer that can express half of it. Four characters is one short of the minimum a
+     * two-word description can occupy, so L1 rejects it before any Java is written; the word count itself is
+     * InterfaceSpecValidator's half.
+     */
+    @Test
+    void rejectsAFieldDescriptionBelowTheColumnBar() {
+        rejectsAt(nested("""
+                [{"name": "cell", "type": "integer", "required": true, "description": "칸 값"}]"""),
+                "$.interface.operations[0].requestBody[0].description");
+    }
+
+    /**
+     * The other half of scoping that bar to columns: a summary and a status line stay on the narrow bar, so a
+     * two-character one is still valid input. `nested()` already carries both, so this pins them explicitly.
+     */
+    @Test
+    void acceptsAShortSummaryAndStatusDescription() {
+        accepts("""
+                {
+                  "moduleId": "orders",
+                  "version": "1.0.0",
+                  "packageName": "module.orders",
+                  "interface": {
+                    "description": "주문을 생성한다",
+                    "operations": [{
+                      "operationId": "createOrder",
+                      "method": "POST",
+                      "path": "/orders",
+                      "summary": "생성",
+                      "description": "주문 한 건을 만든다",
+                      "responses": [{"status": 201, "description": "성공"}]
+                    }]
+                  }
+                }
+                """);
+    }
+
     /** A bad type deep inside the recursion must still be caught, not just at the top level. */
     @Test
     void rejectsABadTypeInsideANestedField() {
         rejectsAt(nested("""
                 [{
-                  "name": "outer", "type": "object", "required": true, "description": "겉 객체",
+                  "name": "outer", "type": "object", "required": true, "description": "바깥쪽 객체",
                   "children": [
                     {"name": "sku", "type": "str", "required": true, "description": "상품 코드"}
                   ]

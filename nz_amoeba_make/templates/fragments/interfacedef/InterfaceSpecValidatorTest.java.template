@@ -118,6 +118,58 @@ class InterfaceSpecValidatorTest {
                 List.of(), null, List.of(new ResponseSpec(200, "성공", List.of())))), "placeholder");
     }
 
+    // --- column descriptions carry the document's 설명 column, so they answer to a wider bar ---
+
+    /** A bare noun is the shape a "has a description" check is usually gamed with. */
+    @Test
+    void aSingleWordFieldDescriptionIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(FieldSpec.scalar("orderId", FieldType.INTEGER, true, "주문번호")),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "a single word does not describe a column");
+    }
+
+    /** Length alone must not buy a pass, which is why the rule counts words and not characters. */
+    @Test
+    void aLongSingleWordFieldDescriptionIsStillRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(FieldSpec.scalar("sku", FieldType.STRING, true, "aaaaaaaaaaaaaaaaaaaa")),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "a single word does not describe a column");
+    }
+
+    /** Two words of two characters carry no more than one word of four, so substance is checked separately. */
+    @Test
+    void aFieldDescriptionWithTooFewLettersIsRejected() {
+        rejects(spec(new OperationSpec("op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(FieldSpec.scalar("cell", FieldType.INTEGER, true, "칸 값")),
+                List.of(new ResponseSpec(200, "성공", List.of())))), "too thin for the document");
+    }
+
+    /** The bar must not reject good short Korean: character count is a poor proxy for detail. */
+    @Test
+    void aShortButRealFieldDescriptionPasses() {
+        assertEquals(List.of(), InterfaceSpecValidator.validate(spec(new OperationSpec(
+                "op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(FieldSpec.scalar("name", FieldType.STRING, true, "고객 이름")),
+                List.of(new ResponseSpec(200, "성공", List.of()))))));
+    }
+
+    /** An IME's ideographic space still separates two words, or a correct description would be rejected. */
+    @Test
+    void anIdeographicSpaceSeparatesWords() {
+        assertEquals(List.of(), InterfaceSpecValidator.validate(spec(new OperationSpec(
+                "op", HttpMethod.POST, "/x", "요약", "설명 문장", List.of(),
+                List.of(FieldSpec.scalar("name", FieldType.STRING, true, "고객　이름")),
+                List.of(new ResponseSpec(200, "성공", List.of()))))));
+    }
+
+    /** The column bar is scoped to columns: a summary and a status line are complete when they are short. */
+    @Test
+    void summaryAndResponseDescriptionMayStayShort() {
+        assertEquals(List.of(), InterfaceSpecValidator.validate(spec(new OperationSpec(
+                "op", HttpMethod.GET, "/x", "조회", "무엇을 조회하는지 적은 문장", List.of(), null,
+                List.of(new ResponseSpec(200, "성공", List.of()))))));
+    }
+
     // --- path <-> parameters cross-check ---
 
     @Test

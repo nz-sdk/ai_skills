@@ -83,6 +83,29 @@ WebSocket handlers have no runtime-registration path; put a WS endpoint in this 
 
 ### Module authoring rules
 
+<!-- [interface_spec_validator ONLY] Drop this block when that capability was not selected — with no
+     amoeba.define_interface there is no generated skeleton and nothing below applies. -->
+**Declare the contract first; you write one file.** Modules here are generated, not hand-written:
+`amoeba.define_interface` takes an `InterfaceSpec` and returns the DTOs, the `@RestController`, the service, the
+Mapper (+ XML) and a contract test. You fill in `<Base>ServiceImpl` and deploy.
+
+| Server-owned — rewritten from the spec on every deploy | Author-owned |
+|---|---|
+| DTO records · `@RestController` · `<Base>Service` interface · `<Base>Mapper` interface | **`<Base>ServiceImpl`** · the SQL in the mapper XML |
+
+Hand edits to a server-owned file are **silently discarded** — each generated file says so in its header.
+`amoeba.skeleton.service-interface` (in `application.yml`) decides whether the service is split into an interface
+plus an implementation; with the interface, a drifting implementation fails to **compile** rather than later.
+
+> **★ A generated `ServiceImpl` throws `UnsupportedOperationException`, and deploying it untouched is SUPPOSED to
+> fail.** Gate 3 probes the declared routes right after install, the stub throws, and protean undeploys and rolls
+> the module back — naming the operation still stubbed. That is the policy working, not a broken platform. Fill in
+> the bodies and deploy again.
+
+Promotion gate ② additionally runs `InterfaceContractRule` over the bytecode of **every** deploy, the
+`/platform/**` admin REST path included — the one path no MCP-level check reaches.
+<!-- [/interface_spec_validator ONLY] -->
+
 **Extend the base types this app provides.** In the MVC shape (Controller → Service → Mapper) the Service and the
 Mapper inherit from `src/main/java/{{PKG_PATH}}/support/`:
 

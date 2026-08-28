@@ -815,6 +815,47 @@ capabilities:
     requires: [swagger_annotations]
     build_deps:
       - "implementation 'com.networknt:json-schema-validator:1.5.9'"
+    # The amoeba.* surface this capability owns. Both are read with a @Value fallback, so the feature works with the
+    # block absent — which is exactly the problem: the project's service-layer standard would be invisible in its
+    # own config, and a change of the library default would silently reshape the next module defined. ASK THEM IN
+    # STEP 5 and write the answer into the TOP-LEVEL `amoeba:` block (they are not protean.* keys).
+    options:
+      - key: amoeba.skeleton.service-interface
+        type: boolean
+        default: true
+        desc: Whether a generated skeleton splits the service into an interface plus an implementation.
+        note: >-
+          THE PROJECT'S SERVICE-LAYER STANDARD, applied when amoeba.define_interface is called without
+          interface.serviceInterface (DefineInterfaceTool reads ${amoeba.skeleton.service-interface:true}).
+            true  — <Base>Service (interface, SERVER-owned) + <Base>ServiceImpl (class, AUTHOR-owned). The
+                    interface's signatures are a function of the spec, so an implementation that drifts from the
+                    declared contract fails to COMPILE — the earliest place to catch it.
+            false — one <Base>Service class (author-owned), a plain Controller/Service/Mapper shape. Fewer files,
+                    but drift surfaces later: at the generated contract test, or at gate 3 after a deploy.
+          The common-support seam does NOT depend on this choice — SkeletonGenerator holds
+          {{PKG}}.support.BaseService as a constant and ServiceLayerOptionTest asserts BOTH shapes extend it.
+
+          ★ THE VALUE IN EFFECT IS SEALED INTO THE SPEC AT define TIME. Changing it never restructures a module
+          already deployed (the deploy wrapper refuses to switch an installed module's shape); it only affects specs
+          defined afterwards. So this is a project standard to decide once, not a runtime tuning knob.
+
+          WRITE IT OUT EVEN WHEN THE ANSWER IS THE DEFAULT, and assert it in ConfigMatchesSelectionTest. That is the
+          one option here where "unset = library default, left as a comment" is the wrong call: the standard has to
+          be visible to whoever reads the config, and pinned so a silent edit breaks a test instead of the next
+          module. (Verified on a generated sample: the block was missing entirely and the policy looked switched off
+          while being fully active.)
+      - key: amoeba.interface.contract-rule-enabled
+        type: boolean
+        default: true
+        advanced: true
+        desc: Kill switch for the L3 promotion-gate rule (gate/InterfaceContractRule).
+        note: >-
+          NOT A TUNING KNOB. L3 is the only enforcement layer no deploy path can bypass — RuleSystem runs it over
+          the compiled bytecode of every install, the /platform/** admin REST surface included, which neither the
+          MCP wrappers nor ModuleActionAuthorizer ever see. Setting it false leaves that path unguarded.
+          Leave it UNSET (library default true) and offer it as a commented edit-point in application.yml with that
+          sentence attached, so a reader learns the switch exists without being invited to flip it. Only reason to
+          set false: debugging the rule itself.
     fragment_bundle:
       dir: interfacedef
       package: "{{PKG}}.interfacedef"
@@ -882,6 +923,16 @@ capabilities:
       promotion gate 2) rejects the wrong BYTECODE and is the ONLY layer no deploy path can bypass, the admin REST
       surface included. Also renders the spec to a markdown contract document and to OpenAPI 3.0.3, both pure
       functions of the spec, so neither can disagree with what was deployed.
+
+      Descriptions answer to two bars, because they are not all the same kind of text. A parameter or a field
+      description fills a COLUMN of the document (`| 명칭 | 타입 | 필수 | 설명 |`) and becomes the DTO's @Schema
+      description, so it must carry at least 4 letters or digits AND at least 2 words — a bare noun that restates
+      the field name is rejected, and padding a single word to any length does not help, because the rule counts
+      words rather than characters (character count is a poor proxy for detail in Korean: "고객 이름" is a good
+      description at five characters and "aaaaaaaaaa" is not one at ten). An operation summary and a response
+      status line stay on the narrow "not empty" bar, where "조회 성공" is a complete answer. L1 enforces the part
+      of the column rule JSON Schema can express (minLength 5, the tightest bound a two-word 4-letter string
+      implies); L2 enforces the rule itself.
     note: >-
       ★ requires swagger_annotations, AND THAT IS A PRODUCT REQUIREMENT, NOT A TEST DETAIL. The generator emits the
       annotations UNCONDITIONALLY — gen/DtoWriter writes `import io.swagger.v3.oas.annotations.media.Schema` into

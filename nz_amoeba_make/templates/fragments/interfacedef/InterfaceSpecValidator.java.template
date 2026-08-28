@@ -12,6 +12,12 @@
 // and the whole point of the spec is to be the source of the interface document. A placeholder that passes review is
 // worse than a rejection, because it ships as documentation.
 //
+// Descriptions are held to two bars, because they are not all the same kind of text. A parameter or a field fills a
+// COLUMN of the document (`| 명칭 | 타입 | 필수 | 설명 |`) and becomes the DTO's @Schema description, so it has to
+// carry meaning: see checkColumnDescription. An operation summary or a response status line is a table cell and a
+// heading, where "조회 성공" is a complete answer — holding those to the same bar would push filler into the two
+// places the document has least room for it.
+//
 // Returns a list of violation messages rather than throwing per-problem, matching org.htcom.protean.gate.rules.CodeRule
 // so a caller reports every problem in one round trip instead of one per retry.
 package {{PKG}}.interfacedef;
@@ -59,6 +65,26 @@ public final class InterfaceSpecValidator {
     private static final int MAX_FIELD_DEPTH = 8;
 
     private static final int MIN_DESCRIPTION_LENGTH = 2;
+
+    /**
+     * Substance required of a COLUMN description — a parameter or a field — counted after {@link #normalize}, so
+     * spacing and punctuation cannot pad it.
+     *
+     * <p>Raw character count is a poor proxy for detail in Korean: {@code "고객 이름"} is a good description at five
+     * characters and {@code "aaaaaaaaaa"} is not one at ten. So the bar is two-part — this, plus
+     * {@link #MIN_COLUMN_DESCRIPTION_WORDS} — and it is the word count that a bare noun cannot satisfy.
+     */
+    private static final int MIN_COLUMN_DESCRIPTION_CHARS = 4;
+
+    /** A column description must be more than one word, which is what rules out restating the field name. */
+    private static final int MIN_COLUMN_DESCRIPTION_WORDS = 2;
+
+    /**
+     * Word separator. {@code UNICODE_CHARACTER_CLASS} is what makes {@code \s} cover the ideographic space
+     * (U+3000) and NBSP — a Korean IME emits those often enough that treating them as ordinary characters would
+     * count {@code "고객　이름"} as one word and reject a description that reads correctly.
+     */
+    private static final Pattern WORD_SPLIT = Pattern.compile("\\s+", Pattern.UNICODE_CHARACTER_CLASS);
 
     /**
      * Placeholder markers, already in {@link #normalize} form (lowercase, letters and digits only) so they are
@@ -218,7 +244,7 @@ public final class InterfaceSpecValidator {
             } else {
                 checkWireName(violations, pAt + ".name", p.name());
             }
-            checkDescription(violations, pAt + ".description", p.description(), p.name());
+            checkColumnDescription(violations, pAt + ".description", p.description(), p.name());
 
             if (p.in() == null) {
                 violations.add(pAt + ".in: required");
@@ -325,7 +351,7 @@ public final class InterfaceSpecValidator {
 
     /** Validates one field's own attributes and its nested shape. Shared by sibling lists and array items. */
     private static void checkField(List<String> violations, String at, FieldSpec f, int depth) {
-        checkDescription(violations, at + ".description", f.description(), f.name());
+        checkColumnDescription(violations, at + ".description", f.description(), f.name());
 
         if (f.type() == null) {
             violations.add(at + ".type: required");
@@ -410,36 +436,68 @@ public final class InterfaceSpecValidator {
      *
      * @param subject the name this description is attached to — a description that merely repeats it carries no
      *                information, which is the most common way a "has a description" check gets gamed
+     * @return whether the description survived, so a caller layering a further rule on top knows it may add its
+     *         own violation instead of stacking a second complaint onto one already-rejected string
      */
-    private static void checkDescription(List<String> violations, String at, String description, String subject) {
+    private static boolean checkDescription(List<String> violations, String at, String description,
+                                            String subject) {
         if (description == null || description.isBlank()) {
             violations.add(at + ": required (it is the source of the interface document)");
-            return;
+            return false;
         }
         String trimmed = description.trim();
         if (trimmed.length() < MIN_DESCRIPTION_LENGTH) {
             violations.add(at + ": too short to be a description ('" + trimmed + "')");
-            return;
+            return false;
         }
         String normalized = normalize(trimmed);
         if (normalized.isEmpty()) {
             violations.add(at + ": must contain letters or digits, not only punctuation ('" + trimmed + "')");
-            return;
+            return false;
         }
         if (PLACEHOLDER_EXACT.contains(normalized)
                 || PLACEHOLDER_CONTAINS.stream().anyMatch(normalized::contains)) {
             violations.add(at + ": looks like a placeholder ('" + trimmed + "')");
-            return;
+            return false;
         }
         if (subject != null && !subject.isBlank() && normalized.equals(normalize(subject))) {
             violations.add(at + ": only repeats '" + subject + "' — describe what it means");
-            return;
+            return false;
         }
         for (FieldType type : FieldType.values()) {
             if (normalized.equals(type.wire())) {
                 violations.add(at + ": only names the type ('" + trimmed + "')");
-                return;
+                return false;
             }
+        }
+        return true;
+    }
+
+    /**
+     * The bar for a description that fills a COLUMN of the interface document — a parameter or a field.
+     *
+     * <p>This text is the {@code 설명} cell of `| 명칭 | 타입 | 필수 | 설명 |` and the {@code @Schema(description
+     * = ...)} of the generated DTO, so "present and not a placeholder" is not enough: a bare noun that echoes the
+     * column beside it documents nothing. Everything {@link #checkDescription} rejects is still rejected — the
+     * detail bar is only applied once those passed, so one bad description yields one violation rather than three.
+     */
+    private static void checkColumnDescription(List<String> violations, String at, String description,
+                                               String subject) {
+        if (!checkDescription(violations, at, description, subject)) {
+            return;
+        }
+        String trimmed = description.trim();
+        if (normalize(trimmed).length() < MIN_COLUMN_DESCRIPTION_CHARS) {
+            violations.add(at + ": too thin for the document's description column — needs at least "
+                    + MIN_COLUMN_DESCRIPTION_CHARS + " letters or digits ('" + trimmed + "')");
+            return;
+        }
+        // A token of pure punctuation is not a word, so "주문 —" stays a one-word description rather than passing
+        // on a dash. normalize() is the same emptiness test used above, for one definition of "carries content".
+        long words = WORD_SPLIT.splitAsStream(trimmed).filter(word -> !normalize(word).isEmpty()).count();
+        if (words < MIN_COLUMN_DESCRIPTION_WORDS) {
+            violations.add(at + ": a single word does not describe a column — write at least "
+                    + MIN_COLUMN_DESCRIPTION_WORDS + " words saying what it means ('" + trimmed + "')");
         }
     }
 

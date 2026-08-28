@@ -82,12 +82,13 @@ class SkeletonGeneratorTest {
                                 FieldSpec.scalar("money", FieldType.NUMBER, true, "정밀 소수"),
                                 FieldSpec.scalar("ratio", FieldType.NUMBER, "double", true, "배정밀도 소수"),
                                 FieldSpec.scalar("flag", FieldType.BOOLEAN, false, "참거짓 값"),
-                                new FieldSpec("grid", FieldType.ARRAY, null, true, "행 목록", null, List.of(),
-                                        new FieldSpec("row", FieldType.ARRAY, null, true, "한 행", null, List.of(),
-                                                FieldSpec.scalar("cell", FieldType.INTEGER, true, "칸 값"))),
-                                new FieldSpec("outer", FieldType.OBJECT, null, true, "겉 객체", null,
+                                new FieldSpec("grid", FieldType.ARRAY, null, true, "격자의 행 목록", null, List.of(),
+                                        new FieldSpec("row", FieldType.ARRAY, null, true, "격자의 한 행", null,
+                                                List.of(),
+                                                FieldSpec.scalar("cell", FieldType.INTEGER, true, "한 칸의 값"))),
+                                new FieldSpec("outer", FieldType.OBJECT, null, true, "바깥쪽 객체", null,
                                         List.of(new FieldSpec("inner", FieldType.OBJECT, null, true,
-                                                "안 객체", null,
+                                                "안쪽 객체", null,
                                                 List.of(FieldSpec.scalar("leaf", FieldType.STRING, true,
                                                         "가장 안쪽 값")), null)), null)),
                         List.of(new ResponseSpec(204, "본문 없이 성공", List.of())))));
@@ -100,11 +101,11 @@ class SkeletonGeneratorTest {
         InterfaceSpec spec = new InterfaceSpec("t", "같은 이름의 중첩 객체를 두 번 담는다", DataAccess.NONE,
                 List.of(new OperationSpec("collide", HttpMethod.POST, "/collide", "충돌", "이름 충돌 확인",
                         List.of(),
-                        List.of(new FieldSpec("detail", FieldType.OBJECT, null, true, "겉 상세", null,
+                        List.of(new FieldSpec("detail", FieldType.OBJECT, null, true, "바깥쪽 상세", null,
                                         List.of(new FieldSpec("detail", FieldType.OBJECT, null, true,
-                                                "안 상세", null,
+                                                "안쪽 상세", null,
                                                 List.of(FieldSpec.scalar("value", FieldType.STRING, true,
-                                                        "안쪽 값")), null)), null)),
+                                                        "가장 안쪽 값")), null)), null)),
                         List.of(new ResponseSpec(204, "본문 없이 성공", List.of())))));
         SkeletonBundle bundle = generate(spec);
         String dto = content(bundle, "CollideRequest.java");

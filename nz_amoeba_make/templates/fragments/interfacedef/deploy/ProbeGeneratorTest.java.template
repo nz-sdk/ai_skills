@@ -76,7 +76,7 @@ class ProbeGeneratorTest {
         OperationSpec op = new OperationSpec("replace", HttpMethod.PUT, "/things/{id}", "교체",
                 "대상을 교체한다",
                 List.of(new ParamSpec("id", ParamIn.PATH, FieldType.STRING, true, "대상 식별자", "abc")),
-                List.of(FieldSpec.scalar("name", FieldType.STRING, true, "새 이름")),
+                List.of(FieldSpec.scalar("name", FieldType.STRING, true, "새로 붙일 이름")),
                 List.of(new ResponseSpec(200, "교체 성공", List.of())));
         assertEquals(List.of(), ProbeGenerator.probesFor(spec(op)));
         assertEquals(List.of("replace"), ProbeGenerator.unprobeable(spec(op)));

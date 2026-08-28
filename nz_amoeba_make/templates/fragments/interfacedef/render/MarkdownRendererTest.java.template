@@ -99,12 +99,12 @@ class MarkdownRendererTest {
     @Test
     void arrayOfArrayNestsBrackets() {
         String md = render(withBody(List.of(new FieldSpec("grid", FieldType.ARRAY, null, true,
-                "행 목록", null, List.of(),
+                "격자의 행 목록", null, List.of(),
                 new FieldSpec("row", FieldType.ARRAY, null, true, "한 행의 값 목록", null, List.of(),
-                        FieldSpec.scalar("cell", FieldType.INTEGER, true, "칸 값"))))));
-        assertTrue(md.contains("| `grid` | `array` | ✅ | 행 목록 |"), md);
+                        FieldSpec.scalar("cell", FieldType.INTEGER, true, "한 칸의 값"))))));
+        assertTrue(md.contains("| `grid` | `array` | ✅ | 격자의 행 목록 |"), md);
         assertTrue(md.contains("| `grid[]` | `array` | ✅ | 한 행의 값 목록 |"), md);
-        assertTrue(md.contains("| `grid[][]` | `integer` | ✅ | 칸 값 |"), md);
+        assertTrue(md.contains("| `grid[][]` | `integer` | ✅ | 한 칸의 값 |"), md);
     }
 
     @Test

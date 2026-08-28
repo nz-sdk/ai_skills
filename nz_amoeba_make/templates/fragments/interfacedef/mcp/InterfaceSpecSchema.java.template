@@ -138,6 +138,9 @@ public final class InterfaceSpecSchema {
         enumOf(p, "in", paramInValues(), "Where the parameter travels.");
         enumOf(p, "type", fieldTypeValues(),
                 "JSON Schema primitive. object and array are only valid for in=query (a repeated value).");
+        string(p, "format", "Optional refinement of type, same vocabulary as a body field: int32 gives Integer "
+                + "(integer alone gives Long), float/double give Float/Double (number alone gives BigDecimal). "
+                + "Use it on paging parameters so the generated signature is the type you want rather than a Long.");
         p.putObject("required").put("type", "boolean")
                 .put("description", "Whether the caller must supply it. A path parameter is always true.");
         describedColumn(p, "description", "What this parameter means. This fills the description column of the "

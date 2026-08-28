@@ -39,7 +39,7 @@ class InterfaceSpecValidatorTest {
     }
 
     private static ParamSpec pathParam(String name) {
-        return new ParamSpec(name, ParamIn.PATH, FieldType.STRING, true, "경로 변수 " + name, "x");
+        return new ParamSpec(name, ParamIn.PATH, FieldType.STRING, null, true, "경로 변수 " + name, "x");
     }
 
     @Test
@@ -185,14 +185,14 @@ class InterfaceSpecValidatorTest {
     @Test
     void pathParameterNeedsAnExampleForProbeGeneration() {
         rejects(spec(get("/orders/{orderId}",
-                new ParamSpec("orderId", ParamIn.PATH, FieldType.STRING, true, "주문 번호", null))),
+                new ParamSpec("orderId", ParamIn.PATH, FieldType.STRING, null, true, "주문 번호", null))),
                 "example: required for a path parameter");
     }
 
     @Test
     void optionalPathParameterIsRejected() {
         rejects(spec(get("/orders/{orderId}",
-                new ParamSpec("orderId", ParamIn.PATH, FieldType.STRING, false, "주문 번호", "1"))),
+                new ParamSpec("orderId", ParamIn.PATH, FieldType.STRING, null, false, "주문 번호", "1"))),
                 "always required");
     }
 
@@ -290,10 +290,10 @@ class InterfaceSpecValidatorTest {
     @Test
     void compositeParameterIsOnlyAllowedInQuery() {
         rejects(spec(get("/orders/{orderId}",
-                new ParamSpec("orderId", ParamIn.PATH, FieldType.ARRAY, true, "주문 번호", "1"))),
+                new ParamSpec("orderId", ParamIn.PATH, FieldType.ARRAY, null, true, "주문 번호", "1"))),
                 "only valid for in=query");
         assertEquals(List.of(), InterfaceSpecValidator.validate(spec(get("/orders",
-                new ParamSpec("tags", ParamIn.QUERY, FieldType.ARRAY, false, "태그로 필터", "a")))));
+                new ParamSpec("tags", ParamIn.QUERY, FieldType.ARRAY, null, false, "태그로 필터", "a")))));
     }
 
     @Test

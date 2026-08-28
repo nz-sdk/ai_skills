@@ -218,6 +218,10 @@ public record InterfaceSpec(
     /**
      * A request parameter that has a location: name + attributes + description.
      *
+     * @param format  same meaning as {@link FieldSpec#format()} and read by the same
+     *                {@code JavaNames.scalarType} — {@code int32} gives {@code Integer} where {@code integer}
+     *                alone gives {@code Long}. Present because a paging parameter arriving as a {@code Long} was
+     *                otherwise the service's problem to solve; body fields always had this and parameters did not.
      * @param example used to substitute {@code {var}} when generating a gate-3 probe path, so a path parameter
      *                without an example makes its operation unprobeable
      */
@@ -226,6 +230,7 @@ public record InterfaceSpec(
             String name,
             ParamIn in,
             FieldType type,
+            String format,
             boolean required,
             String description,
             String example

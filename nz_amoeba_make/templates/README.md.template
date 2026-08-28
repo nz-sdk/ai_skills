@@ -85,17 +85,32 @@ WebSocket handlers have no runtime-registration path; put a WS endpoint in this 
 
 <!-- [interface_spec_validator ONLY] Drop this block when that capability was not selected — with no
      amoeba.define_interface there is no generated skeleton and nothing below applies. -->
-**Declare the contract first; you write one file.** Modules here are generated, not hand-written:
-`amoeba.define_interface` takes an `InterfaceSpec` and returns the DTOs, the `@RestController`, the service, the
-Mapper (+ XML) and a contract test. You fill in `<Base>ServiceImpl` and deploy.
+**Declare the contract first; you write exactly four files.** Modules here are generated, not hand-written:
+`amoeba.define_interface` takes an `InterfaceSpec` and returns a full skeleton. You fill in the four author-owned
+files below and deploy.
 
-| Server-owned — rewritten from the spec on every deploy | Author-owned |
+| Server-owned — rewritten from the spec on every deploy | Author-owned — **these four are your job** |
 |---|---|
-| DTO records · `@RestController` · `<Base>Service` interface · `<Base>Mapper` interface | **`<Base>ServiceImpl`** · the SQL in the mapper XML |
+| `<Base>Controller.java` | `<Base>ServiceImpl.java` |
+| `<Base>Service.java` (the interface) | `<Base>Mapper.java` (the interface) |
+| every request/response DTO + one `<Op>Row` record per read operation | `mapper/<module>/<Base>Mapper.xml` |
+| `<Base>MyBatisConfig.java` | `<Base>ContractTest.java` |
 
-Hand edits to a server-owned file are **silently discarded** — each generated file says so in its header.
-`amoeba.skeleton.service-interface` (in `application.yml`) decides whether the service is split into an interface
-plus an implementation; with the interface, a drifting implementation fails to **compile** rather than later.
+Writing `<Base>ServiceImpl.java` and `<Base>Mapper.java` is **not** duplicated work — they are two of the four
+files nothing else fills in. The Mapper interface is yours in particular: the generator seeds its signatures from
+the spec, but its `@Param` bindings and its pairing with the XML are the author's to get right.
+
+Hand edits to a server-owned file are **silently discarded** — each generated file says so in its header. Source of
+truth for this split is `SkeletonGeneratorTest#ownershipSplitIsAsDeclared`, which asserts both lists file by file;
+trust it over this table if the two ever disagree.
+
+> With `amoeba.skeleton.service-interface: false` the split shifts by one: `<Base>Service.java` becomes
+> author-owned and there is no `<Base>ServiceImpl.java`. `ServiceLayerOptionTest` pins that variant.
+
+**Read `replacedFiles` and `seededFiles` in the deploy response** — they are the only way to learn that your work
+was thrown away. A file of *yours* in `replacedFiles` means you got its **filename** wrong, so correct content was
+discarded and a seed used instead. `<Base>ServiceImpl` in `seededFiles` means the throwing stub was installed and
+gate 3 will roll the deploy back.
 
 > **★ A generated `ServiceImpl` throws `UnsupportedOperationException`, and deploying it untouched is SUPPOSED to
 > fail.** Gate 3 probes the declared routes right after install, the stub throws, and protean undeploys and rolls
@@ -104,6 +119,20 @@ plus an implementation; with the interface, a drifting implementation fails to *
 
 Promotion gate ② additionally runs `InterfaceContractRule` over the bytecode of **every** deploy, the
 `/platform/**` admin REST path included — the one path no MCP-level check reaches.
+
+**Two constraints to respect when declaring the contract.** Neither is enforced by the schema, so both cost a
+rolled-back deploy to discover:
+
+- **Declare success as `200`.** `ControllerWriter` emits the mapping annotation and `@Operation` but no
+  `@ResponseStatus`, so a generated handler always answers 200 (a `void` return gives a bodyless 200). Declaring
+  201 or 204 passes validation and then fails gate 3, because the probe expects the declared status. Adding
+  `@ResponseStatus` by hand does not survive the next deploy.
+- **Gate-3 probes really execute, `DELETE` included.** `ProbeGenerator` builds a live HTTP probe for every
+  operation with no request body, a declared 2xx, and an `example` on each `{var}` — so `DELETE /<plural>/{id}`
+  runs on every deploy. `example` is mandatory on a path parameter, so the probe cannot be switched off. Give any
+  table with a DELETE operation a **probe-only reserved row** in its DDL and use that id as the `example`;
+  otherwise each deploy destroys one real record. (`POST`/`PUT` carry bodies, get no probe, and are covered by the
+  generated contract test instead.)
 <!-- [/interface_spec_validator ONLY] -->
 
 **Extend the base types this app provides.** In the MVC shape (Controller → Service → Mapper) the Service and the

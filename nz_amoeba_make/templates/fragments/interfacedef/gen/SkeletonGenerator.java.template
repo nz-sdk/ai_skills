@@ -212,12 +212,16 @@ public final class SkeletonGenerator {
     }
 
     /**
-     * A parameter's Java type. A composite parameter is validated to be a repeated query value, and
-     * {@code ParamSpec} carries no element type, so it degrades to {@code List<String>} — the same degradation
-     * the OpenAPI renderer makes, kept identical on purpose.
+     * A parameter's Java type, narrowed by {@code format} exactly as a body field is — int32 gives Integer where
+     * integer alone gives Long. Passing null here instead of {@code p.format()} was why a paging parameter arrived
+     * as a Long no matter what the spec said.
+     *
+     * <p>A composite parameter is validated to be a repeated query value, and {@code ParamSpec} carries no ELEMENT
+     * type, so it still degrades to {@code List<String>} — the same degradation the OpenAPI renderer makes, kept
+     * identical on purpose.
      */
     private static String paramType(ParamSpec p) {
-        return p.type() == FieldType.ARRAY ? "List<String>" : JavaNames.scalarType(p.type(), null);
+        return p.type() == FieldType.ARRAY ? "List<String>" : JavaNames.scalarType(p.type(), p.format());
     }
 
     private static String uniqueName(String preferred, Set<String> used) {

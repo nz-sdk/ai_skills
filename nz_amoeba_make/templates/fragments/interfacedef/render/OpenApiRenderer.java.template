@@ -100,6 +100,7 @@ public final class OpenApiRenderer {
         putIfPresent(node, "description", p.description());
         ObjectNode schema = node.putObject("schema");
         schema.put("type", p.type().wire());
+        putIfPresent(schema, "format", p.format());
         // A composite query parameter is validated to be an array of repeated values; its element type is not
         // expressible in ParamSpec, so it degrades to a string element rather than an invalid schema with no items.
         if (p.type() == InterfaceSpec.FieldType.ARRAY) {

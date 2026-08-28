@@ -71,12 +71,12 @@ class SkeletonGeneratorTest {
         InterfaceSpec spec = new InterfaceSpec("t", "까다로운 형태를 모두 담은 모듈", DataAccess.NONE, List.of(
                 new OperationSpec("awkward", HttpMethod.POST, "/awkward/{id}",
                         "까다로운 입력", "중첩과 배열과 모든 스칼라 형식을 한 번에 받는다",
-                        List.of(new ParamSpec("id", ParamIn.PATH, FieldType.STRING, true, "대상 식별자", "x"),
-                                new ParamSpec("page-size", ParamIn.QUERY, FieldType.INTEGER, false,
+                        List.of(new ParamSpec("id", ParamIn.PATH, FieldType.STRING, null, true, "대상 식별자", "x"),
+                                new ParamSpec("page-size", ParamIn.QUERY, FieldType.INTEGER, null, false,
                                         "한 페이지 크기", "20"),
-                                new ParamSpec("X-Request-Id", ParamIn.HEADER, FieldType.STRING, false,
+                                new ParamSpec("X-Request-Id", ParamIn.HEADER, FieldType.STRING, null, false,
                                         "요청 추적 식별자", "abc"),
-                                new ParamSpec("tags", ParamIn.QUERY, FieldType.ARRAY, false, "태그로 필터", "a")),
+                                new ParamSpec("tags", ParamIn.QUERY, FieldType.ARRAY, null, false, "태그로 필터", "a")),
                         List.of(FieldSpec.scalar("small", FieldType.INTEGER, "int32", true, "32비트 정수"),
                                 FieldSpec.scalar("big", FieldType.INTEGER, true, "기본 정수"),
                                 FieldSpec.scalar("money", FieldType.NUMBER, true, "정밀 소수"),
@@ -178,7 +178,7 @@ class SkeletonGeneratorTest {
         InterfaceSpec spec = new InterfaceSpec("t", "본문 없는 응답만 담는다", DataAccess.NONE,
                 List.of(new OperationSpec("remove", HttpMethod.DELETE, "/things/{id}", "삭제",
                         "대상을 삭제하고 본문 없이 응답한다",
-                        List.of(new ParamSpec("id", ParamIn.PATH, FieldType.STRING, true, "대상 식별자", "x")),
+                        List.of(new ParamSpec("id", ParamIn.PATH, FieldType.STRING, null, true, "대상 식별자", "x")),
                         null, List.of(new ResponseSpec(204, "본문 없이 성공", List.of())))));
         String controller = content(generate(spec), "OrdersController.java");
         assertTrue(controller.contains("public void remove("), controller);
@@ -265,14 +265,58 @@ class SkeletonGeneratorTest {
                 new SkeletonGenerator.Request("orders", "Module.Orders", SpecFixtures.orders())));
     }
 
+    /**
+     * A parameter's {@code format} must narrow its Java type exactly as a body field's does.
+     *
+     * <p>This is the assertion that would have caught the original defect: paramType() passed null instead of
+     * p.format(), so `integer` always became Long no matter what the spec declared, and every paging parameter
+     * arrived boxed as a Long for the service to convert.
+     */
+    @Test
+    void parameterFormatNarrowsTheGeneratedType() {
+        InterfaceSpec spec = new InterfaceSpec("t", "포맷이 지정된 페이징 파라미터", DataAccess.NONE,
+                List.of(new OperationSpec("listThings", HttpMethod.GET, "/things", "목록", "포맷 반영 확인",
+                        List.of(new ParamSpec("page", ParamIn.QUERY, FieldType.INTEGER, "int32", false,
+                                        "0부터 시작하는 페이지 번호", "0"),
+                                new ParamSpec("total", ParamIn.QUERY, FieldType.INTEGER, null, false,
+                                        "포맷 없는 정수 비교값", "1")),
+                        null, List.of(new ResponseSpec(200, "성공", List.of())))));
+
+        String controller = content(generate(spec), "OrdersController.java");
+
+        assertTrue(controller.contains("Integer page"),
+                "format=int32 must give Integer, not Long: " + controller);
+        assertTrue(controller.contains("Long total"),
+                "integer with no format must stay Long, or the narrowing is unconditional: " + controller);
+    }
+
+    /**
+     * The generated MyBatis config MUST swap the thread-context ClassLoader around afterPropertiesSet().
+     *
+     * <p>A text assertion rather than a behavioural one, deliberately: the failure it guards only appears when a
+     * real module is installed against a real database, so no test in this project can reproduce it. What killed a
+     * deploy once was these lines being absent while everything here stayed green — MyBatis resolves a resultMap
+     * `type=` through the context loader, and protean swaps that loader for gate 1 but not for bean creation. This
+     * catches their removal, which is the part that is cheap to catch.
+     */
+    @Test
+    void generatedMyBatisConfigSwapsTheContextClassLoader() {
+        String config = content(generate(SpecFixtures.orders()), "OrdersMyBatisConfig.java");
+
+        assertTrue(config.contains("setContextClassLoader(OrdersMyBatisConfig.class.getClassLoader())"),
+                "the factory build must run under the module's ClassLoader: " + config);
+        assertTrue(config.contains("finally"),
+                "the swap must be restored in a finally block: " + config);
+    }
+
     /** Two wire names collapsing onto one Java identifier is a generation failure, never a silent rename. */
     @Test
     void collidingParameterIdentifiersFailGeneration() {
         InterfaceSpec spec = new InterfaceSpec("t", "같은 식별자로 접히는 파라미터 둘", DataAccess.NONE,
                 List.of(new OperationSpec("collide", HttpMethod.GET, "/collide", "충돌", "식별자 충돌 확인",
-                        List.of(new ParamSpec("page-size", ParamIn.QUERY, FieldType.INTEGER, false,
+                        List.of(new ParamSpec("page-size", ParamIn.QUERY, FieldType.INTEGER, null, false,
                                         "하이픈 표기 크기", "20"),
-                                new ParamSpec("pageSize", ParamIn.QUERY, FieldType.INTEGER, false,
+                                new ParamSpec("pageSize", ParamIn.QUERY, FieldType.INTEGER, null, false,
                                         "낙타 표기 크기", "20")),
                         null, List.of(new ResponseSpec(200, "성공", List.of())))));
         IllegalStateException e = assertThrows(IllegalStateException.class, () -> generate(spec));

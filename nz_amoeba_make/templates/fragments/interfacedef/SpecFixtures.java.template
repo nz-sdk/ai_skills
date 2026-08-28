@@ -27,7 +27,7 @@ public final class SpecFixtures {
     public static OperationSpec getOrder() {
         return new OperationSpec("getOrder", HttpMethod.GET, "/orders/{orderId}",
                 "주문 단건 조회", "주문 번호로 주문 한 건과 그 상품 목록을 반환한다",
-                List.of(new ParamSpec("orderId", ParamIn.PATH, FieldType.INTEGER, true,
+                List.of(new ParamSpec("orderId", ParamIn.PATH, FieldType.INTEGER, null, true,
                         "조회할 주문 번호", "1001")),
                 null,
                 List.of(new ResponseSpec(200, "조회 성공", orderBody())));

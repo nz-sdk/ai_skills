@@ -274,6 +274,9 @@ final class MyBatisSkeletonWriter {
                 // Per-module SqlSessionFactory over the host DataSource (needsSharedBeans=true), plus one explicit
                 // MapperFactoryBean. The classpath*: pattern reaches this module's own XML because protean serves
                 // module resources through ProteanResourcePatternResolver.
+                //
+                // Do not remove the ClassLoader swap in sqlSessionFactory — see its javadoc. Without it this module
+                // passes its own tests and cannot be installed.
                 package %s;
 
                 import javax.sql.DataSource;
@@ -289,14 +292,34 @@ final class MyBatisSkeletonWriter {
                 @Configuration
                 public class %s {
 
+                    /**
+                     * The thread-context ClassLoader swap is REQUIRED, not defensive.
+                     *
+                     * <p>afterPropertiesSet() is where MyBatis parses the mapper XML, and a {@code resultMap
+                     * type="..."} naming a class in THIS module is resolved through
+                     * {@code Resources.classForName} -> the thread-context ClassLoader. During a deploy that thread
+                     * carries the HOST loader, which cannot see this module's DTOs, so the factory build fails with
+                     * a ClassNotFoundException for a type this very generator emitted.
+                     *
+                     * <p>It is easy to lose because the failure is ASYMMETRIC: protean's ModuleTestRunner swaps the
+                     * context loader around gate 1, so the bundled tests pass and only the real bean creation at
+                     * install time breaks. Removing these lines produces a module that is green in tests and
+                     * un-deployable.
+                     */
                     @Bean
                     public SqlSessionFactory sqlSessionFactory(DataSource dataSource, ApplicationContext context)
                             throws Exception {
                         SqlSessionFactoryBean factory = new SqlSessionFactoryBean();
                         factory.setDataSource(dataSource);
                         factory.setMapperLocations(context.getResources("classpath*:%s"));
-                        factory.afterPropertiesSet();
-                        return factory.getObject();
+                        ClassLoader previous = Thread.currentThread().getContextClassLoader();
+                        Thread.currentThread().setContextClassLoader(%s.class.getClassLoader());
+                        try {
+                            factory.afterPropertiesSet();
+                            return factory.getObject();
+                        } finally {
+                            Thread.currentThread().setContextClassLoader(previous);
+                        }
                     }
 
                     /**
@@ -312,7 +335,7 @@ final class MyBatisSkeletonWriter {
                     }
                 }
                 """.formatted(layout.basePackage(), layout.config(),
-                mapperLocationPattern(layout), layout.fqcn(mapperSimple),
+                mapperLocationPattern(layout), layout.config(), layout.fqcn(mapperSimple),
                 mapperSimple, JavaNames.camel(mapperSimple), mapperSimple, mapperSimple);
     }
 

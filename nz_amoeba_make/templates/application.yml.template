@@ -17,6 +17,19 @@ server:
 spring:
   application:
     name: protean-{{NAME}}-sample
+
+  # Put a deployed module's error MESSAGE in the response body. Without this a ResponseStatusException carrying a
+  # written explanation reaches the caller as a bare {"status":404,"error":"Not Found"} — the text is dropped and
+  # nothing logs that it was.
+  #
+  # A module cannot fix this from its own side: under the interface_spec_validator flow its controller is GENERATED
+  # (an @ExceptionHandler there is discarded on the next deploy), and a @RestControllerAdvice in the module is never
+  # collected because the module lives in a CHILD ApplicationContext.
+  #
+  # Trade-off: error responses become application/problem+json (RFC 9457) app-wide, with the text under `detail`.
+  mvc:
+    problemdetails:
+      enabled: true
   # <<datasource>>  — engine injects spring.datasource here when data access is selected (see db-vendors.yaml)
   #
   # <<jwt-issuer>>  — engine injects spring.security.oauth2.resourceserver.jwt.issuer-uri here when

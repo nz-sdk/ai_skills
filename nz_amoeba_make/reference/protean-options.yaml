@@ -944,6 +944,34 @@ capabilities:
       optional, so it is a hard `requires` rather than a prompt. Selecting this capability must force
       module_classpath `swagger_annotations` on.
 
+      ★ FILE OWNERSHIP — SAY THIS WHEN THE CAPABILITY IS SELECTED. The module author writes EXACTLY FOUR files:
+      <X>ServiceImpl.java, <X>Mapper.java (the interface), mapper/<mod>/<X>Mapper.xml and <X>ContractTest.java.
+      Everything else is server-owned and rewritten from the spec on every deploy: <X>Controller.java,
+      <X>Service.java (the interface), every request/response DTO plus one <Op>Row per read operation, and
+      <X>MyBatisConfig.java. gen/SkeletonGeneratorTest#ownershipSplitIsAsDeclared asserts both lists file by file —
+      read it rather than any prose summary, this one included.
+      TWO WAYS THIS GETS MISREAD, both observed: (1) THE MAPPER INTERFACE IS AUTHOR-OWNED. It is generated from the
+      spec as a seed, which reads like a server-owned file, so a summary that lists it as generated makes an author
+      look like they are redoing generated work when they are doing their job. (2) <X>MyBatisConfig IS server-owned
+      even though the previous convention had it hand-written. With service-interface=false the split shifts by one:
+      <X>Service.java becomes author-owned and <X>ServiceImpl disappears (ServiceLayerOptionTest pins that).
+      The deploy response reports mistakes rather than blocking them — SpecBearingDeployTool emits replacedFiles
+      (server-owned files you submitted; your edits were discarded — one of YOUR four in here means a wrong
+      filename) and seededFiles (author-owned files you omitted; ServiceImpl here means the throwing stub shipped
+      and gate 3 will roll the deploy back). Tell the user to read both.
+
+      ★ TWO CONSTRAINTS THE SCHEMA DOES NOT ENFORCE — say them when this capability is selected, because each one
+      otherwise costs a rolled-back deploy to discover.
+        1. SUCCESS STATUS MUST BE 200. gen/ControllerWriter emits no @ResponseStatus, so a generated handler always
+           answers 200. Declaring 201/204 passes L1 and L2 and then FAILS GATE 3, because the probe expects the
+           declared status while the handler returns 200. Hand-adding @ResponseStatus does not survive the next
+           deploy (the controller is server-owned). Deliberately not fixed in the generator; documented instead.
+        2. GATE-3 PROBES ARE DESTRUCTIVE. deploy/ProbeGenerator builds a live HTTP probe per operation with no
+           request body, a declared 2xx, and an example on every {var} — so DELETE /<plural>/{id} EXECUTES ON EVERY
+           DEPLOY. example is mandatory on a path parameter (InterfaceSpecValidator), so the probe cannot be turned
+           off. Tell the user to add a probe-only reserved row to any table carrying a DELETE operation and use that
+           row id as the example.
+
       SUPERSEDES THE OLD 5-FILE BUNDLE. This capability used to emit only InterfaceSpec + InterfaceSpecValidator +
       a ValidateInterfaceTool worked example. That tool is GONE: amoeba.define_interface performs the same
       validation and then keeps the draft, so shipping both would list two tools differing only in whether the

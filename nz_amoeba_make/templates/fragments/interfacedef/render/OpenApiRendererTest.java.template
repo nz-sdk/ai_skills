@@ -97,7 +97,7 @@ class OpenApiRendererTest {
     void arrayQueryParameterGetsAnItemsSchema() {
         ObjectNode doc = render(new InterfaceSpec("t", "이 모듈이 하는 일", DataAccess.NONE,
                 List.of(new OperationSpec("op", HttpMethod.GET, "/x", "요약", "설명 문장",
-                        List.of(new ParamSpec("tags", ParamIn.QUERY, FieldType.ARRAY, false,
+                        List.of(new ParamSpec("tags", ParamIn.QUERY, FieldType.ARRAY, null, false,
                                 "태그로 필터", "a")),
                         null, List.of(new ResponseSpec(200, "성공", List.of()))))));
         JsonNode schema = doc.at("/paths/~1x/get/parameters/0/schema");
@@ -154,6 +154,26 @@ class OpenApiRendererTest {
         assertTrue(response.has("description"), response::toString);
         assertEquals("", response.get("description").asText());
         assertFalse(response.has("content"), response::toString);
+    }
+
+    /**
+     * A parameter's format has to reach the document, not just the generated Java. An OpenAPI consumer reading
+     * `type: integer` with no `format` will assume a 64-bit value, which is exactly what the generated signature
+     * no longer is.
+     */
+    @Test
+    void parameterFormatReachesTheDocument() {
+        InterfaceSpec spec = new InterfaceSpec("t", "포맷이 지정된 파라미터", DataAccess.NONE,
+                List.of(new OperationSpec("listThings", HttpMethod.GET, "/things", "목록", "파라미터 포맷 확인",
+                        List.of(new ParamSpec("page", ParamIn.QUERY, FieldType.INTEGER, "int32", false,
+                                "0부터 시작하는 페이지 번호", "0")),
+                        null, List.of(new ResponseSpec(200, "성공", List.of())))));
+
+        JsonNode parameter = new OpenApiRenderer(new ObjectMapper())
+                .render("things", "1", spec)
+                .path("paths").path("/things").path("get").path("parameters").path(0);
+
+        assertEquals("int32", parameter.path("schema").path("format").asText());
     }
 
     @Test

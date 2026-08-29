@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.SkeletonDefaults;
 import {{PKG}}.interfacedef.InterfaceSpec;
 import org.htcom.protean.mcp.McpToolResult;
 import org.htcom.protean.mcp.ModuleActionAuthorizer;
@@ -24,7 +25,7 @@ class DefineInterfaceToolTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final DraftStore draftStore = new DraftStore();
     /** true = the shipped default, so every existing expectation here is about the interface-bearing shape. */
-    private final DefineInterfaceTool tool = new DefineInterfaceTool(mapper, draftStore, true);
+    private final DefineInterfaceTool tool = new DefineInterfaceTool(mapper, draftStore, new SkeletonDefaults("none", true, true));
 
     private static final String VALID = """
             {
@@ -282,7 +283,7 @@ class DefineInterfaceToolTest {
     void serviceInterfaceDefaultsToTheProjectSettingWhenOmitted() {
         // The tool under test was built with the default true; a tool built with false must generate the other
         // shape from the very same request JSON.
-        DefineInterfaceTool interfaceLess = new DefineInterfaceTool(mapper, new DraftStore(), false);
+        DefineInterfaceTool interfaceLess = new DefineInterfaceTool(mapper, new DraftStore(), new SkeletonDefaults("none", false, true));
         McpToolResult result;
         try {
             result = interfaceLess.call(mapper.readTree(VALID), null);
@@ -304,7 +305,7 @@ class DefineInterfaceToolTest {
     /** An explicit value must beat the project default, in the direction the default does not point. */
     @Test
     void explicitChoiceOverridesTheProjectDefault() {
-        DefineInterfaceTool interfaceLess = new DefineInterfaceTool(mapper, new DraftStore(), false);
+        DefineInterfaceTool interfaceLess = new DefineInterfaceTool(mapper, new DraftStore(), new SkeletonDefaults("none", false, true));
         McpToolResult result;
         try {
             ObjectNode root = (ObjectNode) mapper.readTree(VALID);
@@ -327,7 +328,7 @@ class DefineInterfaceToolTest {
     @Test
     void theResolvedChoiceIsSealedIntoTheStoredDraft() {
         DraftStore store = new DraftStore();
-        DefineInterfaceTool interfaceLess = new DefineInterfaceTool(mapper, store, false);
+        DefineInterfaceTool interfaceLess = new DefineInterfaceTool(mapper, store, new SkeletonDefaults("none", false, true));
         McpToolResult result;
         try {
             result = interfaceLess.call(mapper.readTree(VALID), null);

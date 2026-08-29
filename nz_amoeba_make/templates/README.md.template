@@ -85,54 +85,67 @@ WebSocket handlers have no runtime-registration path; put a WS endpoint in this 
 
 <!-- [interface_spec_validator ONLY] Drop this block when that capability was not selected — with no
      amoeba.define_interface there is no generated skeleton and nothing below applies. -->
-**Declare the contract first; you write exactly four files.** Modules here are generated, not hand-written:
-`amoeba.define_interface` takes an `InterfaceSpec` and returns a full skeleton. You fill in the four author-owned
-files below and deploy.
+**Declare the contract first, then write only what the server cannot derive.** Modules here are generated:
+`amoeba.define_interface` takes an `InterfaceSpec` and returns a full skeleton.
 
-| Server-owned — rewritten from the spec on every deploy | Author-owned — **these four are your job** |
+| Server-owned — rewritten from the spec on every deploy | Author-owned |
 |---|---|
-| `<Base>Controller.java` | `<Base>ServiceImpl.java` |
-| `<Base>Service.java` (the interface) | `<Base>Mapper.java` (the interface) |
-| every request/response DTO + one `<Op>Row` record per read operation | `mapper/<module>/<Base>Mapper.xml` |
-| `<Base>MyBatisConfig.java` | `<Base>ContractTest.java` |
+| `<Base>Controller.java` | `<Base>Service.java` (or `<Base>ServiceImpl.java`) |
+| `<Base>Service.java` (the interface, when `service-interface: true`) | `mapper/<module>/<Base>Mapper.xml` — **the SQL** |
+| every request/response DTO + one `<Op>Row` per read operation | `<Base>ContractTest.java` |
+| **`<Base>Mapper.java`** · `<Base>MyBatisConfig.java` | |
 
-Writing `<Base>ServiceImpl.java` and `<Base>Mapper.java` is **not** duplicated work — they are two of the four
-files nothing else fills in. The Mapper interface is yours in particular: the generator seeds its signatures from
-the spec, but its `@Param` bindings and its pairing with the XML are the author's to get right.
+**Ask the server, do not trust this table.** Read `files[].serverOwned` from the `define_interface` response — it is
+the only authority, and it changes with `application.yml`. Do **not** trust a generated file's header either: a
+header once said "AUTHORED. Add methods freely" on a file that was already server-owned, and everything added to it
+was discarded. `SkeletonGeneratorTest#ownershipSplitIsAsDeclared` pins the split in code.
 
-Hand edits to a server-owned file are **silently discarded** — each generated file says so in its header. Source of
-truth for this split is `SkeletonGeneratorTest#ownershipSplitIsAsDeclared`, which asserts both lists file by file;
-trust it over this table if the two ever disagree.
+**Read `replacedFiles` and `seededFiles` in the deploy response** — the only way to learn your work was thrown away.
+One of *your* files in `replacedFiles` means you got its **filename** wrong. `<Base>Service`/`ServiceImpl` in
+`seededFiles` means the throwing stub shipped and gate 3 will roll the deploy back.
 
-> With `amoeba.skeleton.service-interface: false` the split shifts by one: `<Base>Service.java` becomes
-> author-owned and there is no `<Base>ServiceImpl.java`. `ServiceLayerOptionTest` pins that variant.
-
-**Read `replacedFiles` and `seededFiles` in the deploy response** — they are the only way to learn that your work
-was thrown away. A file of *yours* in `replacedFiles` means you got its **filename** wrong, so correct content was
-discarded and a seed used instead. `<Base>ServiceImpl` in `seededFiles` means the throwing stub was installed and
-gate 3 will roll the deploy back.
-
-> **★ A generated `ServiceImpl` throws `UnsupportedOperationException`, and deploying it untouched is SUPPOSED to
+> **★ A generated service stub throws `UnsupportedOperationException`, and deploying it untouched is SUPPOSED to
 > fail.** Gate 3 probes the declared routes right after install, the stub throws, and protean undeploys and rolls
-> the module back — naming the operation still stubbed. That is the policy working, not a broken platform. Fill in
-> the bodies and deploy again.
+> the module back — naming the operation still stubbed. That is the policy working.
 
-Promotion gate ② additionally runs `InterfaceContractRule` over the bytecode of **every** deploy, the
-`/platform/**` admin REST path included — the one path no MCP-level check reaches.
+**The Mapper interface is server-owned, so you cannot add methods to it.** Two consequences that changed how real
+modules were written:
 
-**Two constraints to respect when declaring the contract.** Neither is enforced by the schema, so both cost a
-rolled-back deploy to discover:
+- **Duplicate detection is a DB unique constraint**, not a pre-read: catch `DuplicateKeyException` → 409. That also
+  removes the race between checking and inserting. The unique key in your DDL is then **the only thing enforcing
+  it** — drop it and duplicates enter silently.
+- **Read-after-write goes through the existing search method plus an exact-match filter.** A `LIKE %CODE001%` also
+  matches `CODE0010`; without the filter you return the wrong row. Pin that boundary in the contract test.
+- A **list operation** gets a `count<Op>` method generated alongside it, because one method cannot return both the
+  rows and the total and you cannot add the second one yourself.
 
-- **Declare success as `200`.** `ControllerWriter` emits the mapping annotation and `@Operation` but no
-  `@ResponseStatus`, so a generated handler always answers 200 (a `void` return gives a bodyless 200). Declaring
-  201 or 204 passes validation and then fails gate 3, because the probe expects the declared status. Adding
-  `@ResponseStatus` by hand does not survive the next deploy.
-- **Gate-3 probes really execute, `DELETE` included.** `ProbeGenerator` builds a live HTTP probe for every
-  operation with no request body, a declared 2xx, and an `example` on each `{var}` — so `DELETE /<plural>/{id}`
-  runs on every deploy. `example` is mandatory on a path parameter, so the probe cannot be switched off. Give any
-  table with a DELETE operation a **probe-only reserved row** in its DDL and use that id as the `example`;
-  otherwise each deploy destroys one real record. (`POST`/`PUT` carry bodies, get no probe, and are covered by the
-  generated contract test instead.)
+**Gate 2 is a bytecode check — it cannot be worked around.** `@Schema` is required on `@Mapper` abstract methods
+and on `*Request`/`*Response`/`*Row` record components; `ResponseEntity`, `Map` and `Object` are rejected as return
+types; and an inner type must not END with those three suffixes (nested names like `Foo$Row` are checked too).
+
+**After deploying, check `desiredState: ACTIVE` AND `boundGeneration != null`.** With a null generation the state
+reads ACTIVE while no route is bound, so every endpoint 404s — and that 404 is the server's, not your module's,
+which makes it read like a client wiring problem.
+
+**Routes mount at the root, REST-style.** `GET /cars`, not `GET /api/car/cars`. A UI's `/api` prefix is the proxy's
+business, not the module's.
+
+**A list response is `{items, total, page, size}`**, where `total` is the count *before* paging. Share the column
+list and the WHERE with `<sql>` so the page query and the count query cannot drift apart when a filter is added.
+Compute the offset with `<bind name="offset" value="page * size"/>` — MySQL's `LIMIT` takes no expression, and
+`${}` is an injection surface. Map records with an explicit `<constructor>`: automatic constructor mapping depends
+on whether `-parameters` was passed and fails quietly when it was not.
+
+**Declared success statuses are realised.** A spec that says `201` or `204` gets `@ResponseStatus` on the generated
+handler, so REST conventions work and the gate-3 probe sees the same status the spec declared.
+
+**Gate-3 probes are generated only for non-mutating operations.** `DELETE`, `PUT` and `PATCH` are never probed
+automatically — a probe is a real request, and an auto-generated `DELETE` deleted a live row on every deploy before
+this rule existed. Route registration is still verified separately, so nothing is lost. A `GET` probe **does** run,
+and it substitutes the path parameter's `example`: **that value must exist at deploy time**, so give the table a
+probe-only reserved row and name it in `example`. To probe a mutation deliberately, pass it yourself in
+`verification.integration` — a caller-supplied probe replaces the auto-generated one for the same method and path.
+
 <!-- [/interface_spec_validator ONLY] -->
 
 **Extend the base types this app provides.** In the MVC shape (Controller → Service → Mapper) the Service and the
@@ -157,10 +170,23 @@ for the whole exchange.
 > **`@Transactional` is silently ignored until your module enables it.** A module runs in a child
 > `ApplicationContext`; `@EnableTransactionManagement` and Boot's transaction autoconfiguration ran in the *host*
 > context, and Spring's BeanPostProcessors are per-context — so the host's transaction advisor never proxies a
-> module bean. The method just runs, without a transaction and without an error. Either add
-> `@EnableTransactionManagement` plus a `PlatformTransactionManager` to your module's own `@Configuration`, or
-> inject the host's `PlatformTransactionManager` and use a `TransactionTemplate` (nothing to forget, nothing to
-> no-op).
+> module bean. The method just runs, without a transaction and without an error.
+>
+> **Design so you do not need one: one use case = one write statement.** Needing several is itself a signal to
+> revisit the design, because the annotation that looks like it protects you does nothing.
+>
+> The two escape hatches are **conditional on this project's configuration**, and under a pinned skeleton
+> (`amoeba.skeleton.spec-overrides-allowed: false`) the first one does not exist:
+>
+> | Escape hatch | Available? |
+> |---|---|
+> | Your module adds `@EnableTransactionManagement` + a `PlatformTransactionManager` in its own `@Configuration` | **No** under a pinned skeleton — `components` is filled from the skeleton, so a `@Configuration` you submit is never registered |
+> | Inject the host's `PlatformTransactionManager` and use a `TransactionTemplate` | Yes **while `needsSharedBeans` is true** (it is, whenever the skeleton is MyBatis) |
+>
+> Four workarounds were tried on a real module and all four failed: submitting `<X>MyBatisConfig` (server-owned →
+> discarded), adding a differently-named `@Configuration` (not in `components` → not registered), returning `Map`
+> from the Mapper (gate 2 rejects it), and `dataAccess: none` with hand-wired MyBatis (`needsSharedBeans` false →
+> no host `DataSource`).
 >
 > Scope of the transaction once it works: in-process with this app's `DataSource` and transaction manager →
 > participates in the host transaction. In-process with a `DataSource` the module creates → independent. Under

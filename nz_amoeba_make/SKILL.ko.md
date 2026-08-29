@@ -148,9 +148,15 @@
 옵션마다 **전체 프로퍼티 키 + 기본값**을 표시하고, `desc` 만 한국어로 옮기고, 질문당 4개 이하로 쪼개고,
 `advanced`/`requires`/`requires_when` 을 지킨다. 같은 capability 가 `subflow:` 도 선언했다면 **그것을 먼저** 돌려
 서브플로우의 답이 이미 정해진 뒤에 옵션을 묻는다.
-현재 해당하는 것은 `embedded_auth` 다: `subflow: authstore` 로 사용자 스토어를 고른 뒤, 6개 `options:` 가
-`amoeba.auth.*` 의 나머지를 덮는다 — 토큰 수명, 서명키 경로, 클라이언트 등록 2건. `enabled`/`store`/`users` 는
-이미 정해져 있으므로(선택 자체와 서브플로우로) 그 셋만 묻지 않는다.
+**현재 `options:` 를 가진 capability 는 둘이다.** 이 목록을 믿지 말고 yaml 에서 다시 세라 — 세 번째가 추가되는
+순간 낡은 정보가 되며, 그것이 아래 규칙 4가 막으려는 바로 그 실패다.
+- `embedded_auth` — `subflow: authstore` 로 사용자 스토어를 고른 뒤, 6개 `options:` 가 `amoeba.auth.*` 의
+  나머지를 덮는다: 토큰 수명, 서명키 경로, 클라이언트 등록 2건. `enabled`/`store`/`users` 는 이미 정해져
+  있으므로(선택 자체와 서브플로우로) 그 셋만 묻지 않는다.
+- `interface_spec_validator` — `amoeba.skeleton.*` 과 `amoeba.interface.*` 아래 `options:` 4개: 서비스 계층
+  형태, 스켈레톤의 데이터 접근, 스펙이 그 둘을 덮어쓸 수 있는지, 그리고 L3 규칙의 킬 스위치.
+  `amoeba.skeleton.service-interface` 는 이 프로젝트의 서비스 계층 표준이고, 그 `note` 는 **답이 기본값이어도
+  값을 명시해 쓰라**고 한다 — 조용히 미설정으로 남겨도 되는 항목이 아니다.
 
 AskUserQuestion 은 질문당 선택지 4개가 상한이므로, 나누기를 즉흥적으로 하지 말고 **결정적으로** 제시한다 —
 그것이 항목이 조용히 사라지는 것을 막는 장치다:
@@ -417,6 +423,61 @@ Linux/Ubuntu 서버용 원커맨드 설치를 앞세우고, 그다음 수동 등
 - 모듈은 런타임에 `javac` 로 컴파일된다 → 서버는 **JRE 가 아니라 JDK 21** 에서 돌아야 한다.
 - `worker` 는 예약된 Spring 프로파일이다 → worker 데모 프로파일이 필요하면 `worker-demo` 를 쓴다.
 - 데이터 접근 / 공유 빈 / 라이브러리 모듈은 **in-process 전용**이다.
+- 생성되는 `application.yml` 은 `spring.mvc.problemdetails` 를 켜서, 배포된 모듈의
+  `ResponseStatusException` 메시지가 호출자에게 닿게 한다. 대가를 함께 말할 것: 앱 전체의 오류 응답이
+  `application/problem+json`(RFC 9457) 이 되고 본문은 `detail` 아래로 들어간다. 모듈이 스스로 해결할 수
+  없는 문제다 — 컨트롤러는 생성되고, 자식 컨텍스트의 `@RestControllerAdvice` 는 수집되지 않는다.
+
+## 생성된 서버에 모듈을 배포하기 (생성되는 README 에도 넣을 것)
+
+생성된 서버를 대상으로 모듈 5개를 만들면서 얻은 것이다. 그 중 같은 모듈을 세 번 다시 썼다.
+
+### 무엇이든 쓰기 전에 서버에 물어본다
+
+프로젝트 표준은 `application.yml` 에 있고 **작성자가 어떤 파일을 쓰게 되는지를 바꾼다**. 그래서 새 모듈의 첫
+단계는 문서를 읽는 것이 아니라 호출 두 번이다:
+
+1. `tools/list` → `amoeba.define_interface` 의 `inputSchema.$defs.interfaceSpec` 를 읽는다. 스켈레톤이 고정된
+   경우(`spec-overrides-allowed: false`) `dataAccess` 와 `serviceInterface` 는 **아예 없고**, 둘 중 무엇을
+   보내든 거부된다.
+2. 최소 스펙으로 `amoeba.define_interface` 를 호출 → `files[].serverOwned` 를 읽는다. 어떤 파일이 당신 것인지를
+   말해주는 것은 어떤 표도, 파일 헤더도 아니고 이것이다.
+
+### 배포 전에 서버가 하는 검사를 로컬에서 먼저 돌린다
+
+설치 실패는 원인 없이 도착하므로(배포 도구의 `installFailureHint` 참조) 실패한 배포를 이분 탐색하는 비용이 크다.
+서버가 거부하는 것은 전부 로컬에서 먼저 돌려볼 수 있다:
+
+| 단계 | 무엇을 재현하는가 |
+|---|---|
+| 돌고 있는 서버의 `-cp` 를 파일로 뽑는다 | 모듈이 컴파일되는 대상인 호스트 classpath 그대로 |
+| `files[]` 를 각자의 `package` 줄에 따라 javac 트리에 떨군다 | 모듈 컴파일 |
+| JUnit Platform Launcher 로 contract test 를 돌린다 | promotion gate 1 |
+| `MapperConsistencyChecker` 와 `InterfaceContractRule` 을 직접 호출한다 | L2 + promotion gate 2 |
+
+**손으로 쓴 스텁이 아니라 생성된 소스를 쓴다.** 스텁은 `@Schema` 가 빠져 있어서 진짜 위반을 수십 개의 가짜 위반
+밑에 묻어버린다. 진짜 파일로 돌리면 "0 violations" 가 깨끗한 신호가 된다.
+
+### 저장소에는 입력만 남긴다
+
+배포된 모듈이 진실의 원본이다(`amoeba.export_module_source` 가 그것을 다시 읽어온다). 모듈 디렉토리가 담는 것은
+배포물에 *들어있지 않은* 것들이다: 스펙, 배포 스크립트, 스모크 스크립트, DDL, README, 그리고 작성자 소유 소스.
+생성된 파일의 사본은 어긋난다 — 그래도 두겠다면 편집할 때마다 다시 배포한다.
+
+**매퍼 XML 만 고쳤어도 재배포가 필요하다**: `protean.reload_module_resources` 는 그것에 대해 아무 일도 하지
+않는다. XML 은 초기화 때 한 번만 파싱되기 때문이다.
+
+배포 스크립트에 가드를 넣는다 — 그러지 않으면 생성기 회귀가 조용히 지나간다: 생성된 MyBatis 설정에
+`setContextClassLoader` 가 있어야 하고, list 오퍼레이션의 Mapper 에는 그 `count<Op>` 가 있어야 하고,
+`needsSharedBeans` 가 예상과 같아야 하고, `replacedFiles`/`seededFiles` 는 눈으로 훑을 게 아니라 *필드로*
+검사해야 한다.
+
+### DDL 은 사람이 실행한다
+
+DDL 을 실행해 주는 도구는 없다: `protean.scope_create` 는 worker 격리를 위한 scope 별 데이터베이스를
+프로비저닝하는 것이고(`worker.db.auto-provision` 이 필요하다), `debug.evaluate` 는 중단된 브레이크포인트를
+요구한다. `<mod>-ddl.sql` 을 산출물로 생성하고, 그 헤더에 **중복 검출을 강제하는 것은 유니크 키뿐**이라고
+적는다. 모듈이 미리 읽어보는 대신 `DuplicateKeyException` 을 잡기 때문이다.
 
 ## 모듈 작성 규칙 (생성되는 README 에 넣을 것)
 

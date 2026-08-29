@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.SkeletonDefaults;
 import {{PKG}}.interfacedef.mcp.InterfaceSpecSchema;
 import {{PKG}}.interfacedef.render.MarkdownRenderer;
 
@@ -46,14 +47,22 @@ public final class SpecBearingDeployTool implements McpTool {
     private final ModulePlatform platform;
     private final DraftStore draftStore;
 
+    /**
+     * Mirrors DefineInterfaceTool: this tool also accepts an INLINE interface, so pinning the project shape only in
+     * define would leave deploy as an open second door.
+     */
+    private final SkeletonDefaults defaults;
+
     public SpecBearingDeployTool(McpTool delegate, ObjectMapper mapper, InterfaceDeployPreparer preparer,
-                                 InterfaceVerifier verifier, ModulePlatform platform, DraftStore draftStore) {
+                                 InterfaceVerifier verifier, ModulePlatform platform, DraftStore draftStore,
+                                 SkeletonDefaults defaults) {
         this.delegate = delegate;
         this.mapper = mapper;
         this.preparer = preparer;
         this.verifier = verifier;
         this.platform = platform;
         this.draftStore = draftStore;
+        this.defaults = defaults;
     }
 
     @Override
@@ -125,7 +134,7 @@ public final class SpecBearingDeployTool implements McpTool {
         ArrayNode anyOf = schema.putArray("anyOf");
         anyOf.addObject().putArray("required").add("specId");
         anyOf.addObject().putArray("required").add("interface").add("packageName");
-        InterfaceSpecSchema.attachDefs(schema, mapper);
+        InterfaceSpecSchema.attachDefs(schema, mapper, defaults.overridesAllowed());
         return schema;
     }
 
@@ -170,7 +179,7 @@ public final class SpecBearingDeployTool implements McpTool {
         McpToolResult result = delegate.call(prepared.args(), ctx);
         if (result.isError()) {
             // ModulePlatform.install already ran undeploy + store.remove on failure, so there is nothing to undo.
-            return result;
+            return installFailureHint(result);
         }
 
         InterfaceVerifier.Verification verification = verifier.verify(prepared.moduleId(), prepared.spec());
@@ -211,6 +220,31 @@ public final class SpecBearingDeployTool implements McpTool {
                             + "uninstall it manually.");
         }
         return McpToolResult.error(message.toString());
+    }
+
+    /**
+     * Adds the missing half of an install failure.
+     *
+     * <p>protean reports an install failure as the bare text {@code module deployment failed: <id>}. The cause IS
+     * preserved as the exception's cause inside the platform, but it does not survive the MCP tool boundary, so the
+     * caller sees a sentence with no detail, no structuredContent and no trace — and the only way forward has been
+     * bisecting the module by hand. Fixing that properly means changing protean and republishing the jar; until
+     * then this at least names the failure mode that produced it most often and points at the check that finds it
+     * without a deploy.
+     */
+    private McpToolResult installFailureHint(McpToolResult delegated) {
+        String text = delegated.text() == null ? "" : delegated.text();
+        if (!text.contains("module deployment failed")) {
+            return delegated;
+        }
+        return McpToolResult.error(text + """
+
+
+                The platform reports install failures without the cause attached, so this message is all it gives.
+                The most common cause by far is the module's mapper XML naming a module class that MyBatis cannot
+                load — check that <resultMap type="..."> and any parameterType point at classes this module really
+                declares. Run the pre-deploy checks locally (see the README) to see the real exception: they run
+                javac, the contract test, MapperConsistencyChecker and the gate-2 rule without deploying anything.""");
     }
 
     private McpToolResult success(InterfaceDeployPreparer.Prepared prepared, McpToolResult delegated,

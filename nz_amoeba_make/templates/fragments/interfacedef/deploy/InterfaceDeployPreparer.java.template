@@ -25,6 +25,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import {{PKG}}.interfacedef.DraftStore;
 import {{PKG}}.interfacedef.InterfaceSpec;
 import {{PKG}}.interfacedef.InterfaceSpecValidator;
+import {{PKG}}.interfacedef.SkeletonDefaults;
 import {{PKG}}.interfacedef.gen.GeneratedFile;
 import {{PKG}}.interfacedef.gen.SkeletonBundle;
 import {{PKG}}.interfacedef.gen.SkeletonGenerator;
@@ -47,10 +48,15 @@ public class InterfaceDeployPreparer {
     private final DraftStore draftStore;
     private final ModulePlatform platform;
 
-    public InterfaceDeployPreparer(ObjectMapper mapper, DraftStore draftStore, ModulePlatform platform) {
+    /** The project skeleton standard, shared with DefineInterfaceTool. */
+    private final SkeletonDefaults defaults;
+
+    public InterfaceDeployPreparer(ObjectMapper mapper, DraftStore draftStore, ModulePlatform platform,
+                                  SkeletonDefaults defaults) {
         this.mapper = mapper;
         this.draftStore = draftStore;
         this.platform = platform;
+        this.defaults = defaults;
     }
 
     /** A caller-facing rejection. The message is written to be actionable on its own. */
@@ -218,6 +224,10 @@ public class InterfaceDeployPreparer {
         } catch (Exception e) {
             throw new PreparationException("interface could not be parsed: " + rootMessage(e));
         }
+        // The project standard applies to THIS door too. Without it an inline interface kept dataAccess=NONE and a
+        // null serviceInterface (which reads as true), so the same project produced a different shape depending on
+        // whether the caller went through amoeba.define_interface or deployed an inline spec.
+        spec = defaults.apply(spec);
         List<String> violations = InterfaceSpecValidator.validate(spec);
         if (!violations.isEmpty()) {
             throw new PreparationException("interface spec is invalid:\n  - " + String.join("\n  - ", violations));

@@ -137,10 +137,16 @@ keys are asked HERE — step 6 walks `groups:`, and these are not in a group, so
 never asked at all. Same rules as step 6: show each option's **full property key + default**, translate only the
 `desc`, split into ≤4-option questions, and honour `advanced`/`requires`/`requires_when`. Run it after any
 `subflow:` the capability also declares, so the sub-flow's answer is already known.
-`embedded_auth` is the case that exists today: `subflow: authstore` picks the user store, then its six `options:`
-cover the rest of `amoeba.auth.*` — token lifetime, signing-key path, the two client registrations. Its
-`enabled`/`store`/`users` are already settled (by the selection itself and by the sub-flow), so those three are the
-only ones you do not ask.
+**Two capabilities carry `options:` today.** Recount them in the yaml rather than trusting this list — it goes
+stale the moment a third is added, which is the same failure mode rule 4 below exists to prevent.
+- `embedded_auth` — `subflow: authstore` picks the user store, then its six `options:` cover the rest of
+  `amoeba.auth.*`: token lifetime, signing-key path, the two client registrations. Its `enabled`/`store`/`users`
+  are already settled (by the selection itself and by the sub-flow), so those three are the only ones you do not
+  ask.
+- `interface_spec_validator` — four `options:` under `amoeba.skeleton.*` and `amoeba.interface.*`: the
+  service-layer shape, the skeleton's data access, whether a spec may override either, and the L3 rule's kill
+  switch. `amoeba.skeleton.service-interface` is the project's service-layer standard, and its note says to write
+  it out **even when the answer is the default** — so it is not one you may quietly leave unset.
 
 AskUserQuestion caps 4 options per question, so make the offering **deterministic** rather than improvising a
 split — that is what keeps an entry from silently vanishing:
@@ -398,6 +404,60 @@ Korean; print every command byte-for-byte** — a translated or "tidied" command
 - Modules compile at runtime with `javac` → the server runs on a **JDK 21, not a JRE**.
 - `worker` is a reserved Spring profile → use `worker-demo` for any worker demo profile.
 - Data access / shared beans / library modules are **in-process only**.
+- The generated `application.yml` turns on `spring.mvc.problemdetails`, so a deployed module's
+  `ResponseStatusException` message reaches the caller. Say what it costs: every error response app-wide becomes
+  `application/problem+json` (RFC 9457) with the text under `detail`. A module cannot arrange this itself — its
+  controller is generated, and a `@RestControllerAdvice` in a child context is never collected.
+
+## Deploying modules into the generated server (put these in the generated README too)
+
+Learned from five modules built against a generated server, where the same module was rewritten three times.
+
+### Ask the server before writing anything
+
+The project standard lives in `application.yml` and **changes which files the author writes**. So the first step of
+a new module is not reading documentation, it is two calls:
+
+1. `tools/list` → read `amoeba.define_interface`'s `inputSchema.$defs.interfaceSpec`. Under a pinned skeleton
+   (`spec-overrides-allowed: false`) `dataAccess` and `serviceInterface` are **absent**, and sending either is
+   rejected.
+2. `amoeba.define_interface` with a minimal spec → read `files[].serverOwned`. That, not any table and not the file
+   headers, is what says which files are yours.
+
+### Run the server's own checks locally before deploying
+
+An install failure arrives without its cause (see the deploy tool's `installFailureHint`), so bisecting a failed
+deploy is expensive. Everything the server rejects can be run locally first:
+
+| Step | What it reproduces |
+|---|---|
+| Extract the running server's `-cp` into a file | the exact host classpath the module compiles against |
+| Drop `files[]` into a javac tree by their `package` lines | the module compile |
+| Run the contract test with the JUnit Platform Launcher | promotion gate 1 |
+| Call `MapperConsistencyChecker` and `InterfaceContractRule` directly | L2 + promotion gate 2 |
+
+**Use the generated sources, not hand-written stubs.** Stubs miss `@Schema` and bury the real violation under
+dozens of false ones; with the real files "0 violations" is a clean signal.
+
+### Keep only the inputs in the repository
+
+The deployed module is the source of truth (`amoeba.export_module_source` reads it back). A module directory holds
+what the deployment does *not* contain: the spec, the deploy script, a smoke script, the DDL, a README, and the
+author-owned sources. Copies of generated files drift — if you keep them, re-deploy after every edit.
+
+**Editing only the mapper XML still needs a redeploy**: `protean.reload_module_resources` is a no-op for it,
+because the XML is parsed once at initialisation.
+
+Put guards in the deploy script — a generator regression is silent otherwise: the generated MyBatis config must
+contain `setContextClassLoader`, a list operation's Mapper must contain its `count<Op>`, `needsSharedBeans` must be
+what you expect, and `replacedFiles`/`seededFiles` must be checked as *fields*, not eyeballed.
+
+### DDL is executed by a human
+
+There is no tool that runs DDL: `protean.scope_create` provisions per-scope databases for worker isolation (and
+needs `worker.db.auto-provision`), and `debug.evaluate` requires a suspended breakpoint. Generate `<mod>-ddl.sql`
+as an artifact and say in its header that **the unique key is the only thing enforcing duplicate detection**,
+because the module catches `DuplicateKeyException` rather than pre-reading.
 
 ## Module authoring rules (put these in the generated README)
 

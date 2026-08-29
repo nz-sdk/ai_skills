@@ -14,6 +14,7 @@ package {{PKG}}.interfacedef.deploy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.SkeletonDefaults;
 
 import org.htcom.protean.mcp.McpDispatcher;
 import org.htcom.protean.mcp.McpTool;
@@ -47,9 +48,13 @@ public class InterfaceToolRegistrar implements ApplicationRunner {
     private final ModulePlatform platform;
     private final DraftStore draftStore;
 
+    /** Passed straight through to the deploy wrapper — see SpecBearingDeployTool#defaults. */
+    private final SkeletonDefaults defaults;
+
     public InterfaceToolRegistrar(ObjectProvider<McpDispatcher> dispatcher, List<McpTool> tools,
                                   ObjectMapper mapper, InterfaceDeployPreparer preparer,
-                                  InterfaceVerifier verifier, ModulePlatform platform, DraftStore draftStore) {
+                                  InterfaceVerifier verifier, ModulePlatform platform, DraftStore draftStore,
+                                  SkeletonDefaults defaults) {
         this.dispatcher = dispatcher;
         this.tools = tools;
         this.mapper = mapper;
@@ -57,6 +62,7 @@ public class InterfaceToolRegistrar implements ApplicationRunner {
         this.verifier = verifier;
         this.platform = platform;
         this.draftStore = draftStore;
+        this.defaults = defaults;
     }
 
     @Override
@@ -73,7 +79,7 @@ public class InterfaceToolRegistrar implements ApplicationRunner {
     }
 
     private McpTool specBearing(McpTool delegate) {
-        return new SpecBearingDeployTool(delegate, mapper, preparer, verifier, platform, draftStore);
+        return new SpecBearingDeployTool(delegate, mapper, preparer, verifier, platform, draftStore, defaults);
     }
 
     /**

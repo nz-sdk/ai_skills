@@ -82,9 +82,10 @@ class ServiceLayerOptionTest {
         SkeletonBundle bundle = generate(withoutServiceInterface());
 
         assertEquals(List.of("GetOrderResponse.java", "CreateOrderRequest.java", "CreateOrderResponse.java",
-                        "OrdersController.java", "GetOrderRow.java", "OrdersMyBatisConfig.java"),
+                        "OrdersController.java", "GetOrderRow.java", "OrdersMapper.java",
+                        "OrdersMyBatisConfig.java"),
                 bundle.serverOwned().stream().map(GeneratedFile::filename).toList());
-        assertEquals(List.of("OrdersService.java", "OrdersContractTest.java", "OrdersMapper.java",
+        assertEquals(List.of("OrdersService.java", "OrdersContractTest.java",
                         "mapper/orders/OrdersMapper.xml"),
                 bundle.authored().stream().map(GeneratedFile::filename).toList());
     }

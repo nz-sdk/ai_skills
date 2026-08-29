@@ -8,6 +8,8 @@ import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
 import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
 import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
 import {{PKG}}.interfacedef.SpecFixtures;
 import org.junit.jupiter.api.Test;
@@ -111,6 +113,24 @@ class MarkdownRendererTest {
     void formatRefinesTheTypeCell() {
         String md = render(SpecFixtures.orders());
         assertTrue(md.contains("| `orderedAt` | `string` (date-time) | ✅ | 주문이 접수된 시각 |"), md);
+    }
+
+    /**
+     * The same format has to reach THIS document too. A reader seeing a bare `integer` here while the OpenAPI file
+     * says `int32` has two documents disagreeing about one deployed contract, which is the whole thing rendering
+     * both from the spec is supposed to rule out. The parameter path dropped the format long after the body path
+     * carried it, so it is pinned separately from formatRefinesTheTypeCell.
+     */
+    @Test
+    void parameterFormatRefinesTheTypeCell() {
+        InterfaceSpec spec = new InterfaceSpec("t", "포맷이 지정된 파라미터", DataAccess.NONE,
+                List.of(new OperationSpec("listThings", HttpMethod.GET, "/things", "목록", "파라미터 포맷 확인",
+                        List.of(new ParamSpec("page", ParamIn.QUERY, FieldType.INTEGER, "int32", false,
+                                "0부터 시작하는 페이지 번호", "0")),
+                        null, List.of(new ResponseSpec(200, "성공", List.of())))));
+
+        String md = render(spec);
+        assertTrue(md.contains("| `page` | query | `integer` (int32) |  | 0부터 시작하는 페이지 번호 |"), md);
     }
 
     @Test

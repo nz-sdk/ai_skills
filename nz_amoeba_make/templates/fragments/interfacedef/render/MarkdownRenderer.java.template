@@ -90,7 +90,7 @@ public final class MarkdownRenderer {
             for (ParamSpec p : op.parameters()) {
                 out.append("| `").append(cell(p.name())).append("` | ")
                         .append(p.in() == null ? "" : p.in().wire()).append(" | ")
-                        .append(typeOf(p.type() == null ? null : p.type().wire(), null)).append(" | ")
+                        .append(typeOf(p.type() == null ? null : p.type().wire(), p.format())).append(" | ")
                         .append(required(p.required())).append(" | ")
                         .append(cell(p.description())).append(" |\n");
             }

@@ -142,10 +142,12 @@ class SkeletonGeneratorTest {
     void ownershipSplitIsAsDeclared() {
         SkeletonBundle bundle = generate(SpecFixtures.orders());
         assertEquals(List.of("GetOrderResponse.java", "CreateOrderRequest.java", "CreateOrderResponse.java",
-                        "OrdersController.java", "OrdersService.java", "GetOrderRow.java",
+                        "OrdersController.java", "OrdersService.java", "GetOrderRow.java", "OrdersMapper.java",
                         "OrdersMyBatisConfig.java"),
                 bundle.serverOwned().stream().map(GeneratedFile::filename).toList());
-        assertEquals(List.of("OrdersServiceImpl.java", "OrdersContractTest.java", "OrdersMapper.java",
+        // The Mapper INTERFACE is server-owned; only its XML is authored. Every signature in the interface derives
+        // from the spec, so there is nothing there for an author to decide — the SQL is the undeducible half.
+        assertEquals(List.of("OrdersServiceImpl.java", "OrdersContractTest.java",
                         "mapper/orders/OrdersMapper.xml"),
                 bundle.authored().stream().map(GeneratedFile::filename).toList());
     }
@@ -307,6 +309,101 @@ class SkeletonGeneratorTest {
                 "the factory build must run under the module's ClassLoader: " + config);
         assertTrue(config.contains("finally"),
                 "the swap must be restored in a finally block: " + config);
+    }
+
+    /**
+     * Every generated file's header must agree with its serverOwned flag.
+     *
+     * <p>This is the check that was missing when the Mapper interface moved from authored to server-owned: the flag
+     * changed, the banner it prints did not, and the file went on telling authors "AUTHORED. Add methods freely"
+     * while the deploy wrapper discarded everything they added. A per-file assertion would not have caught it —
+     * this walks the whole bundle, so a future ownership move fails here instead of in someone's afternoon.
+     */
+    @Test
+    void everyFileHeaderMatchesItsOwnership() {
+        for (GeneratedFile f : generate(SpecFixtures.orders()).files()) {
+            String head = f.content().lines().limit(6).collect(java.util.stream.Collectors.joining(" "));
+            if (f.serverOwned()) {
+                assertTrue(head.contains("GENERATED"),
+                        f.filename() + " is server-owned but its header does not say so: " + head);
+                assertFalse(head.contains("AUTHORED"),
+                        f.filename() + " is server-owned but its header says AUTHORED: " + head);
+            } else {
+                // Not "must contain AUTHORED": the contract test's header reasonably says "Seeded ... add your own
+                // tests here" instead. The invariant is that an author-owned file must not CLAIM to be generated,
+                // which is the direction that costs someone their work.
+                assertFalse(head.contains("GENERATED") || head.contains("Do not edit"),
+                        f.filename() + " is author-owned but its header tells the author not to edit it: " + head);
+            }
+        }
+    }
+
+    /**
+     * A list envelope describes a PAGE; the rows are the array's elements.
+     *
+     * <p>Flattening the envelope instead produced a Row of (total, page, size) — a record no query can populate.
+     * That made list operations unimplementable once the Mapper became server-owned, because the author could no
+     * longer add a row-returning method of their own. This test is what keeps that fix from being lost the next
+     * time the generator is re-emitted from a template.
+     */
+    @Test
+    void listEnvelopeRowCarriesTheElementFields() {
+        String row = content(generate(listSpec()), "SearchThingsRow.java");
+
+        assertTrue(row.contains("String code"), row);
+        assertTrue(row.contains("String name"), row);
+        assertFalse(row.contains("total"), "the envelope's counters are not row columns: " + row);
+        assertFalse(row.contains("page"), "the envelope's counters are not row columns: " + row);
+    }
+
+    /** A list operation needs its total, and one method cannot return both rows and a count. */
+    @Test
+    void listEnvelopeAlsoGeneratesACountMethod() {
+        String mapper = content(generate(listSpec()), "OrdersMapper.java");
+        String xml = content(generate(listSpec()), "mapper/orders/OrdersMapper.xml");
+
+        assertTrue(mapper.contains("countSearchThings"), mapper);
+        assertTrue(xml.contains("countSearchThings"), xml);
+    }
+
+    /** {items[], total, page, size} — the shape the module authoring rules require of a list response. */
+    private static InterfaceSpec listSpec() {
+        List<FieldSpec> element = List.of(
+                new FieldSpec("code", FieldType.STRING, null, true, "행을 식별하는 코드 값", "C1", List.of(), null),
+                new FieldSpec("name", FieldType.STRING, null, true, "화면에 표시할 이름 값", "가나", List.of(), null));
+        List<FieldSpec> body = List.of(
+                new FieldSpec("items", FieldType.ARRAY, null, true, "조회된 행들의 목록", null, List.of(),
+                        new FieldSpec("item", FieldType.OBJECT, null, true, "목록의 한 행을 담는다", null, element, null)),
+                new FieldSpec("total", FieldType.INTEGER, null, true, "페이징 이전 전체 건수", "10", List.of(), null),
+                new FieldSpec("page", FieldType.INTEGER, null, true, "0부터 시작하는 페이지", "0", List.of(), null),
+                new FieldSpec("size", FieldType.INTEGER, null, true, "페이지 크기", "20", List.of(), null));
+        return new InterfaceSpec("t", "목록 봉투를 돌려주는 모듈", DataAccess.MYBATIS,
+                List.of(new OperationSpec("searchThings", HttpMethod.GET, "/things", "목록", "목록을 조회한다",
+                        List.of(), null, List.of(new ResponseSpec(200, "성공", body)))));
+    }
+
+    /**
+     * A declared 201/204 must reach the controller as @ResponseStatus.
+     *
+     * <p>Without it the handler answers 200 while the gate-3 probe asserts the declared status, so a REST-conventional
+     * spec passes validation and then rolls its own deploy back — which is why an earlier module had to flatten
+     * every success status to 200.
+     */
+    @Test
+    void declaredSuccessStatusReachesTheController() {
+        InterfaceSpec spec = new InterfaceSpec("t", "201 을 선언하는 모듈", DataAccess.NONE,
+                List.of(new OperationSpec("createThing", HttpMethod.POST, "/things", "생성", "대상을 생성한다",
+                                List.of(), null, List.of(new ResponseSpec(201, "생성됨", List.of()))),
+                        new OperationSpec("listThings", HttpMethod.GET, "/things", "목록", "목록을 조회한다",
+                                List.of(), null, List.of(new ResponseSpec(200, "성공", List.of())))));
+
+        String controller = content(generate(spec), "OrdersController.java");
+
+        assertTrue(controller.contains("@ResponseStatus(HttpStatus.CREATED)"), controller);
+        assertTrue(controller.contains("import org.springframework.http.HttpStatus;"), controller);
+        // 200 is Spring's default, so annotating it would be noise the reader has to check against the spec.
+        assertEquals(1, controller.split("@ResponseStatus", -1).length - 1,
+                "only the non-200 operation may carry the annotation: " + controller);
     }
 
     /** Two wire names collapsing onto one Java identifier is a generation failure, never a silent rename. */

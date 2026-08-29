@@ -12,6 +12,8 @@ package {{PKG}}.interfacedef.gen;
 import {{PKG}}.interfacedef.InterfaceSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
 import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+import org.springframework.http.HttpStatus;
 import {{PKG}}.interfacedef.gen.SkeletonGenerator.Layout;
 import {{PKG}}.interfacedef.gen.SkeletonGenerator.MethodParam;
 import {{PKG}}.interfacedef.gen.SkeletonGenerator.Signature;
@@ -38,6 +40,10 @@ final class ControllerWriter {
         }
         for (Signature sig : signatures) {
             imports.add(SPRING_WEB + mappingAnnotation(sig.operation().method()));
+            if (declaredStatus(sig) != DEFAULT_STATUS) {
+                imports.add(SPRING_WEB + "ResponseStatus");
+                imports.add("org.springframework.http.HttpStatus");
+            }
             if (sig.requestDto() != null) {
                 imports.add(SPRING_WEB + "RequestBody");
             }
@@ -70,6 +76,29 @@ final class ControllerWriter {
         return out.append("}\n").toString();
     }
 
+    /** Spring's default success status: what a handler answers when nothing says otherwise. */
+    private static final int DEFAULT_STATUS = 200;
+
+    /** The success status the spec declares; 200 when it declares none, so no annotation is generated. */
+    private static int declaredStatus(Signature sig) {
+        return sig.operation().successResponse().map(ResponseSpec::status).orElse(DEFAULT_STATUS);
+    }
+
+    /**
+     * The HttpStatus constant name for a status code, resolved from the enum rather than a hand-written table.
+     *
+     * <p>A status Spring knows cannot go missing here, and one it does not know fails AT GENERATION instead of
+     * emitting a constant name that would not compile inside the deployed module.
+     */
+    private static String statusConstant(int status) {
+        HttpStatus resolved = HttpStatus.resolve(status);
+        if (resolved == null) {
+            throw new IllegalStateException("declared response status " + status
+                    + " is not one Spring HttpStatus knows, so no @ResponseStatus can be generated");
+        }
+        return resolved.name();
+    }
+
     private static void appendMethod(StringBuilder out, Signature sig) {
         OperationSpec op = sig.operation();
         out.append('\n')
@@ -78,7 +107,15 @@ final class ControllerWriter {
                 .append(", description = ").append(JavaNames.literal(JavaNames.oneLine(op.description())))
                 .append(")\n")
                 .append("    @").append(mappingAnnotation(op.method())).append('(')
-                .append(JavaNames.literal(op.path())).append(")\n")
+                .append(JavaNames.literal(op.path())).append(")\n");
+        // A declared status other than 200 has to be REALISED, not just documented. Spring answers 200 by
+        // default (a void return gives a bodyless 200) while the gate-3 probe asserts the DECLARED status, so
+        // without this a spec saying 201 passes validation and then fails the probe, rolling the deploy back.
+        if (declaredStatus(sig) != DEFAULT_STATUS) {
+            out.append("    @ResponseStatus(HttpStatus.").append(statusConstant(declaredStatus(sig)))
+                    .append(")\n");
+        }
+        out
                 .append("    public ").append(sig.returnType()).append(' ').append(op.operationId()).append('(');
 
         List<String> parameters = new ArrayList<>();

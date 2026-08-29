@@ -61,13 +61,35 @@ class ProbeGeneratorTest {
         assertNull(ProbeGenerator.probesFor(spec(SpecFixtures.getOrder())).get(0).bodyContains());
     }
 
+    /**
+     * A probe is a REAL request, so a mutation must never be generated into one.
+     *
+     * <p>This test used to assert the opposite. The auto-generated DELETE probe ran on every deploy and deleted a
+     * live row each time — the reason the id here reads like a real one. Route registration is not lost by the
+     * exclusion: InterfaceVerifier compares declared routes against what the module served, separately from probes.
+     */
     @Test
-    void deleteAndOtherBodylessMethodsAreProbed() {
-        OperationSpec op = new OperationSpec("remove", HttpMethod.DELETE, "/things/{id}", "삭제",
-                "대상을 삭제한다",
+    void mutatingOperationsAreNotProbedAutomatically() {
+        for (HttpMethod method : List.of(HttpMethod.DELETE, HttpMethod.PUT, HttpMethod.PATCH)) {
+            OperationSpec op = new OperationSpec("touch", method, "/things/{id}", "변경",
+                    "대상을 변경한다",
+                    List.of(new ParamSpec("id", ParamIn.PATH, FieldType.STRING, null, true, "대상 식별자", "abc")),
+                    null, List.of(new ResponseSpec(204, "본문 없이 성공", List.of())));
+            assertEquals(List.of(), rendered(ProbeGenerator.probesFor(spec(op))),
+                    method + " must not be probed automatically");
+            assertEquals(List.of("touch"), ProbeGenerator.unprobeable(spec(op)),
+                    method + " must still be REPORTED as unprobed, or the coverage gap is silent");
+        }
+    }
+
+    /** GET stays probed — it is the one method safe to replay on every deploy. */
+    @Test
+    void readOperationsAreStillProbed() {
+        OperationSpec op = new OperationSpec("fetch", HttpMethod.GET, "/things/{id}", "조회",
+                "대상을 조회한다",
                 List.of(new ParamSpec("id", ParamIn.PATH, FieldType.STRING, null, true, "대상 식별자", "abc")),
-                null, List.of(new ResponseSpec(204, "본문 없이 성공", List.of())));
-        assertEquals(List.of("DELETE /things/abc -> 204"), rendered(ProbeGenerator.probesFor(spec(op))));
+                null, List.of(new ResponseSpec(200, "성공", List.of())));
+        assertEquals(List.of("GET /things/abc -> 200"), rendered(ProbeGenerator.probesFor(spec(op))));
     }
 
     /** A PUT with a body is unprobeable even though PUT itself is otherwise fine. */

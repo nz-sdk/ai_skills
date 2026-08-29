@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import {{PKG}}.interfacedef.DraftStore;
 import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.SkeletonDefaults;
 import {{PKG}}.interfacedef.InterfaceSpecValidator;
 import {{PKG}}.interfacedef.gen.GeneratedFile;
 import {{PKG}}.interfacedef.gen.SkeletonBundle;
@@ -30,7 +31,6 @@ import org.htcom.protean.mcp.McpToolAnnotations;
 import org.htcom.protean.mcp.McpToolResult;
 import org.htcom.protean.mcp.ModuleActionAuthorizer;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -41,19 +41,18 @@ public class DefineInterfaceTool implements McpTool {
 
     private final ObjectMapper mapper;
     private final DraftStore draftStore;
-    private final boolean serviceInterfaceByDefault;
+    /** The project's skeleton standard: stamps the shape fields and decides whether they are advertised at all. */
+    private final SkeletonDefaults defaults;
 
     /**
      * @param serviceInterfaceByDefault the project's service-layer standard, applied when a spec does not state
      *                                  one. Defaults to true, the historical shape, so an existing deployment's
      *                                  redeploys are unaffected by this option existing.
      */
-    public DefineInterfaceTool(ObjectMapper mapper, DraftStore draftStore,
-                               @Value("${amoeba.skeleton.service-interface:true}")
-                               boolean serviceInterfaceByDefault) {
+    public DefineInterfaceTool(ObjectMapper mapper, DraftStore draftStore, SkeletonDefaults defaults) {
         this.mapper = mapper;
         this.draftStore = draftStore;
-        this.serviceInterfaceByDefault = serviceInterfaceByDefault;
+        this.defaults = defaults;
     }
 
     @Override
@@ -124,7 +123,7 @@ public class DefineInterfaceTool implements McpTool {
         p.set("interface", InterfaceSpecSchema.interfaceRef(mapper));
         schema.putArray("required").add("moduleId").add("version").add("packageName").add("interface");
         // $ref resolves against the schema ROOT, so the shared definitions have to hang here.
-        InterfaceSpecSchema.attachDefs(schema, mapper);
+        InterfaceSpecSchema.attachDefs(schema, mapper, defaults.overridesAllowed());
         return schema;
     }
 
@@ -194,9 +193,7 @@ public class DefineInterfaceTool implements McpTool {
         // become an explicit value in the draft, because the deploy wrapper regenerates the server-owned files
         // from this spec on every redeploy — a spec that still says "use the default" would follow the project
         // default as it stands at redeploy time, silently restructuring a module when someone flips the setting.
-        if (spec.serviceInterface() == null) {
-            spec = spec.withServiceInterface(serviceInterfaceByDefault);
-        }
+        spec = defaults.apply(spec);
 
         List<String> violations = InterfaceSpecValidator.validate(spec);
         if (!violations.isEmpty()) {

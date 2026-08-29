@@ -86,6 +86,11 @@ public record InterfaceSpec(
         return serviceInterface == null || serviceInterface;
     }
 
+    /** Replaces the data-access choice, for a project that pins it rather than letting a caller state it. */
+    public InterfaceSpec withDataAccess(DataAccess resolved) {
+        return new InterfaceSpec(title, description, resolved, serviceInterface, operations);
+    }
+
     /** This spec with {@code serviceInterface} pinned, for resolving an unstated preference against a default. */
     public InterfaceSpec withServiceInterface(boolean resolved) {
         return new InterfaceSpec(title, description, dataAccess, resolved, operations);

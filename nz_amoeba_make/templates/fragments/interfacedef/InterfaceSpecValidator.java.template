@@ -266,8 +266,11 @@ public final class InterfaceSpecValidator {
                 // The generated gate-3 probe substitutes this example into the path. Without it the operation
                 // silently drops out of probe coverage, which is the cheapest enforcement available.
                 if (p.example() == null || p.example().isBlank()) {
-                    violations.add(pAt + ".example: required for a path parameter "
-                            + "(it is substituted into the generated verification probe path)");
+                    violations.add(pAt + ".example: required for a path parameter, and it MUST BE A VALUE "
+                            + "THAT EXISTS when the module is deployed. The generated gate-3 probe "
+                            + "substitutes it into the path and asserts the declared 2xx, so an id that "
+                            + "matches no row fails the deploy. Give the table a probe-only reserved row "
+                            + "and name it here.");
                 }
             }
         }

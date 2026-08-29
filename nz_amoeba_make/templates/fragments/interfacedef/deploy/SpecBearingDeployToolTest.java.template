@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.SkeletonDefaults;
 import {{PKG}}.interfacedef.InterfaceSpec;
 import {{PKG}}.interfacedef.SpecFixtures;
 import {{PKG}}.interfacedef.gen.GeneratedFile;
@@ -58,11 +59,13 @@ class SpecBearingDeployToolTest {
         delegate = mock(McpTool.class);
         verifier = mock(InterfaceVerifier.class);
         platform = mock(ModulePlatform.class);
-        preparer = new InterfaceDeployPreparer(mapper, draftStore, platform);
+        preparer = new InterfaceDeployPreparer(mapper, draftStore, platform,
+                new SkeletonDefaults("none", true, true));
         when(delegate.name()).thenReturn("protean.deploy_module");
         when(delegate.description()).thenReturn("Deploys a module.");
         when(delegate.action()).thenReturn(ModuleActionAuthorizer.ModuleAction.DEPLOY);
-        tool = new SpecBearingDeployTool(delegate, mapper, preparer, verifier, platform, draftStore);
+        tool = new SpecBearingDeployTool(delegate, mapper, preparer, verifier, platform, draftStore,
+                new SkeletonDefaults("none", true, true));
         specId = draftStore.put("orders", "1.0.0", "module.orders", SPEC, SKELETON);
     }
 

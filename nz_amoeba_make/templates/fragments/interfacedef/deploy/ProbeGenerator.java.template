@@ -31,14 +31,25 @@ public final class ProbeGenerator {
     /**
      * Generates one probe per probeable operation.
      *
-     * <p>An operation is probeable when it declares no request body, declares a 2xx response, and every {@code {var}}
-     * in its path has an example to substitute. The validator already requires an example on every path parameter,
-     * so the last condition is a guard rather than an expected outcome.
+     * <p>An operation is probeable when it is NON-MUTATING, declares no request body, declares a 2xx response, and
+     * every {@code {var}} in its path has an example to substitute. The validator already requires an example on
+     * every path parameter, so the last condition is a guard rather than an expected outcome.
+     *
+     * <p>NON-MUTATING IS THE LOAD-BEARING WORD, and it was learned the expensive way. A probe is a REAL request:
+     * an auto-generated {@code DELETE /things/{example}} deleted a live row on every single deploy. PUT and PATCH
+     * are excluded for the same reason. Route registration is not lost by this — {@link InterfaceVerifier} compares
+     * declared routes against what the module actually served, separately from probes — so what a probe adds over
+     * that is "the handler runs", and paying for it with a destroyed row was never the intended trade.
+     * Operations WITH a body were already excluded on the same principle; this only completes it.
+     *
+     * <p>To probe a mutation deliberately, pass it yourself in {@code verification.integration}: {@link #merge}
+     * drops the auto-generated probe for any method+path a caller supplied, so a caller-provided
+     * {@code DELETE /things/2147483647 -> 404} replaces nothing and destroys nothing.
      */
     public static List<VerificationPlan.Probe> probesFor(InterfaceSpec spec) {
         List<VerificationPlan.Probe> probes = new ArrayList<>();
         for (OperationSpec op : spec.operations()) {
-            if (op.hasRequestBody()) {
+            if (op.hasRequestBody() || isMutating(op)) {
                 continue;
             }
             Optional<String> path = concretePath(op);
@@ -52,11 +63,22 @@ public final class ProbeGenerator {
         return probes;
     }
 
+    /**
+     * Whether the operation changes state, and so must not be probed automatically.
+     *
+     * <p>GET is the only method here that is safe to replay on every deploy. HEAD/OPTIONS are not part of
+     * InterfaceSpec.HttpMethod, so this reads as "anything but GET" without pretending to a wider taxonomy.
+     */
+    private static boolean isMutating(OperationSpec op) {
+        return op.method() != InterfaceSpec.HttpMethod.GET;
+    }
+
     /** The operation ids that got no probe, so the caller can be told where coverage stops. */
     public static List<String> unprobeable(InterfaceSpec spec) {
         List<String> ids = new ArrayList<>();
         for (OperationSpec op : spec.operations()) {
-            if (op.hasRequestBody() || concretePath(op).isEmpty() || op.successResponse().isEmpty()) {
+            if (op.hasRequestBody() || isMutating(op)
+                    || concretePath(op).isEmpty() || op.successResponse().isEmpty()) {
                 ids.add(op.operationId());
             }
         }

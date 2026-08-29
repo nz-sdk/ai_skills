@@ -65,10 +65,34 @@ public final class InterfaceSpecSchema {
     private InterfaceSpecSchema() {
     }
 
-    /** Attaches {@code $defs} for the spec and all its nested shapes to a schema root. */
+    /**
+     * Attaches {@code $defs} for the spec and all its nested shapes to a schema root, letting a caller state the
+     * module's own shape (see the overload).
+     */
     public static void attachDefs(ObjectNode root, ObjectMapper m) {
+        attachDefs(root, m, true);
+    }
+
+    /**
+     * @param allowSpecOverrides when FALSE, {@code dataAccess} and {@code serviceInterface} are left OUT of the
+     *        advertised spec schema, which — because every object here is
+     *        {@code additionalProperties: false} — turns a caller that sets either of them into a schema
+     *        REJECTION rather than an accepted override.
+     *
+     *        <p>Why omission rather than a check: those two fields decide the module's file shape, and the
+     *        project-level defaults for them only apply when the caller stays silent
+     *        ({@code DefineInterfaceTool} resolves {@code serviceInterface} only when it is null, and
+     *        {@code dataAccess} has no project default at all). So while they are advertised, an agent reading
+     *        this schema will reasonably set them, and the project standard loses every time. Removing them from
+     *        the schema is what makes the standard actually hold.
+     *
+     *        <p>ENFORCEMENT DEPENDS ON {@code protean.mcp.strict-schema=true}: this schema is only checked
+     *        server-side when the dispatcher validates arguments against it. With strict-schema off the fields are
+     *        merely undocumented, and Jackson still binds them, because the record component still exists.
+     */
+    public static void attachDefs(ObjectNode root, ObjectMapper m, boolean allowSpecOverrides) {
         ObjectNode defs = root.putObject("$defs");
-        defs.set("interfaceSpec", interfaceSpec(m));
+        defs.set("interfaceSpec", interfaceSpec(m, allowSpecOverrides));
         defs.set("operation", operation(m));
         defs.set("param", param(m));
         defs.set("response", response(m));
@@ -80,22 +104,24 @@ public final class InterfaceSpecSchema {
         return m.createObjectNode().put("$ref", "#/$defs/interfaceSpec");
     }
 
-    private static ObjectNode interfaceSpec(ObjectMapper m) {
+    private static ObjectNode interfaceSpec(ObjectMapper m, boolean allowSpecOverrides) {
         ObjectNode s = object(m, "The module's declared HTTP interface: every request and response field, "
                 + "with its name, attributes and description.");
         ObjectNode p = s.putObject("properties");
         string(p, "title", "Document title. Defaults to the module id when omitted.");
         described(p, "description", "What this module does. Becomes the document's overview paragraph.");
-        enumOf(p, "dataAccess", dataAccessValues(),
-                "NONE or MYBATIS. MYBATIS additionally requires a Mapper interface, its mapper XML and a "
-                        + "SqlSessionFactory configuration, and makes a reachable database a deploy prerequisite "
-                        + "(gate 3 probes run real queries).");
-        p.putObject("serviceInterface").put("type", "boolean")
-                .put("description", "Whether to generate a separate Service interface. true emits "
-                        + "<Base>Service (interface) plus <Base>ServiceImpl; false emits one <Base>Service class "
-                        + "for a three-layer Controller/Service/Mapper structure. Omit to use the project "
-                        + "default; the resolved value is then sealed into the spec, so a redeploy regenerates "
-                        + "the same structure. It cannot be changed on an already-deployed module.");
+        if (allowSpecOverrides) {
+            enumOf(p, "dataAccess", dataAccessValues(),
+                    "NONE or MYBATIS. MYBATIS additionally requires a Mapper interface, its mapper XML and a "
+                            + "SqlSessionFactory configuration, and makes a reachable database a deploy prerequisite "
+                            + "(gate 3 probes run real queries).");
+            p.putObject("serviceInterface").put("type", "boolean")
+                    .put("description", "Whether to generate a separate Service interface. true emits "
+                            + "<Base>Service (interface) plus <Base>ServiceImpl; false emits one <Base>Service class "
+                            + "for a three-layer Controller/Service/Mapper structure. Omit to use the project "
+                            + "default; the resolved value is then sealed into the spec, so a redeploy regenerates "
+                            + "the same structure. It cannot be changed on an already-deployed module.");
+        }
         ObjectNode operations = p.putObject("operations");
         operations.put("type", "array").put("minItems", 1)
                 .put("description", "One entry per endpoint.");
@@ -146,8 +172,10 @@ public final class InterfaceSpecSchema {
         describedColumn(p, "description", "What this parameter means. This fills the description column of the "
                 + "interface document, so write at least two words carrying at least four letters or digits — a "
                 + "bare noun that repeats the name documents nothing.");
-        string(p, "example", "Example value. REQUIRED for a path parameter: it is substituted into the "
-                + "generated verification probe path, and without it the operation drops out of probe coverage.");
+        string(p, "example", "Example value. REQUIRED for a path parameter, and it must be a value that "
+                + "EXISTS at deploy time: the generated gate-3 probe substitutes it into the path and asserts "
+                + "the declared 2xx, so an id matching no row fails the deploy. Give the table a probe-only "
+                + "reserved row and name it here. Only non-mutating operations are probed automatically.");
         required(s, "name", "in", "type", "required", "description");
         return s;
     }

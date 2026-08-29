@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
 
 final class MyBatisSkeletonWriter {
@@ -52,7 +53,12 @@ final class MyBatisSkeletonWriter {
                 files.add(GeneratedFile.ownedSource(rowName(sig) + ".java", rowRecord(layout, sig)));
             }
         }
-        files.add(GeneratedFile.authoredSource(layout.mapper() + ".java", mapperInterface(layout, signatures)));
+        // SERVER-OWNED, unlike the XML beside it. Every method signature here is a function of the spec (name,
+        // parameter list, return row type) and the @Param bindings follow the declared parameter names, so there is
+        // nothing in this file an author decides. The SQL is the part that cannot be derived — that is the XML, and
+        // that stays authored. MapperConsistencyChecker then verifies the author's XML against this generated
+        // interface, which is a stronger check than verifying two authored files against each other.
+        files.add(GeneratedFile.ownedSource(layout.mapper() + ".java", mapperInterface(layout, signatures)));
         files.add(GeneratedFile.authoredResource(layout.mapperXmlPath(), mapperXml(layout, signatures)));
         files.add(GeneratedFile.ownedSource(layout.config() + ".java", configuration(layout)));
         return files;
@@ -100,8 +106,13 @@ final class MyBatisSkeletonWriter {
      * ({@code customer.name} -> {@code customerName}); arrays are skipped entirely.
      */
     private static List<RowComponent> rowComponents(Signature sig) {
+        List<FieldSpec> body = sig.operation().successResponse().orElseThrow().body();
         List<RowComponent> out = new ArrayList<>();
-        collectRow(out, "", sig.operation().successResponse().orElseThrow().body());
+        // A list envelope describes one PAGE, not one row: the rows are the array's elements and the sibling
+        // scalars (total/page/size) are counters the service fills in. Flattening the envelope instead produced a
+        // record no query can populate - which made a list operation unimplementable once this Mapper became
+        // server-owned, because the author could no longer add a row-returning method of their own.
+        collectRow(out, "", listElement(body).map(FieldSpec::children).orElse(body));
         if (out.isEmpty()) {
             // Every response body has at least one field (the validator requires object children to be non-empty),
             // but a body made only of arrays would flatten to nothing and produce an uncompilable empty record.
@@ -123,6 +134,41 @@ final class MyBatisSkeletonWriter {
                         snakeCase(name), JavaNames.oneLine(f.description())));
             }
         }
+    }
+
+    /**
+     * The element type of a LIST-ENVELOPE response body, or empty when this is not one.
+     *
+     * <p>A list envelope is exactly one array field whose items are an object - {@code {items[], total, page,
+     * size}}. Recognising it is what lets the generated Row carry the row a query actually returns. More than one
+     * array is ambiguous (which one is the page?), so those bodies stay flattened as before.
+     */
+    private static Optional<FieldSpec> listElement(List<FieldSpec> body) {
+        List<FieldSpec> arrays = body.stream().filter(f -> f.type() == FieldType.ARRAY).toList();
+        if (arrays.size() != 1 || arrays.get(0).items() == null) {
+            return Optional.empty();
+        }
+        FieldSpec element = arrays.get(0).items();
+        return element.type() == FieldType.OBJECT && element.children() != null && !element.children().isEmpty()
+                ? Optional.of(element)
+                : Optional.empty();
+    }
+
+    /** Whether this read returns a page of rows rather than one object. */
+    private static boolean isListEnvelope(Signature sig) {
+        return isRead(sig) && sig.responseDto() != null
+                && listElement(sig.operation().successResponse().orElseThrow().body()).isPresent();
+    }
+
+    /**
+     * Name of the companion count method for a list operation.
+     *
+     * <p>It exists because one method cannot return both the page's rows and the pre-paging total, and a
+     * server-owned Mapper leaves the author no way to add the missing one. It takes the SAME parameters as the
+     * read - page and size included, which its SQL ignores - rather than guessing which parameters do the paging.
+     */
+    private static String countName(Signature sig) {
+        return "count" + JavaNames.pascal(sig.operation().operationId());
     }
 
     // --- Mapper interface ---
@@ -157,9 +203,13 @@ final class MyBatisSkeletonWriter {
         }
 
         StringBuilder out = new StringBuilder();
-        out.append("// AUTHORED. Add methods freely — but every method must have a matching statement id in\n")
-                .append("// ").append(layout.mapperXmlPath()).append(" and a @Schema description. The deploy\n")
-                .append("// wrapper checks both, in both directions, before the module is installed.\n")
+        out.append("// GENERATED from the module's interface definition. Do not edit — the deploy wrapper replaces\n")
+                .append("// this file from the declared spec, so hand edits are silently discarded. You cannot\n")
+                .append("// add a method here: every signature is a function of the spec.\n")
+                .append("//\n")
+                .append("// What you write is the SQL in ").append(layout.mapperXmlPath()).append(", and every\n")
+                .append("// statement id there must match a method name below. The deploy wrapper checks that\n")
+                .append("// pairing in both directions before the module is installed.\n")
                 .append("package ").append(layout.basePackage()).append(";\n\n")
                 .append(SkeletonGenerator.imports(imports, layout.basePackage()))
                 .append('\n')
@@ -187,6 +237,18 @@ final class MyBatisSkeletonWriter {
                     .append("    ").append(mapperReturnType(sig)).append(' ')
                     .append(sig.operation().operationId()).append('(')
                     .append(String.join(", ", parameters)).append(");\n");
+
+            if (isListEnvelope(sig)) {
+                out.append('\n')
+                        .append("    /** ").append(JavaNames.oneLine(sig.operation().summary()))
+                        .append(" - total before paging. Its SQL ignores the paging parameters. */\n")
+                        .append("    @Schema(description = ")
+                        .append(JavaNames.literal(JavaNames.oneLine(sig.operation().summary())
+                                + " - total before paging"))
+                        .append(")\n")
+                        .append("    long ").append(countName(sig)).append('(')
+                        .append(String.join(", ", parameters)).append(");\n");
+            }
         }
         return out.append("}\n").toString();
     }
@@ -215,6 +277,9 @@ final class MyBatisSkeletonWriter {
         }
         for (Signature sig : signatures) {
             appendStatement(out, sig);
+            if (isListEnvelope(sig)) {
+                appendCountStatement(out, sig);
+            }
         }
         return out.append("</mapper>\n").toString();
     }
@@ -249,6 +314,17 @@ final class MyBatisSkeletonWriter {
                         : sig.params().get(0).wireName())
                 .append("}. -->\n")
                 .append("    </").append(element).append(">\n");
+    }
+
+    /** The count companion. resultType is long, so it needs no resultMap. */
+    private static void appendCountStatement(StringBuilder out, Signature sig) {
+        out.append("\n    <!-- ").append(countName(sig)).append(" - ")
+                .append(xmlText(JavaNames.oneLine(sig.operation().summary())))
+                .append(" (total before paging - must see the SAME conditions as the list) -->\n")
+                .append("    <select id=\"").append(countName(sig)).append("\" resultType=\"long\">\n")
+                .append("        <!-- TODO write the SQL: SELECT COUNT(*) with the same WHERE as ")
+                .append(sig.operation().operationId()).append(". -->\n")
+                .append("    </select>\n");
     }
 
     private static String resultMapId(Signature sig) {

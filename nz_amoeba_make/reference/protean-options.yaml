@@ -844,6 +844,41 @@ capabilities:
           be visible to whoever reads the config, and pinned so a silent edit breaks a test instead of the next
           module. (Verified on a generated sample: the block was missing entirely and the policy looked switched off
           while being fully active.)
+      - key: amoeba.skeleton.data-access
+        type: enum
+        allowed: [none, mybatis]
+        default: none
+        desc: The project's data-access standard for generated modules.
+        note: >-
+          A PIN, NOT A FALLBACK — it takes effect only when spec-overrides-allowed is false. InterfaceSpec's compact
+          constructor normalises a null dataAccess to NONE, so once a spec exists there is no way to tell "the caller
+          omitted it" from "the caller asked for NONE"; with overrides allowed the caller's value therefore stands.
+          mybatis emits the Mapper interface (SERVER-owned), its mapper XML (AUTHOR-owned), a <Op>Row record per read
+          operation and <X>MyBatisConfig, and makes a reachable database a deploy prerequisite because gate-3 probes
+          run real queries. none emits none of them and the module reaches its DataSource itself.
+      - key: amoeba.skeleton.spec-overrides-allowed
+        type: boolean
+        default: true
+        desc: Whether a caller may state dataAccess / serviceInterface in the spec, or the project pins both.
+        warn: >-
+          CHANGING THIS ON A PROJECT THAT ALREADY HAS MODULES MAKES THEM UNREDEPLOYABLE, in both directions. A spec
+          carrying dataAccess is rejected once this is false (INVALID_ARGUMENT); removing that field then changes
+          how serviceInterface resolves, and the deploy wrapper refuses with "the service-layer shape cannot change
+          on an existing module". Deployed modules keep RUNNING — their shape is sealed — but the next fix to one of
+          them needs either a temporary flip back or an uninstall and rewrite. Say this at the moment the value is
+          chosen, not afterwards.
+        note: >-
+          ★ THE PROJECT DEFAULTS ARE NOT ENFORCEMENT ON THEIR OWN. serviceInterface is resolved only when the caller
+          leaves it null and dataAccess has no fallback at all, while BOTH are advertised in the tool schema — so an
+          agent reading that schema sets them itself and the project standard loses every time. Observed repeatedly
+          on a live server before this key existed.
+          With false, both fields are REMOVED from the schema that amoeba.define_interface and protean.deploy_module
+          advertise. Every object in that schema is additionalProperties:false, so a caller that sets either is
+          REJECTED ([INVALID_ARGUMENT] ... not defined in the schema) rather than silently overriding. Verified live.
+          ENFORCEMENT REQUIRES protean.mcp.strict-schema=true: the schema is only checked when the dispatcher
+          validates arguments. With strict-schema off the fields are merely undocumented and Jackson still binds
+          them. SkeletonDefaults stamps the values on BOTH entry paths, so an inline interface passed straight to
+          deploy cannot take a different shape than one defined through the tool.
       - key: amoeba.interface.contract-rule-enabled
         type: boolean
         default: true
@@ -865,6 +900,7 @@ capabilities:
         - { src: InterfaceSpec.java.template,                       to: main }
         - { src: InterfaceSpecValidator.java.template,              to: main }
         - { src: DraftStore.java.template,                          to: main }
+        - { src: SkeletonDefaults.java.template,                   to: main }
         - { src: InterfaceSpecValidatorTest.java.template,          to: test }
         - { src: DraftStoreTest.java.template,                      to: test }
         - { src: SpecFixtures.java.template,                        to: test }
@@ -960,17 +996,28 @@ capabilities:
       filename) and seededFiles (author-owned files you omitted; ServiceImpl here means the throwing stub shipped
       and gate 3 will roll the deploy back). Tell the user to read both.
 
-      ★ TWO CONSTRAINTS THE SCHEMA DOES NOT ENFORCE — say them when this capability is selected, because each one
-      otherwise costs a rolled-back deploy to discover.
-        1. SUCCESS STATUS MUST BE 200. gen/ControllerWriter emits no @ResponseStatus, so a generated handler always
-           answers 200. Declaring 201/204 passes L1 and L2 and then FAILS GATE 3, because the probe expects the
-           declared status while the handler returns 200. Hand-adding @ResponseStatus does not survive the next
-           deploy (the controller is server-owned). Deliberately not fixed in the generator; documented instead.
-        2. GATE-3 PROBES ARE DESTRUCTIVE. deploy/ProbeGenerator builds a live HTTP probe per operation with no
-           request body, a declared 2xx, and an example on every {var} — so DELETE /<plural>/{id} EXECUTES ON EVERY
-           DEPLOY. example is mandatory on a path parameter (InterfaceSpecValidator), so the probe cannot be turned
-           off. Tell the user to add a probe-only reserved row to any table carrying a DELETE operation and use that
-           row id as the example.
+      ★ WRITE THESE FOUR KEYS INTO THE GENERATED application.yml, WITH THEIR REASONS. They decide the module file
+      shape, so a project that does not record them cannot explain its own generated output later — and the reasons
+      live only here, in this capability. A generated sample that carries the values but not the rationale sends the
+      next project back to first principles. application.yml.template holds no amoeba.skeleton block on purpose:
+      the values are per-project, so the generator injects them from the answers to these options.
+
+      ★ TWO THINGS TO SAY WHEN THIS CAPABILITY IS SELECTED. Each was once a constraint the author had to work
+      around, and the generator now handles both — so stating the OLD rule sends them to fix a problem that is
+      already gone.
+        1. DECLARED SUCCESS STATUSES ARE REALISED. gen/ControllerWriter emits @ResponseStatus whenever the spec
+           declares anything but 200, so 201/204 reach the caller and gate 3 sees the status the spec declared. A
+           status Spring's HttpStatus does not know fails AT GENERATION rather than emitting a constant that would
+           not compile inside the deployed module. (Before this a handler always answered 200, and a declared 201
+           passed L1 and L2 and then failed gate 3.)
+        2. GATE-3 PROBES COVER NON-MUTATING OPERATIONS ONLY. deploy/ProbeGenerator skips anything but GET, so an
+           auto-generated DELETE /<plural>/{id} no longer runs on every deploy — which it did, against a live row,
+           before the rule existed. PUT and PATCH are excluded for the same reason. Route registration is not lost:
+           InterfaceVerifier compares declared routes against what the module actually served, separately from
+           probes. A GET probe is still a REAL request. ProbeGenerator.unprobeable() names the operations that got
+           no probe, so tell the user where coverage stops. To probe a mutation deliberately, pass it in
+           verification.integration — a caller-supplied probe replaces the auto-generated one for the same
+           method+path.
 
       SUPERSEDES THE OLD 5-FILE BUNDLE. This capability used to emit only InterfaceSpec + InterfaceSpecValidator +
       a ValidateInterfaceTool worked example. That tool is GONE: amoeba.define_interface performs the same

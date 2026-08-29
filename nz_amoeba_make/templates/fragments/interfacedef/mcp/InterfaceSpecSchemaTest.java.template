@@ -11,17 +11,19 @@ import com.networknt.schema.SpecVersion;
 import com.networknt.schema.ValidationMessage;
 
 import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.SkeletonDefaults;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class InterfaceSpecSchemaTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
-    private final ObjectNode schema = new DefineInterfaceTool(mapper, new DraftStore(), true).inputSchema();
+    private final ObjectNode schema = new DefineInterfaceTool(mapper, new DraftStore(), new SkeletonDefaults("none", true, true)).inputSchema();
 
     private Set<ValidationMessage> validate(String json) {
         try {
@@ -251,6 +253,29 @@ class InterfaceSpecSchemaTest {
     }
 
     /** The enum values in the schema must be the wire spellings, or a valid spec would be rejected. */
+    /**
+     * The pin. With amoeba.skeleton.spec-overrides-allowed=false the two fields that decide a module's file shape
+     * must be ABSENT from the advertised schema, not merely defaulted — every object here is
+     * additionalProperties:false, so absence is what turns a caller setting them into a rejection.
+     *
+     * <p>This is the assertion that closes the hole the project standard kept losing to: the defaults apply only
+     * when a caller stays silent, so while these were advertised an agent reading the schema set them itself and
+     * the standard never held.
+     */
+    @Test
+    void pinnedProjectRemovesTheShapeFieldsFromTheSchema() {
+        ObjectNode pinned = new DefineInterfaceTool(mapper, new DraftStore(), new SkeletonDefaults("mybatis", false, false)).inputSchema();
+        JsonNode props = pinned.at("/$defs/interfaceSpec/properties");
+
+        assertTrue(props.path("dataAccess").isMissingNode(), pinned.toPrettyString());
+        assertTrue(props.path("serviceInterface").isMissingNode(), pinned.toPrettyString());
+        // The rest of the spec must survive the pin — this removes two fields, not the schema.
+        assertFalse(props.path("operations").isMissingNode(), pinned.toPrettyString());
+        assertFalse(props.path("description").isMissingNode(), pinned.toPrettyString());
+        // And the closed-object rule is what makes absence enforcing rather than cosmetic.
+        assertFalse(pinned.at("/$defs/interfaceSpec/additionalProperties").asBoolean(true));
+    }
+
     @Test
     void enumValuesAreTheWireSpellings() {
         JsonNode fieldType = schema.at("/$defs/field/properties/type/enum");

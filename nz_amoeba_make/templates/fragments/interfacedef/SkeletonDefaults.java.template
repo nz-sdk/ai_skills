@@ -1,0 +1,69 @@
+// [INTERFACE DEFINITION] The project's skeleton standard, in one place, applied on every entry path.
+//
+// WHY THIS EXISTS. The two fields that decide a module's file shape — dataAccess and serviceInterface — used to be
+// resolved in DefineInterfaceTool only, and only when the caller left them null. That left the standard losing in
+// two ways at once:
+//   1. an agent reading the tool schema set them itself, and an explicit value always beat the project default;
+//   2. protean.deploy_module also accepts an INLINE interface, and that path resolved nothing at all — an inline
+//      spec kept dataAccess=NONE and a null serviceInterface, which InterfaceSpec#generatesServiceInterface reads
+//      as TRUE. So the same project produced different shapes depending on which door was used.
+// Both are closed here: every spec passes through apply() before anything stores or generates from it.
+//
+// PINNED vs UNPINNED. With amoeba.skeleton.spec-overrides-allowed=false the two fields are also removed from the
+// advertised schema (see InterfaceSpecSchema#attachDefs), so a caller cannot state them and this class simply
+// stamps the project values. With overrides allowed, a stated value is honoured and only an unstated one falls back
+// — the historical behaviour, kept so a project that wants per-module choice still has it.
+package {{PKG}}.interfacedef;
+
+import {{PKG}}.interfacedef.InterfaceSpec.DataAccess;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+@Component
+public class SkeletonDefaults {
+
+    private final DataAccess dataAccess;
+    private final boolean serviceInterface;
+    private final boolean overridesAllowed;
+
+    public SkeletonDefaults(
+            @Value("${amoeba.skeleton.data-access:none}") String dataAccess,
+            @Value("${amoeba.skeleton.service-interface:true}") boolean serviceInterface,
+            @Value("${amoeba.skeleton.spec-overrides-allowed:true}") boolean overridesAllowed) {
+        // Parsed through the same @JsonCreator the wire format uses, so a typo fails at startup with the list of
+        // accepted values rather than silently degrading to NONE.
+        this.dataAccess = DataAccess.from(dataAccess);
+        this.serviceInterface = serviceInterface;
+        this.overridesAllowed = overridesAllowed;
+    }
+
+    /** Whether a caller may state dataAccess / serviceInterface at all. Drives the advertised schema. */
+    public boolean overridesAllowed() {
+        return overridesAllowed;
+    }
+
+    /**
+     * Returns the spec with both shape fields resolved to explicit values.
+     *
+     * <p>Always leaves them explicit, never null: the deploy wrapper regenerates the server-owned files from this
+     * spec on every redeploy, so a spec that still said "use the default" would follow the default as it stands
+     * THEN, silently restructuring a live module the day someone flips the setting.
+     */
+    public InterfaceSpec apply(InterfaceSpec spec) {
+        InterfaceSpec out = spec;
+        // dataAccess is stamped ONLY when pinned, and that asymmetry with serviceInterface is forced, not chosen:
+        // InterfaceSpec's compact constructor normalises a null dataAccess to NONE, so by the time a spec exists
+        // there is no way to tell "the caller omitted it" from "the caller asked for NONE". With overrides allowed
+        // the caller's value therefore stands as it always did, and amoeba.skeleton.data-access has no effect —
+        // it is a PIN, not a fallback. serviceInterface keeps its Boolean unnormalised precisely to avoid this,
+        // which is why it can fall back.
+        if (!overridesAllowed) {
+            out = out.withDataAccess(dataAccess);
+        }
+        if (!overridesAllowed || spec.serviceInterface() == null) {
+            out = out.withServiceInterface(serviceInterface);
+        }
+        return out;
+    }
+}

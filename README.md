@@ -8,6 +8,12 @@
 | --- | --- | --- | --- |
 | [nz_amoeba_make](nz_amoeba_make/) | 프로틴 샘플 생성기 | Claude | Protean 설정을 안내에 따라 고르면 실행 가능한 Spring Boot 샘플 서버를 생성한다 |
 
+## 스킬 아티팩트
+
+| 스킬 영문명 | 아티팩트 |
+| --- | --- |
+| nz_amoeba_make | [Amoeba Maker 선택 지도](https://claude.ai/code/artifact/6fe78fca-2674-4bcf-a76f-866bb81fe074?org=dbcf19a7-9d52-448d-b3cd-0945742ba48e) |
+
 ## 스킬 설정
 
 Claude Code 는 정해진 경로에서만 스킬을 찾는다 — `~/.claude/skills/`(개인),

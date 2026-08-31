@@ -139,10 +139,14 @@ never asked at all. Same rules as step 6: show each option's **full property key
 `subflow:` the capability also declares, so the sub-flow's answer is already known.
 **Two capabilities carry `options:` today.** Recount them in the yaml rather than trusting this list — it goes
 stale the moment a third is added, which is the same failure mode rule 4 below exists to prevent.
-- `embedded_auth` — `subflow: authstore` picks the user store, then its six `options:` cover the rest of
-  `amoeba.auth.*`: token lifetime, signing-key path, the two client registrations. Its `enabled`/`store`/`users`
-  are already settled (by the selection itself and by the sub-flow), so those three are the only ones you do not
-  ask.
+- `embedded_auth` — `subflow: authstore` picks the user store, then its nine `options:` cover the rest of
+  `amoeba.auth.*`: token lifetimes, signing-key path, the two client registrations, and the refresh-token trio
+  (`refresh-token-enabled` / `-ttl` / `authorization-store`). Its `enabled`/`store`/`users` are already settled (by
+  the selection itself and by the sub-flow), so those three are the only ones you do not ask.
+  Two traps in that trio. **`authorization-store` is not `store`** — one holds usernames, the other holds issued
+  tokens, and they are independently chosen; word the questions so they cannot be mistaken for each other.
+  And `refresh-token-enabled=true` with `authorization-store=memory` is legal but WARNS: every restart voids
+  every refresh token, so the configured ttl is not what it appears to be.
 - `interface_spec_validator` — four `options:` under `amoeba.skeleton.*` and `amoeba.interface.*`: the
   service-layer shape, the skeleton's data access, whether a spec may override either, and the L3 rule's kill
   switch. `amoeba.skeleton.service-interface` is the project's service-layer standard, and its note says to write

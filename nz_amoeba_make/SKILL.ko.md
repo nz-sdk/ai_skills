@@ -150,9 +150,14 @@
 서브플로우의 답이 이미 정해진 뒤에 옵션을 묻는다.
 **현재 `options:` 를 가진 capability 는 둘이다.** 이 목록을 믿지 말고 yaml 에서 다시 세라 — 세 번째가 추가되는
 순간 낡은 정보가 되며, 그것이 아래 규칙 4가 막으려는 바로 그 실패다.
-- `embedded_auth` — `subflow: authstore` 로 사용자 스토어를 고른 뒤, 6개 `options:` 가 `amoeba.auth.*` 의
-  나머지를 덮는다: 토큰 수명, 서명키 경로, 클라이언트 등록 2건. `enabled`/`store`/`users` 는 이미 정해져
+- `embedded_auth` — `subflow: authstore` 로 사용자 스토어를 고른 뒤, 9개 `options:` 가 `amoeba.auth.*` 의
+  나머지를 덮는다: 토큰 수명 2종, 서명키 경로, 클라이언트 등록 2건, 그리고 refresh 3종
+  (`refresh-token-enabled` / `-ttl` / `authorization-store`). `enabled`/`store`/`users` 는 이미 정해져
   있으므로(선택 자체와 서브플로우로) 그 셋만 묻지 않는다.
+  refresh 3종에는 함정이 둘 있다. **`authorization-store` 는 `store` 가 아니다** — 하나는 사용자명을, 다른
+  하나는 발급된 토큰을 담고 서로 독립적으로 고른다. 질문 문구를 서로 헷갈리지 않게 쓴다. 그리고
+  `refresh-token-enabled=true` + `authorization-store=memory` 조합은 허용하되 **경고**한다 — 재시작마다 모든
+  refresh token 이 무효화되어 설정한 ttl 이 보이는 대로 동작하지 않는다.
 - `interface_spec_validator` — `amoeba.skeleton.*` 과 `amoeba.interface.*` 아래 `options:` 4개: 서비스 계층
   형태, 스켈레톤의 데이터 접근, 스펙이 그 둘을 덮어쓸 수 있는지, 그리고 L3 규칙의 킬 스위치.
   `amoeba.skeleton.service-interface` 는 이 프로젝트의 서비스 계층 표준이고, 그 `note` 는 **답이 기본값이어도

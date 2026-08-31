@@ -691,14 +691,92 @@ capabilities:
         default: 1h
         desc: How long an issued mcp.* token stays valid.
         note: >-
-          THIS IS ALSO THE RE-LOGIN INTERVAL, because there is no refresh token to renew with. The MCP client is
-          registered public + PKCE (ClientAuthenticationMethod.NONE, authorization_code only), and Spring
-          Authorization Server refuses refresh tokens to public clients — OAuth2RefreshTokenGenerator returns null,
-          and the REFRESH_TOKEN grant is not registered at all. The service client uses client_credentials, which
-          has no refresh token by specification. So when this expires a human logs in through the browser again.
-          Raising it buys convenience and extends exactly as far the window in which a stolen token still works;
-          there is no revocation endpoint here either. Unrelated to protean.mcp.session.timeout and
-          protean.mcp.debug.session-idle-timeout, which time out MCP STREAMING SESSIONS, not tokens.
+          KEEP THIS SHORT — its lifetime IS its blast radius. An access token here is a self-contained JWT checked
+          by a local JwtDecoder that never consults the authorization store, so /oauth2/revoke (which DOES exist —
+          it is a default AuthorizationServerSettings endpoint) cannot stop one. Deleting the jwks file is the only
+          revoke-all.
+          WHETHER THIS IS ALSO THE RE-LOGIN INTERVAL depends on refresh-token-enabled below. With refresh OFF
+          (the default) it is: the MCP client is public + PKCE, and Spring refuses refresh tokens to public clients
+          on the authorization_code grant, so when this expires a human logs in through the browser again. With
+          refresh ON, refresh-token-ttl becomes the re-login interval and the client renews silently — which is the
+          case for shortening this rather than raising it.
+          The service client uses client_credentials, which has no refresh token by specification.
+          Unrelated to protean.mcp.session.timeout and protean.mcp.debug.session-idle-timeout, which time out MCP
+          STREAMING SESSIONS, not tokens.
+      - key: amoeba.auth.refresh-token-enabled
+        type: boolean
+        default: false
+        desc: Issue refresh tokens, so a browser login is needed once per refresh-token-ttl instead of once per access-token-ttl.
+        security: >-
+          THIS CREATES THE ONLY LONG-LIVED CREDENTIAL IN THE SYSTEM. Off by default for that reason: without it
+          nothing survives an hour, so there is nothing durable to steal. Three properties bound the risk and all
+          three are generated together — rotation (reuseRefreshTokens(false), so a captured token is single-use and
+          replay is refused), opacity (the token is stored, so POST /oauth2/revoke genuinely kills it, unlike an
+          access token), and a short access-token-ttl. Do not turn this on and then lengthen access-token-ttl too:
+          that reintroduces the unrevocable window this is supposed to remove.
+        note: >-
+          ★ SPRING REFUSES THIS FOR A PUBLIC CLIENT IN TWO PLACES, AND THE GENERATED CODE OPENS BOTH. Verified
+          against the 1.5.8 bytecode, because the failure modes are far apart:
+            1. OAuth2RefreshTokenGenerator.generate() returns null when isPublicClientForAuthorizationCodeGrant()
+               holds — grant is authorization_code AND the client authenticated with NONE. Symptom: no
+               refresh_token in the token response, no error.
+            2. PublicClientAuthenticationConverter.convert() returns null unless the request is a PKCE code
+               exchange, so a public client sending grant_type=refresh_token is never authenticated at all.
+               Symptom: {"error":"invalid_client"} at /oauth2/token.
+          OAuth2RefreshTokenAuthenticationProvider ALSO has a ClientAuthenticationMethod.NONE check, but it is DPoP
+          key binding, NOT a refusal — do not "fix" that one. EmbeddedAuthServerConfig adds a token generator for
+          (1) and a converter/provider pair for (2), and nothing else.
+          OAuth 2.1 permits refresh tokens for a public client PROVIDED they rotate; Spring is being conservative
+          rather than enforcing a protocol rule.
+          ★ A CUSTOM OAuth2TokenGenerator TAKES OVER JwtCustomizer WIRING. Spring attaches the tokenCustomizer bean
+          to its default JwtGenerator for you; supplying your own means attaching it by hand. Miss that line and the
+          audience lock disappears AND per-user scope narrowing stops — a read-only user silently receives
+          mcp.write. The generated EmbeddedAuthRefreshTest pins exactly that, on the REFRESH path where it regresses
+          (initial issuance keeps working).
+      - key: amoeba.auth.refresh-token-ttl
+        type: duration
+        default: 7d
+        requires: [amoeba.auth.refresh-token-enabled=true]
+        desc: Refresh token lifetime — the real re-login interval once refresh is on.
+        note: >-
+          Rotation means a token that is USED often never reaches this age; the value is really "how long may a
+          client be idle before a human logs in again". Bounded by authorization-store: with `memory` a restart
+          invalidates every one of them regardless of what is set here.
+      - key: amoeba.auth.authorization-store
+        type: enum
+        allowed: [memory, jdbc]
+        default: memory
+        requires_when:
+          - when: [amoeba.auth.authorization-store=jdbc]
+            needs: data_access
+            why: >-
+              JdbcOAuth2AuthorizationService needs a DataSource, and data_access is what puts one in the app. Block
+              the combination rather than generating a config that cannot start.
+        desc: Where OAuth authorizations (issued tokens, auth codes) are kept. NOT the user store — that is amoeba.auth.store.
+        warn: >-
+          ★ TWO DIFFERENT KEYS HERE ARE CALLED A STORE AND CROSSING THEM IS EASY. amoeba.auth.store decides where
+          USERNAMES come from (see auth-stores.yaml); this one decides where ISSUED STATE is kept. They are
+          independent — memory users with a jdbc authorization store is a perfectly normal combination.
+          `memory` (Spring's InMemoryOAuth2AuthorizationService) LOSES EVERYTHING ON RESTART, which makes a 7-day
+          refresh-token-ttl read as "7 days" while meaning "until the next restart". On a dev server restarted
+          routinely that is close to worthless — WARN when refresh-token-enabled=true is paired with `memory`,
+          rather than blocking it (it is still the right choice for a project with no database).
+        note: >-
+          ★ THE TABLE ALSO BACKS THE authorization_code EXCHANGE, so with jdbc selected and oauth2_authorization
+          absent, LOGIN fails — not just refresh. The generated config probes for the table at startup and refuses
+          to start with the mysql command to run, because the alternative is a 500 at the token endpoint that reads
+          like a broken filter chain. DDL is emitted to src/main/resources/db/oauth2-authorization-schema.sql (the
+          script Spring ships, unmodified) and a human applies it; it is generated for every embedded_auth project
+          regardless of this setting, so switching later is one property and not a regeneration.
+          ★ TWO THINGS SILENTLY BREAK JDBC PERSISTENCE AND BOTH ARE PRE-FIXED IN THE TEMPLATE — do not undo them.
+          (a) RegisteredClient.withId() must be a STABLE literal: a per-boot UUID makes every stored authorization
+          unreadable after a restart ("The RegisteredClient with id ... was not found"). (b) Claims set with
+          List.of() cannot be read back: the row mapper uses Spring Security's ALLOWLISTED ObjectMapper and
+          java.util.ImmutableCollections$List12 is not on it, so the audience lock itself turns every refresh into a
+          500. Use ArrayList.
+          ★ MYSQL TIME INSTANTS: expiry is a `timestamp` column, so the JDBC URL needs preserveInstants=true,
+          connectionTimeZone=UTC and forceConnectionTimeZoneToSession=true (db-vendors.yaml sets them). Without
+          them Connector/J shifts every instant by the server's offset — 9 hours in KST.
       - key: amoeba.auth.jwks-path
         type: string
         default: data/amoeba-auth-jwks.json
@@ -763,6 +841,11 @@ capabilities:
         - { src: LoginSuccessHandler.java.template,      to: main }
         - { src: EmbeddedAuthFlowTest.java.template,     to: test }
         - { src: EmbeddedAuthDisabledTest.java.template, to: test }
+        # Refresh is a PROPERTY, so the code ships either way behind @ConditionalOnProperty — but a test cannot be
+        # property-gated, it would simply fail. Hence a whole file with `when:`, which is what fragment_bundle
+        # gating is for. Exercises the jdbc authorization store against in-memory H2 so `./gradlew test` stays
+        # offline while still hitting the row mapper, where the sharp edges are.
+        - { src: EmbeddedAuthRefreshTest.java.template,  to: test, when: amoeba.auth.refresh-token-enabled=true }
     security: >-
       ★ THE SIGNING KEY MOVES INSIDE THE MCP RCE SURFACE. protean provides no sandbox and documents that as an
       explicit non-goal (docs/guide/12-security: module code holds every permission the host JVM has —

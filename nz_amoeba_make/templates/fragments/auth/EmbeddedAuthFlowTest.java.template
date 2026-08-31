@@ -64,9 +64,23 @@ class EmbeddedAuthFlowTest {
         // The backend override is what makes the dir override mean anything here. If application.yml sets
         // protean.module-store.backend=jdbc, the jdbc store reads listActive() off the DataSource during startup
         // reconcile — which would drag this test onto a live database and make an offline `./gradlew test`
-        // impossible. Forcing filesystem keeps the test about the auth flow, which is all it tests. With
-        // amoeba.auth.store=memory nothing else asks for a connection, so no DataSource is ever opened.
+        // impossible. Forcing filesystem keeps the test about the auth flow, which is all it tests.
         r.add("protean.module-store.backend", () -> "filesystem");
+
+        // In-memory H2 for whatever still wants a DataSource — amoeba.auth.store=jdbc (user accounts) and
+        // amoeba.auth.authorization-store=jdbc (issued tokens) both do. Unconditional on purpose: when neither is
+        // jdbc nothing opens a connection and this costs nothing, and the alternative is a test suite that only
+        // runs when the production database happens to be up. H2 is already on the test classpath via protean.
+        r.add("spring.datasource.url",
+                () -> "jdbc:h2:mem:authflow-" + System.nanoTime() + ";DB_CLOSE_DELAY=-1");
+        r.add("spring.datasource.driver-class-name", () -> "org.h2.Driver");
+        r.add("spring.datasource.username", () -> "sa");
+        r.add("spring.datasource.password", () -> "");
+        // The SAME script an operator applies by hand, so drift between the shipped DDL and what
+        // JdbcOAuth2AuthorizationService needs breaks this test rather than the first production login. The file
+        // is emitted for every embedded_auth project, so it is always on the classpath here.
+        r.add("spring.sql.init.mode", () -> "always");
+        r.add("spring.sql.init.schema-locations", () -> "classpath:db/oauth2-authorization-schema.sql");
     }
 
     @AfterAll

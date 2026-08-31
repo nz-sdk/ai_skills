@@ -30,11 +30,36 @@ import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
 
 import jakarta.annotation.PostConstruct;
+import jakarta.servlet.http.HttpServletRequest;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.dao.DataAccessException;
+import org.springframework.http.HttpHeaders;
+import org.springframework.jdbc.core.JdbcOperations;
+import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.crypto.keygen.Base64StringKeyGenerator;
+import org.springframework.security.crypto.keygen.StringKeyGenerator;
+import org.springframework.security.oauth2.core.OAuth2AuthenticationException;
+import org.springframework.security.oauth2.core.OAuth2ErrorCodes;
+import org.springframework.security.oauth2.core.OAuth2RefreshToken;
+import org.springframework.security.oauth2.core.OAuth2Token;
+import org.springframework.security.oauth2.core.endpoint.OAuth2ParameterNames;
+import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
+import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationService;
+import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationService;
+import org.springframework.security.oauth2.server.authorization.authentication.OAuth2ClientAuthenticationToken;
+import org.springframework.security.oauth2.server.authorization.token.DelegatingOAuth2TokenGenerator;
+import org.springframework.security.oauth2.server.authorization.token.JwtGenerator;
+import org.springframework.security.oauth2.server.authorization.token.OAuth2AccessTokenGenerator;
+import org.springframework.security.oauth2.server.authorization.token.OAuth2TokenContext;
+import org.springframework.security.oauth2.server.authorization.token.OAuth2TokenGenerator;
+import org.springframework.security.web.authentication.AuthenticationConverter;
+import org.springframework.util.StringUtils;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -69,7 +94,10 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -153,10 +181,29 @@ public class EmbeddedAuthServerConfig {
     @Bean
     @Order(0)
     @SuppressWarnings("removal")
-    SecurityFilterChain authorizationServerFilterChain(HttpSecurity http) throws Exception {
+    SecurityFilterChain authorizationServerFilterChain(
+            HttpSecurity http, RegisteredClientRepository registeredClients) throws Exception {
         OAuth2AuthorizationServerConfiguration.applyDefaultSecurity(http);
         http.getConfigurer(OAuth2AuthorizationServerConfigurer.class)
                 .oidc(Customizer.withDefaults());
+
+        if (props.refreshTokenEnabled()) {
+            // ★ Second half of public-client refresh. Issuing the token (see #tokenGenerator) is not enough:
+            // Spring's PublicClientAuthenticationConverter bails out unless the request is a PKCE
+            // authorization_code exchange, so a public client presenting grant_type=refresh_token is never
+            // authenticated at all and the token endpoint answers {"error":"invalid_client"} — before the refresh
+            // grant is even reached. These two plug that one hole and nothing else.
+            //
+            // Ordering is load-bearing and it is in our favour: OAuth2ClientAuthenticationConfigurer inserts
+            // custom converters and providers with addAll(0, ...), so both run BEFORE the built-ins. That matters
+            // because Spring's own PublicClientAuthenticationProvider also claims NONE tokens and would demand a
+            // code_verifier that a refresh request does not carry.
+            http.getConfigurer(OAuth2AuthorizationServerConfigurer.class)
+                    .clientAuthentication(clientAuth -> clientAuth
+                            .authenticationConverter(new PublicClientRefreshAuthenticationConverter())
+                            .authenticationProvider(
+                                    new PublicClientRefreshAuthenticationProvider(registeredClients)));
+        }
         http.exceptionHandling(exceptions -> exceptions.defaultAuthenticationEntryPointFor(
                 new LoginUrlAuthenticationEntryPoint("/login"),
                 new MediaTypeRequestMatcher(MediaType.TEXT_HTML)));
@@ -172,15 +219,21 @@ public class EmbeddedAuthServerConfig {
      * Registered clients — only {@code mcp.*} scopes are ever offered, by design (see the header).
      *
      * <p>The MCP client is public + PKCE: Claude Code and mcp-remote cannot keep a secret, which is exactly what
-     * OAuth 2.1 means by a public client. Note that Spring Authorization Server refuses to issue refresh tokens
-     * to public clients ({@code OAuth2RefreshTokenGenerator} returns null for authorization_code + NONE), so a
-     * browser login has to be repeated once the access token expires.
+     * OAuth 2.1 means by a public client. Spring Authorization Server refuses to issue refresh tokens to such a
+     * client ({@code OAuth2RefreshTokenGenerator} returns null for authorization_code + NONE), so by default a
+     * browser login has to be repeated once the access token expires. Setting
+     * {@code amoeba.auth.refresh-token-enabled=true} overrides that — see {@link #tokenGenerator}.
      */
     @Bean
     RegisteredClientRepository registeredClientRepository() {
         List<RegisteredClient> clients = new ArrayList<>();
 
-        RegisteredClient.Builder agent = RegisteredClient.withId(UUID.randomUUID().toString())
+        // ★ THE ID IS A STABLE LITERAL, NOT A RANDOM UUID. With authorization-store=jdbc this string is written to
+        // oauth2_authorization.registered_client_id and resolved back through this repository on every load, so a
+        // UUID minted per boot makes every stored authorization unreadable after a restart
+        // ("The RegisteredClient with id '...' was not found") — silently undoing the point of persisting them.
+        // The clientId is already unique here, so it is the natural key.
+        RegisteredClient.Builder agent = RegisteredClient.withId(props.mcpClientId())
                 .clientId(props.mcpClientId())
                 .clientAuthenticationMethod(ClientAuthenticationMethod.NONE)
                 .authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
@@ -190,7 +243,10 @@ public class EmbeddedAuthServerConfig {
                         // scope for the user to choose, so it is skipped. Revisit if this is ever exposed outside.
                         .requireAuthorizationConsent(false)
                         .build())
-                .tokenSettings(TokenSettings.builder().accessTokenTimeToLive(props.accessTokenTtl()).build());
+                .tokenSettings(agentTokenSettings());
+        if (props.refreshTokenEnabled()) {
+            agent.authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN);
+        }
         MCP_SCOPES.forEach(agent::scope);
         props.mcpRedirectUris().forEach(uri -> agent.redirectUri(uri.trim()));
         clients.add(agent.build());
@@ -198,7 +254,8 @@ public class EmbeddedAuthServerConfig {
         // Optional machine client. Absent unless an id AND a secret are configured — half-configured credentials
         // would otherwise register a client nobody can authenticate as.
         if (!props.serviceClientId().isBlank() && !props.serviceClientSecret().isBlank()) {
-            RegisteredClient.Builder service = RegisteredClient.withId(UUID.randomUUID().toString())
+            // Stable id for the same reason as the agent client above.
+            RegisteredClient.Builder service = RegisteredClient.withId(props.serviceClientId())
                     .clientId(props.serviceClientId())
                     .clientSecret("{noop}" + props.serviceClientSecret())
                     .clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
@@ -208,6 +265,24 @@ public class EmbeddedAuthServerConfig {
             clients.add(service.build());
         }
         return new InMemoryRegisteredClientRepository(clients);
+    }
+
+    /**
+     * Access-token lifetime always; refresh settings only when enabled.
+     *
+     * <p>{@code reuseRefreshTokens(false)} is not a tuning knob — Spring's default is reuse, which would make the
+     * refresh token a STATIC bearer valid for its whole lifetime. For a PUBLIC client that is precisely the shape
+     * OAuth 2.1 rules out, and it is the only reason issuing one here is defensible: with rotation each refresh
+     * mints a new token and invalidates the old one, so a captured token is single-use and replay is detected.
+     */
+    private TokenSettings agentTokenSettings() {
+        TokenSettings.Builder tokens = TokenSettings.builder()
+                .accessTokenTimeToLive(props.accessTokenTtl());
+        if (props.refreshTokenEnabled()) {
+            tokens.refreshTokenTimeToLive(props.refreshTokenTtl())
+                    .reuseRefreshTokens(false);
+        }
+        return tokens.build();
     }
 
     /**
@@ -229,7 +304,12 @@ public class EmbeddedAuthServerConfig {
                 return;
             }
             if (!resourceId.isBlank()) {
-                context.getClaims().audience(List.of(resourceId));
+                // ★ ArrayList, NOT List.of(). With authorization-store=jdbc these claims are written to
+                // oauth2_authorization.access_token_metadata and read back through Spring Security's ALLOWLISTED
+                // ObjectMapper. java.util.ImmutableCollections$List12 is not on that allowlist, so List.of() makes
+                // every refresh fail with "The class ... is not in the allowlist" — a 500 at /oauth2/token, long
+                // after this line ran fine at issuance. Same reason for the scope claim below.
+                context.getClaims().audience(new ArrayList<>(List.of(resourceId)));
             }
             if (context.getPrincipal() == null || context.getPrincipal().getAuthorities() == null) {
                 return;
@@ -243,8 +323,180 @@ public class EmbeddedAuthServerConfig {
             }
             Set<String> granted = new HashSet<>(context.getAuthorizedScopes());
             granted.retainAll(userScopes);
-            context.getClaims().claim("scope", granted);
+            // ArrayList for the allowlist reason above; sorted so the claim is stable across issuances.
+            List<String> scopes = new ArrayList<>(granted);
+            Collections.sort(scopes);
+            context.getClaims().claim("scope", scopes);
         };
+    }
+
+    // ── refresh tokens for a PUBLIC client (amoeba.auth.refresh-token-enabled=true) ────────────────────────────
+    //
+    // Spring blocks this in exactly two places and both are opened below, deliberately and narrowly:
+    //   1. OAuth2RefreshTokenGenerator.generate() returns null when isPublicClientForAuthorizationCodeGrant()
+    //      holds — grant is authorization_code AND the client authenticated with NONE.  →  #tokenGenerator
+    //   2. PublicClientAuthenticationConverter.convert() returns null unless the request is a PKCE code
+    //      exchange, so a refresh request from a public client is never authenticated at all and the token
+    //      endpoint answers invalid_client.  →  the converter/provider pair, wired in the filter chain above.
+    // OAuth2RefreshTokenAuthenticationProvider's own NONE check is DPoP key binding, NOT a refusal — redeeming is
+    // fine once the two above are handled. Verified against the 1.5.8 bytecode.
+
+    /**
+     * Replaces Spring's default token generator for ONE reason: to issue a refresh token to this public client.
+     * Everything else is Spring's own default wiring, reproduced.
+     *
+     * <p><b>★ The customizer must be re-attached by hand, and that is the dangerous part of this bean.</b> Spring
+     * wires {@link #tokenCustomizer()} into the default {@code JwtGenerator} for us; supplying our own generator
+     * takes that wiring over. Drop the {@code setJwtCustomizer} line and the audience lock disappears AND per-user
+     * scope narrowing stops — a read-only user would silently receive {@code mcp.write}. The generated
+     * {@code EmbeddedAuthRefreshTest} asserts both survive a refresh; keep it.
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "amoeba.auth", name = "refresh-token-enabled", havingValue = "true")
+    OAuth2TokenGenerator<OAuth2Token> tokenGenerator(
+            JWKSource<SecurityContext> jwkSource,
+            OAuth2TokenCustomizer<JwtEncodingContext> jwtCustomizer) {
+
+        JwtGenerator jwtGenerator = new JwtGenerator(new NimbusJwtEncoder(jwkSource));
+        jwtGenerator.setJwtCustomizer(jwtCustomizer);   // ★ see the paragraph above before touching this line
+
+        return new DelegatingOAuth2TokenGenerator(
+                jwtGenerator,
+                new OAuth2AccessTokenGenerator(),
+                new PublicClientRefreshTokenGenerator());
+    }
+
+    /**
+     * Spring's {@code OAuth2RefreshTokenGenerator}, verbatim except for the public-client guard. Same 96-byte
+     * Base64url opaque value, same clock source, same {@code refreshTokenTimeToLive} lookup — so the token is
+     * indistinguishable from one Spring would have produced for a confidential client.
+     */
+    static final class PublicClientRefreshTokenGenerator implements OAuth2TokenGenerator<OAuth2RefreshToken> {
+
+        private final StringKeyGenerator refreshTokenGenerator =
+                new Base64StringKeyGenerator(Base64.getUrlEncoder().withoutPadding(), 96);
+
+        @Override
+        public OAuth2RefreshToken generate(OAuth2TokenContext context) {
+            if (!OAuth2TokenType.REFRESH_TOKEN.equals(context.getTokenType())) {
+                return null;
+            }
+            Instant issuedAt = Instant.now();
+            Instant expiresAt = issuedAt.plus(
+                    context.getRegisteredClient().getTokenSettings().getRefreshTokenTimeToLive());
+            return new OAuth2RefreshToken(this.refreshTokenGenerator.generateKey(), issuedAt, expiresAt);
+        }
+    }
+
+    /**
+     * Recognises "public client presenting a refresh token": {@code grant_type=refresh_token} plus a bare
+     * {@code client_id}, with no secret anywhere.
+     *
+     * <p>Deliberately narrow. It returns {@code null} — declining, so the built-in converters get their turn — for
+     * any other grant, for a request carrying an {@code Authorization} header, and for one carrying a
+     * {@code client_secret}. A confidential client therefore still authenticates exactly as before.
+     *
+     * <p>Duplicate parameters are rejected rather than taking the first value, as Spring's own converters do:
+     * {@code client_id=good&client_id=evil} would otherwise let a caller choose which one the framework reads.
+     */
+    static final class PublicClientRefreshAuthenticationConverter implements AuthenticationConverter {
+
+        @Override
+        public Authentication convert(HttpServletRequest request) {
+            if (!AuthorizationGrantType.REFRESH_TOKEN.getValue()
+                    .equals(single(request, OAuth2ParameterNames.GRANT_TYPE))) {
+                return null;
+            }
+            if (request.getHeader(HttpHeaders.AUTHORIZATION) != null) {
+                return null;   // a confidential client — not ours to handle
+            }
+            if (single(request, OAuth2ParameterNames.CLIENT_SECRET) != null) {
+                return null;   // ditto
+            }
+            String clientId = single(request, OAuth2ParameterNames.CLIENT_ID);
+            if (!StringUtils.hasText(clientId)) {
+                return null;
+            }
+            return new OAuth2ClientAuthenticationToken(clientId, ClientAuthenticationMethod.NONE, null, null);
+        }
+
+        /** The parameter's value, or null when absent OR supplied more than once. */
+        private static String single(HttpServletRequest request, String name) {
+            String[] values = request.getParameterValues(name);
+            return (values != null && values.length == 1) ? values[0] : null;
+        }
+    }
+
+    /**
+     * Authenticates what the converter above recognised, and re-verifies it against the registration rather than
+     * trusting the request: the client must exist, must actually be registered as public
+     * ({@link ClientAuthenticationMethod#NONE}) and must actually hold the {@code refresh_token} grant. Without
+     * those checks this would let ANY client id skip authentication on the refresh grant.
+     *
+     * <p>Returns {@code null} — not an exception — for a token it does not own, so the ProviderManager falls
+     * through to Spring's own providers.
+     */
+    static final class PublicClientRefreshAuthenticationProvider implements AuthenticationProvider {
+
+        private final RegisteredClientRepository registeredClients;
+
+        PublicClientRefreshAuthenticationProvider(RegisteredClientRepository registeredClients) {
+            this.registeredClients = registeredClients;
+        }
+
+        @Override
+        public Authentication authenticate(Authentication authentication) throws AuthenticationException {
+            OAuth2ClientAuthenticationToken request = (OAuth2ClientAuthenticationToken) authentication;
+            if (!ClientAuthenticationMethod.NONE.equals(request.getClientAuthenticationMethod())
+                    || request.isAuthenticated()) {
+                return null;
+            }
+            RegisteredClient client = this.registeredClients.findByClientId(String.valueOf(request.getPrincipal()));
+            if (client == null
+                    || !client.getClientAuthenticationMethods().contains(ClientAuthenticationMethod.NONE)
+                    || !client.getAuthorizationGrantTypes().contains(AuthorizationGrantType.REFRESH_TOKEN)) {
+                throw new OAuth2AuthenticationException(OAuth2ErrorCodes.INVALID_CLIENT);
+            }
+            return new OAuth2ClientAuthenticationToken(client, ClientAuthenticationMethod.NONE, null);
+        }
+
+        @Override
+        public boolean supports(Class<?> authentication) {
+            return OAuth2ClientAuthenticationToken.class.isAssignableFrom(authentication);
+        }
+    }
+
+    /**
+     * Persists authorizations so a refresh token outlives a restart
+     * ({@code amoeba.auth.authorization-store=jdbc}).
+     *
+     * <p>Spring's default is {@code InMemoryOAuth2AuthorizationService}, and leaving it there makes a configured
+     * {@code refresh-token-ttl} read as "7 days" while actually meaning "until the next restart". A refresh token
+     * is opaque, not a JWT, so the server is the only thing that can vouch for it; keeping that state in memory is
+     * what caps its useful life. There is no {@code memory} bean here on purpose — that IS the framework default.
+     *
+     * <p>Two consequences worth knowing:
+     * <ul>
+     *   <li>This table also backs the <b>authorization_code</b> exchange, so a missing table breaks LOGIN, not
+     *       just refresh — hence the startup probe rather than a first-login stack trace.</li>
+     *   <li>Stored rows are revocable for real: {@code POST /oauth2/revoke} invalidates a refresh token, which the
+     *       local {@code JwtDecoder} could never do for an access token.</li>
+     * </ul>
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "amoeba.auth", name = "authorization-store", havingValue = "jdbc")
+    OAuth2AuthorizationService authorizationService(JdbcOperations jdbc, RegisteredClientRepository clients) {
+        try {
+            jdbc.execute("SELECT 1 FROM oauth2_authorization WHERE 1 = 0");
+        } catch (DataAccessException e) {
+            throw new IllegalStateException("""
+                    amoeba.auth.authorization-store=jdbc keeps authorizations in the `oauth2_authorization` table, \
+                    and it is missing or unreadable. BOTH login and refresh fail without it. There is no tool that \
+                    runs DDL — apply it once by hand:
+                      mysql -h <host> -P <port> -u <user> -p <db> < src/main/resources/db/oauth2-authorization-schema.sql
+                    The script is the one Spring Authorization Server ships, unmodified.""", e);
+        }
+        return new JdbcOAuth2AuthorizationService(jdbc, clients);
     }
 
     /**

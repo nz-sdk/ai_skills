@@ -1,0 +1,70 @@
+-- Spring Authorization Server 1.5.8 — oauth2_authorization
+--
+-- Copied UNMODIFIED from the library jar
+--   (org/springframework/security/oauth2/server/authorization/oauth2-authorization-schema.sql)
+-- so it can be diffed against the next upgrade. Do not hand-tune it: JdbcOAuth2AuthorizationService's row mapper
+-- is written against these exact column names and types.
+--
+-- NEEDED ONLY WHEN amoeba.auth.authorization-store=jdbc. It is generated for every embedded_auth project anyway,
+-- so switching that property later is one line and not a regeneration.
+--
+-- WHY IT EXISTS. amoeba.auth.enabled=true makes this app its own Authorization Server, and a refresh token
+-- is OPAQUE — the server is the only thing that can vouch for it, so it has to be stored somewhere that survives a
+-- restart. Spring's default is in-memory, which would make amoeba.auth.refresh-token-ttl read as "7 days" while
+-- actually meaning "until the next restart".
+--
+-- ⚠ THIS TABLE ALSO BACKS THE authorization_code EXCHANGE, so with jdbc selected and the table absent,
+--    LOGIN fails too, not just refresh.
+--    EmbeddedAuthServerConfig probes for it at startup and refuses to start with a message pointing back here.
+--
+-- HOW TO APPLY — there is no tool that runs DDL; a human runs this once:
+--
+--     mysql -h <host> -P <port> -u <user> -p <db> < src/main/resources/db/oauth2-authorization-schema.sql
+--
+-- It is NOT auto-run at startup. spring.sql.init.mode defaults to `embedded`, and this DataSource is a real MySQL
+-- server — creating tables as a silent boot side effect on a shared database is the wrong default. (The offline
+-- test suite does point spring.sql.init at this file, but only against an in-memory H2.)
+--
+-- ⚠ MYSQL TIME INSTANTS — the connection needs
+--     preserveInstants=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+--   in the JDBC URL, which application.yml already sets. Without them Connector/J shifts the `timestamp` columns
+--   below by the server's zone offset (KST = 9h), so a refresh token expires early or late by that much.
+--
+-- If you ever move this to PostgreSQL: change every `blob` to `text` and every `timestamp` to `timestamptz`.
+
+CREATE TABLE oauth2_authorization (
+    id varchar(100) NOT NULL,
+    registered_client_id varchar(100) NOT NULL,
+    principal_name varchar(200) NOT NULL,
+    authorization_grant_type varchar(100) NOT NULL,
+    authorized_scopes varchar(1000) DEFAULT NULL,
+    attributes blob DEFAULT NULL,
+    state varchar(500) DEFAULT NULL,
+    authorization_code_value blob DEFAULT NULL,
+    authorization_code_issued_at timestamp DEFAULT NULL,
+    authorization_code_expires_at timestamp DEFAULT NULL,
+    authorization_code_metadata blob DEFAULT NULL,
+    access_token_value blob DEFAULT NULL,
+    access_token_issued_at timestamp DEFAULT NULL,
+    access_token_expires_at timestamp DEFAULT NULL,
+    access_token_metadata blob DEFAULT NULL,
+    access_token_type varchar(100) DEFAULT NULL,
+    access_token_scopes varchar(1000) DEFAULT NULL,
+    oidc_id_token_value blob DEFAULT NULL,
+    oidc_id_token_issued_at timestamp DEFAULT NULL,
+    oidc_id_token_expires_at timestamp DEFAULT NULL,
+    oidc_id_token_metadata blob DEFAULT NULL,
+    refresh_token_value blob DEFAULT NULL,
+    refresh_token_issued_at timestamp DEFAULT NULL,
+    refresh_token_expires_at timestamp DEFAULT NULL,
+    refresh_token_metadata blob DEFAULT NULL,
+    user_code_value blob DEFAULT NULL,
+    user_code_issued_at timestamp DEFAULT NULL,
+    user_code_expires_at timestamp DEFAULT NULL,
+    user_code_metadata blob DEFAULT NULL,
+    device_code_value blob DEFAULT NULL,
+    device_code_issued_at timestamp DEFAULT NULL,
+    device_code_expires_at timestamp DEFAULT NULL,
+    device_code_metadata blob DEFAULT NULL,
+    PRIMARY KEY (id)
+);

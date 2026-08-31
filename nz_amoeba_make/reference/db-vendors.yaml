@@ -17,7 +17,12 @@ vendors:
     driver_dep: "runtimeOnly 'com.mysql:mysql-connector-j'"          # version managed by the Spring Boot BOM
     driver_class: com.mysql.cj.jdbc.Driver
     default_port: 3306
-    url: "jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/{{DB}}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+    # The three timeZone parameters replace the legacy `serverTimezone`, which Connector/J 9.x renamed to
+    # `connectionTimeZone`. They are not cosmetic wherever a java.time instant round-trips through a `timestamp`
+    # column — without them the driver shifts it by the server's offset (9 hours in KST). The case that forced
+    # this was amoeba.auth.authorization-store=jdbc, whose refresh token expiry is exactly such a column, but the
+    # correctness applies to any module storing datetimes, so it is set for every generated project.
+    url: "jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/{{DB}}?useSSL=false&allowPublicKeyRetrieval=true&preserveInstants=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
     docker:
       compose_template: templates/db/docker-compose.mysql.yml.template
       init_template: templates/db/init.mysql.sql.template

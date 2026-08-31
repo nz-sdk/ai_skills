@@ -48,15 +48,66 @@ public record EmbeddedAuthProperties(
         @DefaultValue("") String serviceClientId,
         @DefaultValue("") String serviceClientSecret,
 
+        /**
+         * Access token lifetime. Keep it SHORT: an access token here is a self-contained JWT checked by a local
+         * decoder that never consults the authorization store, so {@code /oauth2/revoke} cannot stop one — its
+         * lifetime IS its blast radius. With refresh enabled the client renews silently, so shortening costs
+         * nothing.
+         */
         @DefaultValue("1h") Duration accessTokenTtl,
+
+        /**
+         * Issue refresh tokens, making {@link #refreshTokenTtl} the real re-login interval instead of
+         * {@link #accessTokenTtl}. <b>Off by default</b> — it creates the only long-lived credential in the system.
+         *
+         * <p><b>Spring refuses this for a public client and the app overrides it in two places</b>, so read
+         * {@code EmbeddedAuthServerConfig#tokenGenerator} and its client-authentication converter before changing
+         * anything: {@code OAuth2RefreshTokenGenerator} returns null for {@code authorization_code} + {@code NONE},
+         * and {@code PublicClientAuthenticationConverter} declines anything that is not a PKCE code exchange.
+         * OAuth 2.1 permits refresh tokens for a public client provided they ROTATE, which is why
+         * {@code reuseRefreshTokens(false)} is set whenever this is on.
+         */
+        @DefaultValue("false") boolean refreshTokenEnabled,
+
+        /** Refresh token lifetime. Only meaningful when {@link #refreshTokenEnabled} is true. */
+        @DefaultValue("7d") Duration refreshTokenTtl,
+
+        /**
+         * Where OAuth authorizations live. <b>Not the user store</b> — that is {@link #store}.
+         *
+         * <p>{@code memory} (Spring's default) loses everything on restart, which makes a 7-day
+         * {@link #refreshTokenTtl} mean "7 days or the next restart, whichever comes first". {@code jdbc} needs the
+         * {@code oauth2_authorization} table (see {@code src/main/resources/db/oauth2-authorization-schema.sql})
+         * and therefore the {@code data_access} capability.
+         *
+         * <p>★ This table also backs the <b>authorization_code</b> exchange, so with {@code jdbc} selected and the
+         * table missing, LOGIN fails too — not just refresh. The config probes for it at startup and refuses to
+         * start rather than letting that surface as a 500 at the token endpoint.
+         */
+        @DefaultValue("memory") AuthorizationStore authorizationStore,
 
         /** Accounts for {@code store=memory}. Declared here only — there are no accounts hardcoded in Java. */
         @DefaultValue Map<String, User> users) {
 
+    /** Where USER accounts come from. Distinct from {@link AuthorizationStore} — see that enum. */
     public enum Store {
         /** In-memory accounts from {@link #users()}. No database needed. */
         MEMORY,
         /** Standard Spring Security {@code users} / {@code authorities} tables via JdbcUserDetailsManager. */
+        JDBC
+    }
+
+    /**
+     * Where OAUTH AUTHORIZATIONS live — issued tokens, authorization codes, the consenting principal.
+     *
+     * <p>★ Two different things in this file are called a "store" and crossing them is easy: {@link Store} decides
+     * where USERNAMES come from, this one decides where ISSUED STATE is kept. A project can perfectly well have
+     * {@code store=memory} with {@code authorizationStore=jdbc}, or the reverse.
+     */
+    public enum AuthorizationStore {
+        /** Spring's default {@code InMemoryOAuth2AuthorizationService}. Every restart invalidates every token. */
+        MEMORY,
+        /** {@code JdbcOAuth2AuthorizationService} over the host DataSource. Needs the oauth2_authorization table. */
         JDBC
     }
 

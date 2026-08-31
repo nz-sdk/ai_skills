@@ -9,6 +9,13 @@
 #                 (that is what puts a DataSource in the app); generate the DDL script but do NOT run it at boot.
 #   2. Generate: the store fragment + application.yml block + (jdbc) the vendor's DDL script.
 #
+# ★ THIS FILE IS ABOUT THE **USER** STORE ONLY — `amoeba.auth.store`, i.e. where USERNAMES come from.
+#   There is a second, unrelated key called a store: `amoeba.auth.authorization-store` (protean-options.yaml)
+#   decides where ISSUED STATE lives — access/refresh tokens, authorization codes, the consenting principal.
+#   They are independent, and `store: memory` + `authorization-store: jdbc` is a perfectly normal combination.
+#   Do not let a question about one read as a question about the other; both are asked in step 5.
+#   (This file has one thing in common with that key: its `jdbc` option also `requires: [data_access]`.)
+#
 # ── WHY THIS SUB-FLOW EXISTS AT ALL ────────────────────────────────────────────────────────────────────────────
 # `embedded_auth` makes the app sign the tokens it also validates, which puts the signing key inside the MCP RCE
 # surface. protean has no sandbox (docs/guide/12-security calls that an explicit non-goal), so a module deployed

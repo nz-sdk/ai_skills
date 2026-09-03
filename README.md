@@ -7,6 +7,10 @@
 | 영문명 | 한글명 | 작성AI | 설명 |
 | --- | --- | --- | --- |
 | [nz_amoeba_make](nz_amoeba_make/) | 프로틴 샘플 생성기 | Claude | Protean 설정을 안내에 따라 고르면 실행 가능한 Spring Boot 샘플 서버를 생성한다 |
+| [front-sdk/scaffold-shadcn-app](front-sdk/scaffold-shadcn-app/) | shadcn 신규 스캐폴드 | Claude | Vite+React+TS+Tailwind v4+shadcn/ui 신규 프로젝트를 처음부터 스캐폴딩한다 |
+| [front-sdk/create-frontend](front-sdk/create-frontend/) | 프론트 표준 기반 세팅 | Claude | 스캐폴드 위에 표준 프론트엔드 기반(i18n·폰트·통신 SDK·공유 번들)을 올린다 |
+| [front-sdk/appcontext-architecture](front-sdk/appcontext-architecture/) | 셸↔앱 계약 세우기 | Claude | 셸↔앱 계약(AppContext 근간)을 세운다 — create-frontend 다음 단계 |
+| [front-sdk/add-shadcn-existing](front-sdk/add-shadcn-existing/) | 기존 프로젝트 shadcn 추가 | Claude | 이미 있는 React 프로젝트에 shadcn/ui 를 추가·통합한다 |
 
 ## 스킬 아티팩트
 
@@ -23,6 +27,10 @@ Claude Code 는 정해진 경로에서만 스킬을 찾는다 — `~/.claude/ski
 대신 이 저장소를 프로젝트의 `.claude/skills` 에 링크하면 저장소가 그대로 스킬
 디렉토리가 된다. 저장소 구조(`<스킬명>/SKILL.md`)가 스킬 디렉토리 형식과 같아서
 그대로 인식되고, 스킬을 추가해도 링크를 다시 만들 필요가 없다.
+
+단, `front-sdk/` 처럼 **하위 폴더로 묶인 스킬**은 한 단계 더 들어가 있어 이 전체 링크로는
+잡히지 않는다(스킬 탐색은 `<스킬명>/SKILL.md` 한 단계만 본다). 이런 스킬은
+아래 [하위 폴더로 묶인 스킬](#하위-폴더로-묶인-스킬-front-sdk) 처럼 개별로 링크한다.
 
 기존 `.claude/skills` 에 내용이 있으면 먼저 옮겨 둔다.
 
@@ -55,3 +63,39 @@ Claude Code 를 재시작한다. `/skills` 목록에 나오면 정상이다.
 
 모든 프로젝트에서 쓰려면 `$project\.claude\skills` 대신 `~/.claude/skills` 를 대상으로
 같은 명령을 쓴다.
+
+## 하위 폴더로 묶인 스킬 (front-sdk)
+
+저장소 전체를 링크하는 위 방식은 **최상위 스킬**(`nz_amoeba_make`)만 노출한다.
+`front-sdk/` 처럼 한 단계 아래로 묶인 스킬은 스킬 탐색(`<스킬명>/SKILL.md` 한 단계)에
+걸리지 않는다. 이때는 `.claude/skills` 를 일반 폴더로 두고 **필요한 스킬만 개별 링크**한다.
+
+### Windows (PowerShell)
+
+```powershell
+$repo    = "D:\path\to\ai_skills"   # 이 저장소
+$project = "D:\path\to\my-project"  # 스킬을 쓸 프로젝트
+
+New-Item -ItemType Directory -Force "$project\.claude\skills" | Out-Null
+foreach ($s in 'create-frontend','appcontext-architecture','add-shadcn-existing','scaffold-shadcn-app') {
+  New-Item -ItemType Junction -Path "$project\.claude\skills\$s" -Target "$repo\front-sdk\$s"
+}
+# nz_amoeba_make 도 함께 쓰려면
+New-Item -ItemType Junction -Path "$project\.claude\skills\nz_amoeba_make" -Target "$repo\nz_amoeba_make"
+```
+
+### macOS / Linux
+
+```bash
+repo="$HOME/src/ai_skills"      # 이 저장소
+project="$HOME/src/my-project"  # 스킬을 쓸 프로젝트
+
+mkdir -p "$project/.claude/skills"
+for s in create-frontend appcontext-architecture add-shadcn-existing scaffold-shadcn-app; do
+  ln -s "$repo/front-sdk/$s" "$project/.claude/skills/$s"
+done
+ln -s "$repo/nz_amoeba_make" "$project/.claude/skills/nz_amoeba_make"   # 함께 쓰려면
+```
+
+개별 링크는 전체 링크와 달리 **스킬을 새로 추가할 때마다 링크를 하나씩 더 만들어야** 한다.
+링크한 뒤에는 Claude Code 를 재시작하고 `/skills` 목록에서 확인한다.

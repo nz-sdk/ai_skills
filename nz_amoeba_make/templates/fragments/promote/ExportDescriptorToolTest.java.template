@@ -1,0 +1,103 @@
+// amoeba.export_descriptor — the sending end of promotion.
+package {{PKG}}.promote;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ExportDescriptorToolTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final DescriptorMapper descriptors = new DescriptorMapper();
+    private final ModulePlatform platform = Mockito.mock(ModulePlatform.class);
+    private final ExportDescriptorTool tool = new ExportDescriptorTool(mapper, descriptors, platform);
+
+    private ObjectNode args(String id, String version) {
+        ObjectNode a = mapper.createObjectNode();
+        if (id != null) {
+            a.put("id", id);
+        }
+        if (version != null) {
+            a.put("version", version);
+        }
+        return a;
+    }
+
+    @Test
+    @DisplayName("returns the descriptor verbatim so it can be signed")
+    void exportsVerbatim() {
+        ModuleDescriptor d = PromotionFixtures.descriptor();
+        Mockito.when(platform.find("car")).thenReturn(Optional.of(d));
+
+        McpToolResult r = tool.call(args("car", null), null);
+
+        assertFalse(r.isError());
+        JsonNode exported = r.structured().get("descriptor");
+        // Byte-level fidelity is the requirement: canonicalBytes is computed from these exact values, so anything
+        // reshaped here cannot be signed.
+        assertEquals(d, descriptors.read(exported));
+    }
+
+    @Test
+    @DisplayName("reports whether the descriptor still needs signing")
+    void reportsSignedFlag() {
+        Mockito.when(platform.find("car")).thenReturn(Optional.of(PromotionFixtures.descriptor()));
+        assertFalse(tool.call(args("car", null), null).structured().get("signed").asBoolean());
+
+        ModuleDescriptor signed = PromotionFixtures.descriptor().withSignature("k", "c2ln");
+        Mockito.when(platform.find("car")).thenReturn(Optional.of(signed));
+        assertTrue(tool.call(args("car", null), null).structured().get("signed").asBoolean());
+    }
+
+    @Test
+    @DisplayName("a version argument reads from history instead of the live deployment")
+    void versionReadsHistory() {
+        Mockito.when(platform.findVersion("car", "0.9.0"))
+                .thenReturn(Optional.of(PromotionFixtures.descriptor()));
+
+        assertFalse(tool.call(args("car", "0.9.0"), null).isError());
+        Mockito.verify(platform).findVersion("car", "0.9.0");
+        Mockito.verify(platform, Mockito.never()).find(Mockito.anyString());
+    }
+
+    @Test
+    @DisplayName("missing module and missing version are separate messages")
+    void notFoundIsReported() {
+        Mockito.when(platform.find("ghost")).thenReturn(Optional.empty());
+        assertTrue(tool.call(args("ghost", null), null).text().contains("no such module"));
+
+        Mockito.when(platform.findVersion("car", "9.9.9")).thenReturn(Optional.empty());
+        assertTrue(tool.call(args("car", "9.9.9"), null).text().contains("no such version"));
+    }
+
+    @Test
+    @DisplayName("id is required")
+    void idIsRequired() {
+        assertTrue(tool.call(args(null, null), null).isError());
+        assertTrue(tool.call(null, null).isError());
+    }
+
+    @Test
+    @DisplayName("classified READ so browsing does not demand mcp.admin")
+    void classifiesAsRead() {
+        // Same reason the source read-back tools override it: the SPI default is CUSTOM, which AmmonAuthorizer puts
+        // behind mcp.admin.
+        assertEquals(ModuleActionAuthorizer.ModuleAction.READ, tool.action());
+        assertTrue(tool.annotations().readOnlyHint());
+    }
+}

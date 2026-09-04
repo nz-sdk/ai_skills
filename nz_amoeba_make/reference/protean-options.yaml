@@ -1125,6 +1125,79 @@ capabilities:
       WHY InterfaceToolRegistrar IS A RUNNER AND NOT FOUR BEANS: McpDispatcher builds its map with
       "for (McpTool t : beans) tools.put(t.name(), t)", so two beans sharing a name leave the winner to bean
       ordering. Registering explicitly at startup makes the override deterministic. Do not simplify it back.
+  - id: module_promotion
+    title: Signed module promotion (amoeba.export_descriptor / promote_module)
+    requires: [protean.mcp.enabled=true]
+    fragment_bundle:
+      dir: promote
+      package: "{{PKG}}.promote"
+      rename: false
+      files:
+        - { src: DescriptorMapper.java.template,           to: main }
+        - { src: ExportDescriptorTool.java.template,        to: main }
+        - { src: PromoteModuleTool.java.template,           to: main }
+        - { src: SigningCli.java.template,                  to: main }
+        - { src: PromotionFixtures.java.template,           to: test }
+        - { src: PromoteModuleSignatureTest.java.template,  to: test }
+        - { src: PromoteModuleToolTest.java.template,       to: test }
+        - { src: DescriptorMapperTest.java.template,        to: test }
+        - { src: ExportDescriptorToolTest.java.template,    to: test }
+    gradle_tasks: promotion
+    docs: promotion.md
+    desc: >-
+      Moves a module that already passed the gates on one server to another one, with an Ed25519 signature carrying
+      the trust across. Two @Component McpTools plus a CI-side signer: amoeba.export_descriptor (READ) hands back the
+      ModuleDescriptor exactly as stored, `./gradlew signDescriptor` signs it in CI, and amoeba.promote_module
+      (DEPLOY) verifies the signature and delegates to ModulePlatform.install/update — so the promoted module still
+      goes through gates 1, 2 and 3 with canary hot-swap and automatic rollback. Emits docs/promotion.md and two
+      Gradle tasks (generateSigningKey, signDescriptor).
+    note: >-
+      WHY THIS EXISTS AT ALL. protean.deploy_module takes files[] plus an interface spec and the server GENERATES the
+      descriptor from them, so a descriptor signed on the source server is not the one the target ends up with and the
+      signature cannot verify. protean ships a SignatureGate ("integrity, authenticity, and authorization") that had
+      no usable entrance because of exactly this. ModulePlatform.install() has always accepted a whole
+      ModuleDescriptor; this capability is the missing MCP door to it. Copying store files instead is NOT an
+      alternative - reconcile() runs no gates at all (no runGates, no verificationGate), so a file copy is an
+      unverified deploy channel whose failures are logged, skipped, and left behind a healthy container.
+
+      THE SIGNATURE CHECK IS UNCONDITIONAL AND THAT IS THE WHOLE SECURITY ARGUMENT. Accepting a whole descriptor
+      means the caller supplies trustTier, controllerFqcn and componentFqcns directly - precisely what the
+      interface_spec_validator guard exists to prevent (there the sealed spec is the source of truth and every
+      generated file is server-owned). PromoteModuleTool BYPASSES that guard, so it calls SignatureGate.enforce() on
+      every request and deliberately NOT behind protean.gate.signature.required. Leaving it to install()'s own gate
+      chain would mean a server with that flag off accepts an unsigned descriptor carrying an arbitrary controller.
+      PromoteModuleToolTest#unsignedIsRejectedEvenWhenTheGateIsOff is the one test that goes red if someone
+      "simplifies" the tool by deleting that call.
+
+      THE PRIVATE KEY NEVER GOES ON A SERVER. /platform/mcp compiles and hot-loads submitted code, so a signing key
+      readable by the server process is readable by anything deployed through it - the same reasoning the embedded AS
+      applies to its JWKS key. That is why the signer is a Gradle task and not an MCP tool: CI holds the private key,
+      the target server holds only public keys in protean.gate.signature.keys.
+
+      AUTHORIZATION IS OVERRIDDEN ON BOTH TOOLS, and it is load-bearing. A consumer McpTool's default action() is
+      CUSTOM, which the `authorizer` capability's policy puts behind mcp.admin. export_descriptor returns READ so
+      reading your own deployment stays on mcp.read; promote_module returns DEPLOY so promotion sits in the same
+      mcp.write bucket as the deploy_module it stands in for - the signature, not the scope, is its added control.
+
+      THE TRANSPORT FORMAT HAS ONE SHARP EDGE. A stored descriptor does NOT deserialize with a default ObjectMapper:
+      ModuleDescriptor exposes a derived isLibrary(), so Jackson writes a `library` property the record has no
+      component to read back ("Unrecognized field library"). The module store never notices because it reads its own
+      files with its own mapper - it only shows up when a descriptor crosses a process boundary, which is exactly
+      what promotion does. DescriptorMapper pins FAIL_ON_UNKNOWN_PROPERTIES=false for this; do not tighten it, or the
+      next derived accessor protean adds breaks promotion the same silent way. Tamper protection comes from the
+      signature, not from parser strictness - canonicalBytes() rebuilds the signed content from the record's own
+      components, never from the raw JSON.
+
+      TESTS - ALL PURE UNIT TESTS, no @SpringBootTest, so `./gradlew test` stays offline. The signature suite pins
+      what canonicalBytes covers: trustTier, controllerFqcn, sources and scope tampering are all rejected, the
+      canonical bytes survive a serialize/deserialize round trip, signerKeyId/signature do not cover themselves, and
+      usedSharedLibs stays excluded (the server observes it after signing). Those started as a probe run against a
+      real deployment and were promoted to contracts so a protean upgrade cannot weaken them unnoticed.
+
+      WHAT IT DOES NOT SOLVE, and the generated docs/promotion.md says so: DDL does not travel with a module, the
+      source and target must run the same protean version (the descriptor is protean's internal serialization), and
+      the target needs the same classpath because the store holds SOURCE and recompiles on every deploy and restart.
+
   - id: unload_callback
     title: Module unload hook (ModuleUnloadCallback SPI)
     requires: [protean.isolation.mode=in-process]

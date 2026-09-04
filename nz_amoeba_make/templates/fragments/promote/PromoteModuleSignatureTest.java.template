@@ -1,0 +1,118 @@
+// The properties the whole promotion design rests on, pinned as a contract.
+//
+// amoeba.promote_module accepts a WHOLE descriptor, which means the caller supplies trustTier, controllerFqcn and
+// the sources directly — bypassing the interface-definition guard that normally makes the sealed spec the source of
+// truth. The signature is the only compensating control, so "tampering is detected" is not a nice property here,
+// it is the entire security argument.
+//
+// These started as a throwaway probe run against the live container on 2026-09-04 (7/7). They live here now so that
+// a protean upgrade cannot weaken canonicalBytes() without a red build.
+package {{PKG}}.promote;
+
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import org.htcom.protean.gate.ModuleSigning;
+import org.htcom.protean.module.ModuleDescriptor;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.security.KeyPair;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class PromoteModuleSignatureTest {
+
+    private final KeyPair keys = PromotionFixtures.keyPair();
+    private final ModuleDescriptor descriptor = PromotionFixtures.descriptor();
+    private final String signature = ModuleSigning.sign(descriptor, keys.getPrivate());
+
+    @Test
+    @DisplayName("a signature made over the descriptor verifies")
+    void roundTrip() {
+        assertTrue(ModuleSigning.verify(descriptor, signature, keys.getPublic()));
+    }
+
+    @Test
+    @DisplayName("canonical bytes survive a serialize/deserialize round trip")
+    void survivesTransport() throws Exception {
+        // The point of promotion: the descriptor travels as JSON between two servers. If canonicalisation were
+        // sensitive to anything Jackson normalises, every promoted module would fail verification on arrival.
+        ObjectMapper m = new ObjectMapper()
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        ModuleDescriptor reparsed = m.readValue(m.writeValueAsBytes(descriptor), ModuleDescriptor.class);
+
+        assertArrayEquals(ModuleSigning.canonicalBytes(descriptor), ModuleSigning.canonicalBytes(reparsed));
+        assertTrue(ModuleSigning.verify(reparsed, signature, keys.getPublic()),
+                "a descriptor that made the trip must still verify");
+    }
+
+    @Test
+    @DisplayName("trustTier tampering is rejected")
+    void trustTierIsCovered() {
+        // The highest-value tamper: flipping UNTRUSTED to TRUSTED would let a submitted module run with full trust.
+        ModuleDescriptor tampered =
+                PromotionFixtures.withTrustTier(descriptor, ModuleDescriptor.TrustTier.UNTRUSTED);
+        assertFalse(ModuleSigning.verify(tampered, signature, keys.getPublic()));
+    }
+
+    @Test
+    @DisplayName("controllerFqcn tampering is rejected")
+    void controllerIsCovered() {
+        // Without this, a signed module could be re-pointed at a class the signer never saw.
+        ModuleDescriptor tampered = PromotionFixtures.withController(descriptor, "module.car.EvilController");
+        assertFalse(ModuleSigning.verify(tampered, signature, keys.getPublic()));
+    }
+
+    @Test
+    @DisplayName("editing one source file is rejected")
+    void sourcesAreCovered() {
+        Map<String, String> sources = new LinkedHashMap<>(descriptor.sources());
+        String first = sources.keySet().iterator().next();
+        sources.put(first, sources.get(first) + "\n// injected");
+
+        assertFalse(ModuleSigning.verify(PromotionFixtures.withSources(descriptor, sources),
+                signature, keys.getPublic()));
+    }
+
+    @Test
+    @DisplayName("scope tampering is rejected")
+    void scopeIsCovered() {
+        // canonicalBytes' own comment calls this out: scope decides which tenant DB a worker binds to, so a signed
+        // module must not be re-pointable at another tenant.
+        assertFalse(ModuleSigning.verify(PromotionFixtures.withScope(descriptor, "other-tenant"),
+                signature, keys.getPublic()));
+    }
+
+    @Test
+    @DisplayName("signerKeyId/signature are excluded from the signed content")
+    void signatureDoesNotCoverItself() {
+        // If they were covered, attaching the signature would invalidate it and nothing could ever be transported
+        // with its own signature inside.
+        ModuleDescriptor signed = descriptor.withSignature(PromotionFixtures.KEY_ID, signature);
+        assertTrue(ModuleSigning.verify(signed, signature, keys.getPublic()));
+        assertArrayEquals(ModuleSigning.canonicalBytes(descriptor), ModuleSigning.canonicalBytes(signed));
+    }
+
+    @Test
+    @DisplayName("another key's signature is rejected")
+    void wrongKeyIsRejected() {
+        assertFalse(ModuleSigning.verify(descriptor, signature, PromotionFixtures.keyPair().getPublic()));
+    }
+
+    @Test
+    @DisplayName("usedSharedLibs is NOT covered — the server observes it after signing")
+    void usedSharedLibsIsExcluded() {
+        // Documented in canonicalBytes: the consumer signs before the server observes shared-lib usage, so covering
+        // it would make every deploy invalidate its own signature. Pinned so the exclusion is not "fixed" later.
+        byte[] before = ModuleSigning.canonicalBytes(descriptor);
+        byte[] after = ModuleSigning.canonicalBytes(descriptor.withUsedSharedLibs(java.util.List.of()));
+        assertTrue(Arrays.equals(before, after));
+    }
+}

@@ -1,0 +1,195 @@
+// [CAPABILITY: module promotion] amoeba.promote_module — install a SIGNED descriptor built on another server.
+//
+// The promotion story: a module is developed and gated on a dev server, its descriptor is exported
+// (amoeba.export_descriptor), signed in CI (./gradlew signDescriptor), and installed here. This tool is the
+// receiving end.
+//
+// ★ WHY A NEW TOOL AND NOT protean.deploy_module
+//   deploy_module takes files[] + an interface spec and the server GENERATES the descriptor from them (controller,
+//   DTOs, mapper interface, MyBatis config are all skeleton output). The generated descriptor is not byte-identical
+//   to the dev server's, so a signature made on dev cannot be verified here — which left protean's SignatureGate
+//   with no way to be used at all. ModulePlatform.install() has always accepted a whole ModuleDescriptor; this tool
+//   is the missing MCP entrance to it, and opening it is what makes signed promotion possible.
+//
+// ★★ WHY SIGNATURE VERIFICATION IS UNCONDITIONAL HERE — READ BEFORE CHANGING ANYTHING
+//   Accepting a whole descriptor means the caller sets trustTier, controllerFqcn and componentFqcns DIRECTLY. That
+//   is precisely what the interface-definition guard (SpecBearingDeployTool) exists to prevent: there, the sealed
+//   spec is the source of truth and every generated file is server-owned. This tool BYPASSES that guard.
+//
+//   The signature is the only thing that makes the bypass acceptable, so it is enforced here on EVERY call —
+//   deliberately NOT gated behind protean.gate.signature.required. install() also runs SignatureGate, but only when
+//   that flag is on; leaving it to install() would mean a server with the flag off accepts an unsigned descriptor
+//   carrying an arbitrary controller. Deleting the enforce() call below re-opens exactly that hole.
+//
+//   Measured 2026-09-04 with the real ModuleSigning: tampering with trustTier, controllerFqcn or any source file all
+//   fail verification, and canonicalBytes survives a serialize/deserialize round trip. PromoteModuleSignatureTest
+//   pins those properties so a protean change cannot quietly weaken them.
+//
+// ⚠️ The private key belongs in CI, never on a server. /platform/mcp compiles and hot-loads submitted code, so a key
+//    readable by this process is readable by anything deployed through it (docs/secrets.md makes the same point
+//    about the embedded AS signing key).
+package {{PKG}}.promote;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.gate.SignatureGate;
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolAnnotations;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+
+import org.springframework.stereotype.Component;
+
+import java.util.Optional;
+
+@Component
+public class PromoteModuleTool implements McpTool {
+
+    static final String INSTALL = "install";
+    static final String UPDATE = "update";
+
+    private final ObjectMapper mapper;
+    private final DescriptorMapper descriptors;
+    private final SignatureGate signatureGate;
+    private final ModulePlatform platform;
+
+    public PromoteModuleTool(ObjectMapper mapper, DescriptorMapper descriptors,
+                             SignatureGate signatureGate, ModulePlatform platform) {
+        this.mapper = mapper;
+        this.descriptors = descriptors;
+        this.signatureGate = signatureGate;
+        this.platform = platform;
+    }
+
+    @Override
+    public String name() {
+        return "amoeba.promote_module";
+    }
+
+    @Override
+    public String title() {
+        return "Promote Signed Module";
+    }
+
+    @Override
+    public String description() {
+        return "Installs or updates a module from a SIGNED ModuleDescriptor produced on another server "
+                + "(amoeba.export_descriptor + ./gradlew signDescriptor). The signature is verified against "
+                + "protean.gate.signature.keys on every call regardless of protean.gate.signature.required, because "
+                + "a descriptor carries its own controller and trust tier. After verification the module goes "
+                + "through the normal promotion path: gates 1 and 2, deploy, gate 3, with canary hot-swap and "
+                + "automatic rollback in update mode.";
+    }
+
+    /**
+     * DEPLOY/UPDATE rather than the SPI's CUSTOM default. AmmonAuthorizer puts CUSTOM behind mcp.admin, which would
+     * make promotion stricter than the deploy_module it stands in for — the signature, not the scope, is this
+     * tool's added control. Reported as DEPLOY because install is the wider of the two effects.
+     */
+    @Override
+    public ModuleActionAuthorizer.ModuleAction action() {
+        return ModuleActionAuthorizer.ModuleAction.DEPLOY;
+    }
+
+    /**
+     * Not read-only and not idempotent: install rejects an already-deployed id, and update advances the version.
+     * Not destructive either — a failed promotion leaves the previous deployment in place (install rolls its own
+     * state back, update rolls the canary back).
+     */
+    @Override
+    public McpToolAnnotations annotations() {
+        return McpToolAnnotations.builder()
+                .readOnly(false)
+                .destructive(false)
+                .idempotent(false)
+                .openWorld(false)
+                .build();
+    }
+
+    /** The module id lives inside the descriptor, not at the top level where the SPI default looks. */
+    @Override
+    public String targetModuleId(JsonNode arguments) {
+        if (arguments == null) {
+            return null;
+        }
+        JsonNode id = arguments.path("descriptor").path("id");
+        return id.isTextual() ? id.asText() : null;
+    }
+
+    @Override
+    public ObjectNode inputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        schema.put("additionalProperties", false);
+        ObjectNode p = schema.putObject("properties");
+
+        // Left unconstrained on purpose: the shape is protean's ModuleDescriptor, which changes with the library.
+        // Restating it here would drift and start rejecting valid descriptors after a protean upgrade. The real
+        // validation is the signature plus DescriptorMapper's binding.
+        p.putObject("descriptor").put("type", "object")
+                .put("description", "The complete signed ModuleDescriptor JSON, exactly as amoeba.export_descriptor "
+                        + "returned it plus signerKeyId/signature. Must carry a signature from a key listed in "
+                        + "protean.gate.signature.keys.");
+        ObjectNode mode = p.putObject("mode");
+        mode.put("type", "string")
+                .put("description", "install for a module not yet on this server, update for one already deployed "
+                        + "(canary hot-swap with automatic rollback). Defaults to install.");
+        mode.putArray("enum").add(INSTALL).add(UPDATE);
+
+        schema.putArray("required").add("descriptor");
+        return schema;
+    }
+
+    @Override
+    public McpToolResult call(JsonNode arguments, McpCallContext ctx) {
+        JsonNode args = arguments == null ? mapper.missingNode() : arguments;
+
+        String mode = args.path("mode").isTextual() ? args.get("mode").asText() : INSTALL;
+        if (!INSTALL.equals(mode) && !UPDATE.equals(mode)) {
+            return McpToolResult.error("mode must be '" + INSTALL + "' or '" + UPDATE + "' (got: " + mode + ")");
+        }
+
+        ModuleDescriptor descriptor;
+        try {
+            descriptor = descriptors.read(args.get("descriptor"));
+        } catch (DescriptorMapper.MalformedDescriptorException e) {
+            return McpToolResult.error(e.getMessage());
+        }
+
+        // ★ Unconditional. See the header — this is the compensating control for bypassing the spec guard.
+        try {
+            signatureGate.enforce(descriptor);
+        } catch (RuntimeException e) {
+            return McpToolResult.error("signature rejected: " + e.getMessage());
+        }
+
+        try {
+            if (UPDATE.equals(mode)) {
+                platform.update(descriptor);
+            } else {
+                platform.install(descriptor);
+            }
+        } catch (RuntimeException e) {
+            // Gate failures arrive here. install() undeploys and removes on failure and update() rolls the canary
+            // back, so the previous deployment is intact either way — say so rather than leaving the caller unsure.
+            return McpToolResult.error(mode + " failed for module " + descriptor.id() + " (previous deployment left "
+                    + "untouched): " + e.getMessage());
+        }
+
+        Optional<ModuleDescriptor> live = platform.find(descriptor.id());
+        ObjectNode out = mapper.createObjectNode();
+        out.put("id", descriptor.id());
+        out.put("version", descriptor.version());
+        out.put("mode", mode);
+        out.put("signerKeyId", descriptor.signerKeyId());
+        live.ifPresent(d -> out.put("desiredState", d.desiredState() == null ? null : d.desiredState().name()));
+
+        return McpToolResult.ok("Module " + descriptor.id() + " promoted (v" + descriptor.version() + ", " + mode
+                + ") — signature verified with keyId " + descriptor.signerKeyId(), out);
+    }
+}

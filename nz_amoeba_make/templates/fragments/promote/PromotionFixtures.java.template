@@ -1,0 +1,89 @@
+// Shared fixtures for the promotion tests. Pure data — no Spring, no I/O, so `./gradlew test` stays offline.
+package {{PKG}}.promote;
+
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModuleResource;
+import org.htcom.protean.module.VerificationPlan;
+
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.util.List;
+import java.util.Map;
+
+final class PromotionFixtures {
+
+    static final String KEY_ID = "ci-test";
+
+    private PromotionFixtures() {
+    }
+
+    static KeyPair keyPair() {
+        try {
+            return KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
+        } catch (Exception e) {
+            throw new IllegalStateException("Ed25519 unavailable — needs JDK 15+", e);
+        }
+    }
+
+    /**
+     * A descriptor shaped like a real one: TRUSTED, a controller, sources, a mapper XML resource and the sealed
+     * interface.json. The signature tests tamper with exactly these fields, so they have to be populated.
+     */
+    static ModuleDescriptor descriptor() {
+        return new ModuleDescriptor(
+                "car",
+                "1.0.0",
+                ModuleDescriptor.TrustTier.TRUSTED,
+                ModuleDescriptor.DesiredState.ACTIVE,
+                "module.car.CarController",
+                List.of("module.car.CarController", "module.car.CarService"),
+                Map.of(
+                        "module.car.CarController", "package module.car;\npublic class CarController {}\n",
+                        "module.car.CarService", "package module.car;\npublic class CarService {}\n"),
+                Map.of("module.car.CarContractTest", "package module.car;\nclass CarContractTest {}\n"),
+                false,
+                new VerificationPlan(
+                        List.of(new VerificationPlan.Probe("GET", "/cars", 200, null)),
+                        null, null, null, null, null),
+                "in-process",
+                null,
+                List.of(),
+                null,
+                null,
+                Map.of(
+                        "mapper/car/CarMapper.xml", new ModuleResource("<mapper/>", false),
+                        "META-INF/protean/interface.json", new ModuleResource("{\"title\":\"car\"}", false)),
+                List.of(),
+                ModuleDescriptor.ModuleKind.NORMAL,
+                List.of(),
+                List.of());
+    }
+
+    static ModuleDescriptor withTrustTier(ModuleDescriptor d, ModuleDescriptor.TrustTier t) {
+        return new ModuleDescriptor(d.id(), d.version(), t, d.desiredState(), d.controllerFqcn(),
+                d.componentFqcns(), d.sources(), d.tests(), d.needsSharedBeans(), d.verification(),
+                d.isolationMode(), d.scope(), d.bridgedInterfaces(), d.signerKeyId(), d.signature(),
+                d.resources(), d.usedSharedLibs(), d.kind(), d.exports(), d.uses());
+    }
+
+    static ModuleDescriptor withController(ModuleDescriptor d, String controllerFqcn) {
+        return new ModuleDescriptor(d.id(), d.version(), d.trustTier(), d.desiredState(), controllerFqcn,
+                d.componentFqcns(), d.sources(), d.tests(), d.needsSharedBeans(), d.verification(),
+                d.isolationMode(), d.scope(), d.bridgedInterfaces(), d.signerKeyId(), d.signature(),
+                d.resources(), d.usedSharedLibs(), d.kind(), d.exports(), d.uses());
+    }
+
+    static ModuleDescriptor withSources(ModuleDescriptor d, Map<String, String> sources) {
+        return new ModuleDescriptor(d.id(), d.version(), d.trustTier(), d.desiredState(), d.controllerFqcn(),
+                d.componentFqcns(), sources, d.tests(), d.needsSharedBeans(), d.verification(),
+                d.isolationMode(), d.scope(), d.bridgedInterfaces(), d.signerKeyId(), d.signature(),
+                d.resources(), d.usedSharedLibs(), d.kind(), d.exports(), d.uses());
+    }
+
+    static ModuleDescriptor withScope(ModuleDescriptor d, String scope) {
+        return new ModuleDescriptor(d.id(), d.version(), d.trustTier(), d.desiredState(), d.controllerFqcn(),
+                d.componentFqcns(), d.sources(), d.tests(), d.needsSharedBeans(), d.verification(),
+                d.isolationMode(), scope, d.bridgedInterfaces(), d.signerKeyId(), d.signature(),
+                d.resources(), d.usedSharedLibs(), d.kind(), d.exports(), d.uses());
+    }
+}

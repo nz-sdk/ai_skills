@@ -43,7 +43,7 @@
 고르는 사람과, 나중에 저장소를 읽는 사람.
 
 **한국어** — 세션 중에 말하는 모든 것: 질문 문구, 선택지 라벨과 그 설명, 그룹·단계 제목, 진행 표시("적용 가능한
-확장 기능 7개 중 1/2"), 검증 리포트(OK / 경고 / 차단), 최종 확정 구성 echo, 그리고 실행/검증 명령을 둘러싼 서술.
+확장 기능 8개 중 1/2"), 검증 리포트(OK / 경고 / 차단), 최종 확정 구성 echo, 그리고 실행/검증 명령을 둘러싼 서술.
 
 **절대 번역하지 않고 원문 그대로 인용하는 것** — `protean.*` 속성 키, 그 값·enum 멤버·기본값, 클래스·파일·
 디렉토리명, Maven 좌표, 환경변수명(`OAUTH_ISSUER_URI`, `SERVER_PORT`, …), 셸 명령, URL, 그리고 capability `id`.
@@ -169,11 +169,12 @@ AskUserQuestion 은 질문당 선택지 4개가 상한이므로, 나누기를 �
 1. `capabilities:` 를 **파일 등장 순서대로** 훑어, 이 구성이 `requires` 를 만족하는 것만 남긴다.
 2. `data_access` 와 `secured_mcp` 를 뺀다(step 3 에서 결정됨).
 3. 남은 것을 **4개씩 끊어 그 순서대로** 묻는다.
-4. **총 개수와 현재 위치를 미리 밝힌다** — "여기 적용 가능한 확장 기능 — 7개 중 1/2". 개수를 밝히지 않으면
+4. **총 개수와 현재 위치를 미리 밝힌다** — "여기 적용 가능한 확장 기능 — 8개 중 1/2". 개수를 밝히지 않으면
    사용자는 아직 남은 것이 있는지 알 수 없고, 그것이 누락을 막는 유일한 실질적 장치다.
 
-워크드 예시, in-process + MCP 활성(흔한 경우): 7개가 남는다 — `custom_mcp_tool`, `builtin_tool_override`,
-`module_source_tools`, `code_rule`, `authorizer`, `interface_spec_validator`, `unload_callback` → 두 질문, 4 + 3.
+워크드 예시, in-process + MCP 활성(흔한 경우): 8개가 남는다 — `custom_mcp_tool`, `builtin_tool_override`,
+`module_source_tools`, `code_rule`, `authorizer`, `interface_spec_validator`, `module_promotion`,
+`unload_callback` → 두 질문, 4 + 4.
 (`db_dialect`/`scope_admin` 은 `worker.db.auto-provision` 이 필요하고 `module_store_dialect` 는 jdbc
 module-store 백엔드가 필요하므로, 셋 다 걸러진다.)
 

@@ -1,0 +1,125 @@
+// [CAPABILITY: module promotion] amoeba.export_descriptor — hand back a deployed module's descriptor verbatim.
+//
+// The sending end of the promotion story: this is what gets signed in CI and installed on the target with
+// amoeba.promote_module.
+//
+// ★ WHY NOT amoeba.export_module_source
+//   That tool answers a different question — it returns the files keyed by the path they would occupy in a
+//   Gradle/Java project, so a human can write them to disk and open them in an IDE. It deliberately reshapes the
+//   descriptor. Promotion needs the OPPOSITE: the descriptor byte-for-byte as the store holds it, because
+//   ModuleSigning.canonicalBytes() is computed from those exact field values. A reshaped tree cannot be signed.
+//
+// ⚠️ Read-only, but not harmless to expose carelessly: the response contains the module's full source. It is
+//    classified READ (mcp.read) for the same reason the source read-back tools are — a consumer tool's default
+//    action() is CUSTOM, which AmmonAuthorizer puts behind mcp.admin, and browsing your own deployment should not
+//    need admin rights.
+package {{PKG}}.promote;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolAnnotations;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+
+import org.springframework.stereotype.Component;
+
+import java.util.Optional;
+
+@Component
+public class ExportDescriptorTool implements McpTool {
+
+    private final ObjectMapper mapper;
+    private final DescriptorMapper descriptors;
+    private final ModulePlatform platform;
+
+    public ExportDescriptorTool(ObjectMapper mapper, DescriptorMapper descriptors, ModulePlatform platform) {
+        this.mapper = mapper;
+        this.descriptors = descriptors;
+        this.platform = platform;
+    }
+
+    @Override
+    public String name() {
+        return "amoeba.export_descriptor";
+    }
+
+    @Override
+    public String title() {
+        return "Export Module Descriptor";
+    }
+
+    @Override
+    public String description() {
+        return "Returns a deployed module's ModuleDescriptor exactly as stored, for promotion to another server. "
+                + "Sign the result with ./gradlew signDescriptor and install it there with amoeba.promote_module. "
+                + "For reading a module as an editable project tree use amoeba.export_module_source instead — its "
+                + "reshaped output cannot be signed.";
+    }
+
+    /** A pure read of stored state. Leaving this at the SPI's CUSTOM default would demand mcp.admin. */
+    @Override
+    public ModuleActionAuthorizer.ModuleAction action() {
+        return ModuleActionAuthorizer.ModuleAction.READ;
+    }
+
+    @Override
+    public McpToolAnnotations annotations() {
+        return McpToolAnnotations.readOnly();
+    }
+
+    /** The SPI default reads {@code id}, which is this tool's argument name — but be explicit rather than lucky. */
+    @Override
+    public String targetModuleId(JsonNode arguments) {
+        return arguments != null && arguments.hasNonNull("id") ? arguments.get("id").asText() : null;
+    }
+
+    @Override
+    public ObjectNode inputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        schema.put("additionalProperties", false);
+        ObjectNode p = schema.putObject("properties");
+        p.putObject("id").put("type", "string").put("description", "Deployed module id.");
+        p.putObject("version").put("type", "string")
+                .put("description", "Optional. A specific version from history; defaults to the deployed one.");
+        schema.putArray("required").add("id");
+        return schema;
+    }
+
+    @Override
+    public McpToolResult call(JsonNode arguments, McpCallContext ctx) {
+        JsonNode args = arguments == null ? mapper.missingNode() : arguments;
+
+        String id = args.path("id").isTextual() ? args.get("id").asText() : null;
+        if (id == null || id.isBlank()) {
+            return McpToolResult.error("id is required");
+        }
+        String version = args.path("version").isTextual() ? args.get("version").asText() : null;
+
+        Optional<ModuleDescriptor> found = version == null
+                ? platform.find(id)
+                : platform.findVersion(id, version);
+        if (found.isEmpty()) {
+            return McpToolResult.error(version == null
+                    ? "no such module: " + id
+                    : "no such version: " + id + " v" + version);
+        }
+        ModuleDescriptor d = found.get();
+
+        ObjectNode out = mapper.createObjectNode();
+        out.put("id", d.id());
+        out.put("version", d.version());
+        out.set("descriptor", descriptors.write(d));
+        // Surfaced separately so a caller can tell at a glance whether this still needs signing.
+        out.put("signed", d.signerKeyId() != null && d.signature() != null);
+
+        return McpToolResult.ok("Descriptor for " + d.id() + " v" + d.version()
+                + (d.signerKeyId() == null ? " (unsigned — sign it before promoting)" : ""), out);
+    }
+}

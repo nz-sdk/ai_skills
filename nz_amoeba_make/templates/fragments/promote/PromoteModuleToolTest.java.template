@@ -1,0 +1,194 @@
+// amoeba.promote_module's own behaviour: what it rejects, and with which authorization classification.
+//
+// ★ The load-bearing test here is unsignedIsRejectedEvenWhenTheGateIsOff. install() runs SignatureGate only when
+//   protean.gate.signature.required=true; this tool calls it unconditionally because it hands the caller control of
+//   trustTier and controllerFqcn. If someone "simplifies" the tool by deleting that call, every other test still
+//   passes and only this one goes red.
+//
+// Pure unit tests — a hand-built ProteanProperties and a stub ModulePlatform, no Spring context.
+package {{PKG}}.promote;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.autoconfigure.ProteanProperties;
+import org.htcom.protean.gate.ModuleSigning;
+import org.htcom.protean.gate.SignatureGate;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+
+import java.security.KeyPair;
+import java.util.Base64;
+import java.util.Map;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+
+class PromoteModuleToolTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final DescriptorMapper descriptors = new DescriptorMapper();
+    private final KeyPair keys = PromotionFixtures.keyPair();
+
+    /** A gate whose trust store holds our test key, with `required` left at its default of FALSE — the point. */
+    private SignatureGate gateWithOurKey() {
+        ProteanProperties props = new ProteanProperties();
+        assertFalse(props.getGate().getSignature().isRequired(),
+                "the default must stay false — this test is about the tool enforcing regardless");
+        props.getGate().getSignature().setKeys(Map.of(
+                PromotionFixtures.KEY_ID,
+                Base64.getEncoder().encodeToString(keys.getPublic().getEncoded())));
+        return new SignatureGate(props);
+    }
+
+    private PromoteModuleTool tool(ModulePlatform platform) {
+        return new PromoteModuleTool(mapper, descriptors, gateWithOurKey(), platform);
+    }
+
+    private ObjectNode args(ModuleDescriptor d, String mode) {
+        ObjectNode a = mapper.createObjectNode();
+        a.set("descriptor", descriptors.write(d));
+        if (mode != null) {
+            a.put("mode", mode);
+        }
+        return a;
+    }
+
+    private ModuleDescriptor signed() {
+        ModuleDescriptor d = PromotionFixtures.descriptor();
+        return d.withSignature(PromotionFixtures.KEY_ID, ModuleSigning.sign(d, keys.getPrivate()));
+    }
+
+    @Test
+    @DisplayName("★ an unsigned descriptor is rejected even though gate.signature.required is false")
+    void unsignedIsRejectedEvenWhenTheGateIsOff() {
+        ModulePlatform platform = Mockito.mock(ModulePlatform.class);
+        McpToolResult r = tool(platform).call(args(PromotionFixtures.descriptor(), null), null);
+
+        assertTrue(r.isError(), "accepting an unsigned descriptor would re-open the spec-guard bypass");
+        assertTrue(r.text().contains("signature"), () -> "expected a signature message, got: " + r.text());
+        Mockito.verify(platform, Mockito.never()).install(any());
+    }
+
+    @Test
+    @DisplayName("a signature from a key outside the trust store is rejected")
+    void untrustedKeyIsRejected() {
+        ModuleDescriptor d = PromotionFixtures.descriptor();
+        KeyPair stranger = PromotionFixtures.keyPair();
+        ModuleDescriptor forged = d.withSignature("someone-else", ModuleSigning.sign(d, stranger.getPrivate()));
+
+        ModulePlatform platform = Mockito.mock(ModulePlatform.class);
+        McpToolResult r = tool(platform).call(args(forged, null), null);
+
+        assertTrue(r.isError());
+        Mockito.verify(platform, Mockito.never()).install(any());
+    }
+
+    @Test
+    @DisplayName("a tampered descriptor is rejected even with a valid-looking signature attached")
+    void tamperedIsRejected() {
+        ModuleDescriptor tampered =
+                PromotionFixtures.withController(signed(), "module.car.EvilController");
+
+        ModulePlatform platform = Mockito.mock(ModulePlatform.class);
+        McpToolResult r = tool(platform).call(args(tampered, null), null);
+
+        assertTrue(r.isError());
+        Mockito.verify(platform, Mockito.never()).install(any());
+    }
+
+    @Test
+    @DisplayName("a properly signed descriptor installs")
+    void signedInstalls() {
+        ModulePlatform platform = Mockito.mock(ModulePlatform.class);
+        Mockito.when(platform.find("car")).thenReturn(Optional.of(signed()));
+
+        McpToolResult r = tool(platform).call(args(signed(), null), null);
+
+        assertFalse(r.isError(), () -> "expected success, got: " + r.text());
+        Mockito.verify(platform).install(any());
+        Mockito.verify(platform, Mockito.never()).update(any());
+    }
+
+    @Test
+    @DisplayName("mode=update routes to the canary path instead of install")
+    void updateRoutesToUpdate() {
+        ModulePlatform platform = Mockito.mock(ModulePlatform.class);
+        Mockito.when(platform.find("car")).thenReturn(Optional.of(signed()));
+
+        McpToolResult r = tool(platform).call(args(signed(), "update"), null);
+
+        assertFalse(r.isError(), () -> "expected success, got: " + r.text());
+        Mockito.verify(platform).update(any());
+        Mockito.verify(platform, Mockito.never()).install(any());
+    }
+
+    @Test
+    @DisplayName("an unknown mode is rejected before anything is verified or deployed")
+    void unknownModeIsRejected() {
+        ModulePlatform platform = Mockito.mock(ModulePlatform.class);
+        McpToolResult r = tool(platform).call(args(signed(), "delete"), null);
+
+        assertTrue(r.isError());
+        Mockito.verifyNoInteractions(platform);
+    }
+
+    @Test
+    @DisplayName("a gate failure reports that the previous deployment is intact")
+    void gateFailureSaysTheOldDeploymentSurvives() {
+        ModulePlatform platform = Mockito.mock(ModulePlatform.class);
+        Mockito.doThrow(new IllegalStateException("gate 3 probe failed"))
+                .when(platform).install(any());
+
+        McpToolResult r = tool(platform).call(args(signed(), null), null);
+
+        assertTrue(r.isError());
+        assertTrue(r.text().contains("untouched"),
+                () -> "the caller must know a failed promotion is not a half-deploy, got: " + r.text());
+    }
+
+    @Test
+    @DisplayName("classified DEPLOY, not CUSTOM — CUSTOM would demand mcp.admin")
+    void classifiesAsDeployNotCustom() {
+        // AmmonAuthorizer maps CUSTOM to mcp.admin. Promotion already carries a stricter control (the signature),
+        // so it belongs in the same mcp.write bucket as the deploy_module it stands in for.
+        assertEquals(ModuleActionAuthorizer.ModuleAction.DEPLOY,
+                tool(Mockito.mock(ModulePlatform.class)).action());
+    }
+
+    @Test
+    @DisplayName("targetModuleId reads the id from inside the descriptor")
+    void targetModuleIdLooksInsideTheDescriptor() {
+        // The SPI default reads a top-level `id`, which this tool does not have — authorization would see null.
+        PromoteModuleTool t = tool(Mockito.mock(ModulePlatform.class));
+        assertEquals("car", t.targetModuleId(args(signed(), null)));
+    }
+
+    @Test
+    @DisplayName("a malformed descriptor is reported, not thrown")
+    void malformedDescriptorIsReported() {
+        ObjectNode a = mapper.createObjectNode();
+        a.put("descriptor", "not-an-object");
+
+        McpToolResult r = tool(Mockito.mock(ModulePlatform.class)).call(a, null);
+        assertTrue(r.isError());
+    }
+
+    @Test
+    @DisplayName("the input schema is closed and requires the descriptor")
+    void schemaIsClosed() {
+        JsonNode schema = tool(Mockito.mock(ModulePlatform.class)).inputSchema();
+        assertFalse(schema.path("additionalProperties").asBoolean(true));
+        assertEquals("descriptor", schema.path("required").get(0).asText());
+    }
+}

@@ -1,0 +1,94 @@
+// [CAPABILITY: module promotion] The CI-side signer, driven by ./gradlew generateSigningKey / signDescriptor.
+//
+// Not a Spring bean and not reachable over MCP — deliberately. Signing needs the PRIVATE key, and the whole point of
+// the promotion design is that the key never sits in a process that also runs /platform/mcp (which compiles and
+// hot-loads submitted code). This class exists so CI can sign with the SAME ModuleSigning the target verifies with;
+// a reimplementation elsewhere would drift from canonicalBytes() and produce signatures that fail for no visible
+// reason.
+//
+// ⚠️ Ed25519 keys, because that is what SignatureGate's trust store parses (Base64 X.509 public keys).
+package {{PKG}}.promote;
+
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+
+import org.htcom.protean.gate.ModuleSigning;
+import org.htcom.protean.module.ModuleDescriptor;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.PrivateKey;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.util.Base64;
+
+public final class SigningCli {
+
+    // Same reason as DescriptorMapper: a stored descriptor carries the derived `library` property that the record
+    // has no component for. This runs outside Spring so it cannot reuse that bean.
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+            .enable(SerializationFeature.INDENT_OUTPUT);
+
+    private SigningCli() {
+    }
+
+    public static void main(String[] args) throws Exception {
+        if (args.length == 0) {
+            fail("usage: genkey <outDir> | sign <descriptor.json> <private.pem> <keyId> <out.json>");
+        }
+        switch (args[0]) {
+            case "genkey" -> genkey(Path.of(args[1]));
+            case "sign" -> sign(Path.of(args[1]), Path.of(args[2]), args[3], Path.of(args[4]));
+            default -> fail("unknown command: " + args[0]);
+        }
+    }
+
+    private static void genkey(Path outDir) throws Exception {
+        Files.createDirectories(outDir);
+        KeyPair kp = KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
+
+        String priv = Base64.getEncoder().encodeToString(kp.getPrivate().getEncoded());
+        String pub = Base64.getEncoder().encodeToString(kp.getPublic().getEncoded());
+
+        Path privPath = outDir.resolve("signing.pem");
+        Files.writeString(privPath, priv + System.lineSeparator());
+        Files.writeString(outDir.resolve("signing.pub"), pub + System.lineSeparator());
+
+        System.out.println("private key : " + privPath.toAbsolutePath());
+        System.out.println("              ^ CI secret. Do NOT commit it and do NOT put it on a server.");
+        System.out.println();
+        System.out.println("Add the public key to the TARGET server's application.yml:");
+        System.out.println();
+        System.out.println("  protean:");
+        System.out.println("    gate:");
+        System.out.println("      signature:");
+        System.out.println("        keys:");
+        System.out.println("          <keyId>: " + pub);
+    }
+
+    private static void sign(Path descriptorPath, Path keyPath, String keyId, Path out) throws Exception {
+        ModuleDescriptor d = MAPPER.readValue(Files.readAllBytes(descriptorPath), ModuleDescriptor.class);
+
+        byte[] pkcs8 = Base64.getDecoder().decode(Files.readString(keyPath).trim());
+        PrivateKey key = KeyFactory.getInstance("Ed25519").generatePrivate(new PKCS8EncodedKeySpec(pkcs8));
+
+        // Signed BEFORE the signature fields are attached — canonicalBytes excludes signerKeyId/signature so a
+        // signature cannot cover itself. Attaching first would still verify, but signing the bare descriptor keeps
+        // the order obvious to whoever reads this next.
+        String signature = ModuleSigning.sign(d, key);
+        ModuleDescriptor signed = d.withSignature(keyId, signature);
+
+        Files.write(out, MAPPER.writeValueAsBytes(signed));
+        System.out.println("signed " + d.id() + " v" + d.version() + " with keyId=" + keyId);
+        System.out.println("  -> " + out.toAbsolutePath());
+    }
+
+    private static void fail(String message) {
+        System.err.println(message);
+        System.exit(2);
+    }
+}

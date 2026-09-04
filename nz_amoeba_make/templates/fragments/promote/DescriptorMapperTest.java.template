@@ -1,0 +1,76 @@
+// The transport format's one sharp edge: a stored descriptor does not round-trip through a default ObjectMapper.
+//
+// ModuleDescriptor exposes a derived isLibrary(), so Jackson writes a `library` property that the record has no
+// component to read back. The module store never notices because it reads its own files with its own mapper — the
+// asymmetry only shows up when a descriptor moves between processes, which is exactly what promotion does.
+// Measured 2026-09-04 against a real store file:
+//
+//   UnrecognizedPropertyException: Unrecognized field "library" (20 known properties: componentFqcns, tests, ...)
+package {{PKG}}.promote;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.module.ModuleDescriptor;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class DescriptorMapperTest {
+
+    private final DescriptorMapper mapper = new DescriptorMapper();
+
+    @Test
+    @DisplayName("a descriptor written by this mapper reads back")
+    void roundTrip() {
+        ModuleDescriptor d = PromotionFixtures.descriptor();
+        assertEquals(d, mapper.read(mapper.write(d)));
+    }
+
+    @Test
+    @DisplayName("★ the derived `library` property does not break deserialization")
+    void toleratesTheDerivedLibraryProperty() {
+        // Reproduces the real failure: serialize with a plain mapper (which emits `library`) and read it back.
+        JsonNode withDerived = new ObjectMapper().valueToTree(PromotionFixtures.descriptor());
+        assertTrue(withDerived.has("library"),
+                "if protean stops emitting this, the guard below is no longer exercised — check before removing it");
+
+        ModuleDescriptor read = mapper.read(withDerived);
+        assertEquals("car", read.id());
+    }
+
+    @Test
+    @DisplayName("an unknown future property is tolerated too")
+    void toleratesUnknownProperties() {
+        // The same class of breakage as `library`: any derived accessor protean adds later would otherwise make
+        // promotion fail on upgrade with a message about a field nobody wrote.
+        ObjectNode node = (ObjectNode) mapper.write(PromotionFixtures.descriptor());
+        node.put("somethingProteanAddsLater", 42);
+
+        assertEquals("car", mapper.read(node).id());
+    }
+
+    @Test
+    @DisplayName("a non-object payload is reported as malformed, not thrown as a parse error")
+    void nonObjectIsMalformed() {
+        ObjectMapper plain = new ObjectMapper();
+        assertThrows(DescriptorMapper.MalformedDescriptorException.class,
+                () -> mapper.read(plain.getNodeFactory().textNode("nope")));
+        assertThrows(DescriptorMapper.MalformedDescriptorException.class, () -> mapper.read(null));
+    }
+
+    @Test
+    @DisplayName("a structurally wrong object is reported as malformed")
+    void wrongShapeIsMalformed() {
+        ObjectNode node = new ObjectMapper().createObjectNode();
+        node.put("id", "car");
+        node.put("sources", "should-be-a-map");
+
+        assertThrows(DescriptorMapper.MalformedDescriptorException.class, () -> mapper.read(node));
+    }
+}

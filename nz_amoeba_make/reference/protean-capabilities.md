@@ -103,6 +103,14 @@ Pipeline: `(signature) → ① tests → ② review → (approval) → deploy �
 | shared-lib signature | `gate.signature.shared-lib-required=true` | Uploaded jars (put-jar surface) must carry a valid Ed25519 signature | ⑤⑦ |
 | approval gate | `gate.approval.required=true` | Passing installs stored as `PENDING_APPROVAL` (not served); promote via `POST /{id}/approve?approver=`. Unapproved stays unserved across restart | ⑤ |
 
+> **The signature gate needs a descriptor entrance to be usable across servers.** It verifies
+> `ModuleSigning.canonicalBytes(ModuleDescriptor)`, but `protean.deploy_module` takes `files[]` + an interface spec
+> and the server GENERATES the descriptor from them — so a signature made on the source server is not over the
+> descriptor the target ends up with, and never verifies. `ModulePlatform.install()` has always accepted a whole
+> descriptor; the `module_promotion` capability opens that path over MCP (`amoeba.export_descriptor` →
+> `./gradlew signDescriptor` → `amoeba.promote_module`) and is what makes this gate usable for dev → prod promotion.
+> Measured 2026-09-04.
+
 ### Checking a declared interface — three layers
 
 When a module is built from a **declared interface** (a spec submitted over MCP rather than hand-written source),

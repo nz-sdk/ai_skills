@@ -94,3 +94,45 @@ tasks.named('run') {
 // `-boot.jar` suffix in build/libs. Give the bootJar that classifier so it is found (else set
 // protean.worker.container.jar explicitly). Not needed for in-process or worker(embed process).
 // tasks.named('bootJar') { archiveClassifier = 'boot' }
+
+// [OPTIONAL module_promotion] Signing utilities for promoting a module to another server.
+//
+// A descriptor exported from the source server (amoeba.export_descriptor) is signed HERE, in CI, and installed on
+// the target with amoeba.promote_module. These tasks exist because signing needs protean on the classpath
+// (ModuleSigning.canonicalBytes) and this project already has it — a standalone signer would have to reproduce the
+// dependency set and would drift from the library that verifies.
+//
+// ⚠️ The private key belongs to CI and nowhere else. /platform/mcp compiles and hot-loads submitted code, so a key
+//    readable by the server process is readable by anything deployed through it. See docs/promotion.md.
+
+tasks.register('generateSigningKey', JavaExec) {
+    group = 'promotion'
+    description = 'Generates an Ed25519 keypair for module signing. -Pout=<dir> (default: build/signing-key)'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = '{{PKG}}.promote.SigningCli'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+    doFirst {
+        args = ['genkey', project.findProperty('out') ?: "${layout.buildDirectory.get()}/signing-key"]
+    }
+}
+
+tasks.register('signDescriptor', JavaExec) {
+    group = 'promotion'
+    description = 'Signs a descriptor: -Pdescriptor=<in.json> -Pkey=<private.pem> -PkeyId=<id> [-Pout=<out.json>]'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = '{{PKG}}.promote.SigningCli'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+    doFirst {
+        // Checked in doFirst, not at configuration time: a missing property must not break unrelated Gradle
+        // invocations (`./gradlew test` configures every task).
+        ['descriptor', 'key', 'keyId'].each {
+            if (!project.hasProperty(it)) {
+                throw new GradleException("-P${it} is required. " +
+                        "Example: ./gradlew signDescriptor -Pdescriptor=car.json -Pkey=signing.pem -PkeyId=ci-2026")
+            }
+        }
+        args = ['sign', project.property('descriptor'), project.property('key'), project.property('keyId'),
+                project.findProperty('out') ?: (project.property('descriptor') as String)
+                        .replaceFirst(/(\.json)?$/, '.signed.json')]
+    }
+}

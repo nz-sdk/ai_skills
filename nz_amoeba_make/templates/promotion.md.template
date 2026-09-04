@@ -1,0 +1,121 @@
+# 모듈 승격 (개발 → 운영)
+
+개발서버에서 게이트를 통과한 모듈을 **서명해서** 운영에 올리는 경로다.
+도구 두 개(`amoeba.export_descriptor` · `amoeba.promote_module`)와 Gradle 태스크 두 개로 이뤄진다.
+
+```
+개발서버                        CI (서명)                      운영서버
+  amoeba.export_descriptor ──> ./gradlew signDescriptor ──>  amoeba.promote_module
+  (READ · mcp.read)            ModuleSigning.sign(개인키)      서명검증 → install/update
+                                                               → gate ①②③ → canary → 자동 롤백
+```
+
+## 왜 `protean.deploy_module` 이 아닌가
+
+`deploy_module` 은 `files[]` + 인터페이스 스펙을 받고 **서버가 디스크립터를 생성**한다
+(Controller·DTO·Mapper·MyBatisConfig 가 전부 스켈레톤 산출물이다). 생성된 디스크립터는
+개발서버의 것과 바이트 단위로 같다는 보장이 없으므로 **개발서버에서 만든 서명이 운영에서
+검증되지 않는다.** protean 의 `SignatureGate` 가 있는데도 쓸 수 없던 이유가 이것이다.
+
+`ModulePlatform.install()` 은 원래부터 `ModuleDescriptor` 를 통째로 받는다.
+`amoeba.promote_module` 은 그 입구를 MCP 에 여는 것이고, 그 순간 서명 승격이 성립한다.
+
+## ★ 서명은 항상 검증된다 — 이 도구를 열어도 되는 유일한 근거
+
+디스크립터를 통째로 받는다는 건 호출자가 `trustTier` · `controllerFqcn` · `componentFqcns` 를
+**직접 지정**한다는 뜻이다. 그건 interface-definition 가드(`SpecBearingDeployTool`)가 막으려던
+바로 그것이고, 이 도구는 그 가드를 **우회한다.**
+
+그래서 `PromoteModuleTool` 은 `protean.gate.signature.required` 설정과 **무관하게**
+`SignatureGate.enforce()` 를 먼저 부른다. 미서명·미신뢰키·변조는 전부 거부된다.
+
+> `install()` 내부의 `runGates()` 도 서명 게이트를 부르지만 `required=true` 일 때만이다.
+> 그쪽에 맡기면 플래그가 꺼진 서버가 임의의 Controller 를 담은 미서명 디스크립터를 받는다.
+> `PromoteModuleToolTest#unsignedIsRejectedEvenWhenTheGateIsOff` 가 이걸 고정한다.
+
+## 절차
+
+### 1. 키쌍 생성 (최초 1회)
+
+```bash
+./gradlew generateSigningKey -Pout=./signing
+```
+
+출력이 그대로 붙여 넣을 수 있는 형식이다. **공개키를 운영 서버**의 `application.yml` 에:
+
+```yaml
+protean:
+  gate:
+    signature:
+      keys:
+        ci-2026: MCowBQYDK2VwAyEA...
+```
+
+⚠️ **개인키(`signing.pem`)는 CI 시크릿으로만 둔다. 서버 어디에도 두지 않는다.**
+`/platform/mcp` 는 제출된 코드를 컴파일·핫로드하므로, 서버 프로세스가 읽을 수 있는 키는
+그 서버에 배포된 모듈이 읽을 수 있다(`docs/secrets.md` 가 embedded AS 서명키에 대해 적은 것과
+같은 논리).
+
+### 2. 개발서버에서 디스크립터를 꺼낸다
+
+```
+amoeba.export_descriptor { "id": "car" }          # 배포본
+amoeba.export_descriptor { "id": "car", "version": "1.0.0" }   # 이력에서
+```
+
+응답의 `descriptor` 를 파일로 저장한다. `signed: false` 면 아직 서명 전이다.
+
+> 소스를 **읽으려는** 목적이면 `amoeba.export_module_source` 를 쓴다 — 그쪽은 IDE 에서 열리는
+> Gradle 트리를 주도록 모양을 바꾸므로 **서명할 수 없다.**
+
+### 3. CI 에서 서명
+
+```bash
+./gradlew signDescriptor \
+  -Pdescriptor=car.json -Pkey=$SIGNING_KEY -PkeyId=ci-2026 -Pout=car.signed.json
+```
+
+### 4. 운영에 승격
+
+```
+amoeba.promote_module { "descriptor": <car.signed.json 내용>, "mode": "install" }
+amoeba.promote_module { "descriptor": ..., "mode": "update" }   # 이미 배포된 모듈
+```
+
+`update` 는 canary hot-swap 이라 실패하면 자동 롤백된다. `install` 은 이미 배포된 id 를 거부한다
+(상태를 건드리기 전에 막는다).
+
+## 도구가 해결해 주지 않는 것
+
+| | |
+|---|---|
+| **DDL** | 모듈이 쓰는 테이블은 사람이 만든다. MCP 에 DDL 실행 도구가 없고 승격에도 따라가지 않는다 |
+| **protean 버전** | 디스크립터는 protean 내부 직렬화다. 개발·운영 버전이 다르면 필드가 갈려 조용히 깨질 수 있다 |
+| **클래스패스** | 스토어는 소스를 담고 배포/기동 때마다 **재컴파일**한다. 운영에 같은 의존성이 없으면 컴파일 실패 |
+
+## 전송 포맷의 함정 하나
+
+저장된 디스크립터는 **기본 `ObjectMapper` 로 역직렬화되지 않는다.**
+`ModuleDescriptor.isLibrary()` 파생 게터가 JSON 에 `library` 로 나가는데 레코드에는 그런
+컴포넌트가 없다:
+
+```
+UnrecognizedPropertyException: Unrecognized field "library" (20 known properties: ...)
+```
+
+모듈 스토어는 자체 매퍼로 읽어서 눈치채지 못한다 — 프로세스 사이로 옮길 때만 드러난다.
+그래서 `DescriptorMapper` 가 `FAIL_ON_UNKNOWN_PROPERTIES=false` 로 고정돼 있다.
+**엄격하게 "고치지" 말 것** — protean 이 파생 게터를 하나 더 늘리면 같은 방식으로 조용히 깨진다.
+서명이 변조를 막으므로 파서의 엄격성은 방어선이 아니다(`canonicalBytes` 는 raw JSON 이 아니라
+레코드 컴포넌트에서 서명 대상을 다시 만든다).
+
+## 무엇이 서명에 덮이나
+
+`ModuleSigning.canonicalBytes` 기준. `PromoteModuleSignatureTest` 가 전부 고정한다.
+
+| 덮인다 | 덮이지 않는다 |
+|---|---|
+| `id` · `version` · `trustTier` · `desiredState` · `controllerFqcn` · `componentFqcns` · `sources` · `tests` · `needsSharedBeans` · `verification` · `isolationMode` · **`scope`** · `bridgedInterfaces` · `resources` · `kind` · `exports` · `uses` | `signerKeyId` · `signature`(자기 자신을 덮을 수 없다) · `usedSharedLibs`(서명 이후 서버가 관찰한다) |
+
+`scope` 가 덮이는 이유는 protean 주석이 밝힌다 — 안 덮으면 서명된 모듈을 **다른 테넌트의 DB로
+재조준**할 수 있다.

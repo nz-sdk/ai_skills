@@ -37,7 +37,7 @@ Rules: generate everything from templates (assume no existing sample). All gener
 choosing options now, and whoever reads the repository later.
 
 **Korean** — everything you say during the session: question wording, option labels and their descriptions, group
-and step headings, progress lines ("적용 가능한 확장 기능 7개 중 1/2"), the validation report (OK / 경고 / 차단),
+and step headings, progress lines ("적용 가능한 확장 기능 8개 중 1/2"), the validation report (OK / 경고 / 차단),
 the final resolved-configuration echo, and the prose around the run/verify commands.
 
 **Never translated, quoted exactly as written** — `protean.*` property keys, their values / enum members /
@@ -162,9 +162,9 @@ split — that is what keeps an entry from silently vanishing:
    Without the count the user cannot tell whether anything is still coming, which is the only real guard against
    dropping one.
 
-Worked example, in-process + MCP enabled (the common case): seven survive — `custom_mcp_tool`,
+Worked example, in-process + MCP enabled (the common case): eight survive — `custom_mcp_tool`,
 `builtin_tool_override`, `module_source_tools`, `code_rule`, `authorizer`, `interface_spec_validator`,
-`unload_callback` → two questions, 4 + 3. (`db_dialect`/`scope_admin` need `worker.db.auto-provision`,
+`module_promotion`, `unload_callback` → two questions, 4 + 4. (`db_dialect`/`scope_admin` need `worker.db.auto-provision`,
 `module_store_dialect` needs the jdbc module-store backend, so all three are filtered out.)
 
 Recount this list against the yaml rather than trusting the number written here — the count moves whenever a

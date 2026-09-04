@@ -1,0 +1,57 @@
+// [CAPABILITY: module promotion] The ONE ObjectMapper that reads a ModuleDescriptor off the wire.
+//
+// ★ Why this exists instead of injecting the app's ObjectMapper: a stored descriptor does NOT deserialize with a
+//   default mapper. ModuleDescriptor exposes a derived isLibrary() accessor, so Jackson SERIALIZES a `library`
+//   property that the record has no component to READ back:
+//
+//     UnrecognizedPropertyException: Unrecognized field "library" (20 known properties: componentFqcns, tests, ...)
+//
+//   Measured 2026-09-04 against a real store file. The module store reads its own files with its own mapper, so the
+//   asymmetry is invisible until you move a descriptor between processes — which is exactly what promotion does.
+//
+// ⚠️ Do not "fix" this by tightening the mapper. FAIL_ON_UNKNOWN_PROPERTIES=false is load-bearing: every derived
+//    accessor protean adds later would otherwise break promotion the same silent way. The signature is what protects
+//    against a tampered payload here, not the parser's strictness — an unknown field cannot smuggle anything in
+//    because canonicalBytes() rebuilds the signed content from the record's own components, not from the raw JSON.
+package {{PKG}}.promote;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import org.htcom.protean.module.ModuleDescriptor;
+
+import org.springframework.stereotype.Component;
+
+@Component
+public class DescriptorMapper {
+
+    private final ObjectMapper mapper = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+    /** Thrown when the payload is not a readable descriptor. Carries a message meant for the tool caller. */
+    public static class MalformedDescriptorException extends RuntimeException {
+        public MalformedDescriptorException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /** Reads a descriptor from a JSON node (the `descriptor` argument of amoeba.promote_module). */
+    public ModuleDescriptor read(JsonNode node) {
+        if (node == null || node.isNull() || !node.isObject()) {
+            throw new MalformedDescriptorException("descriptor must be a JSON object", null);
+        }
+        try {
+            return mapper.treeToValue(node, ModuleDescriptor.class);
+        } catch (JsonProcessingException e) {
+            throw new MalformedDescriptorException("descriptor is not a readable ModuleDescriptor: "
+                    + e.getOriginalMessage(), e);
+        }
+    }
+
+    /** Serialises a descriptor for amoeba.export_descriptor. */
+    public JsonNode write(ModuleDescriptor descriptor) {
+        return mapper.valueToTree(descriptor);
+    }
+}

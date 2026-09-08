@@ -339,8 +339,26 @@ public class InterfaceDeployPreparer {
         }
     }
 
+    /**
+     * The caller's verification plan, refused if it would point gate 3 off-box or turn it into a load generator.
+     *
+     * <p>This is the chokepoint: both wrapped deploy tools reach gate 3 through {@link #prepare}, and the plan is
+     * parsed here exactly once. {@code ProbeGenerator.merge} deliberately does not vet — see
+     * {@link ProbeGenerator#violationsOf} for the URI-userinfo escape the path rule closes.
+     *
+     * <p>NOT covered: protean's own admin REST surface ({@code POST/PUT/PATCH /platform/modules}) reaches gate 3
+     * without passing through this class at all. {@code SecurityConfig} holds it to {@code SCOPE_mcp.admin}, which
+     * is the mitigation available to us; closing it properly needs a change upstream in protean.
+     */
     private VerificationPlan existingPlan(JsonNode args) {
-        return args.hasNonNull("verification") ? parsePlan(args.get("verification")).orElse(null) : null;
+        VerificationPlan plan = args.hasNonNull("verification")
+                ? parsePlan(args.get("verification")).orElse(null)
+                : null;
+        List<String> violations = ProbeGenerator.violationsOf(plan);
+        if (!violations.isEmpty()) {
+            throw new PreparationException("verification is invalid:\n  - " + String.join("\n  - ", violations));
+        }
+        return plan;
     }
 
     private static String requireText(JsonNode node, String field) {

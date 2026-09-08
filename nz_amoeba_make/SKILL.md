@@ -1,6 +1,11 @@
 ---
 name: nz_amoeba_make
 description: 'Scaffold a runnable Protean-consuming sample server from scratch under prototype/<name>. Walks the user through the FULL Protean option surface (every protean.* setting + every consumer extension point + a database sub-flow) and generates the matching build, config, code, infra, and README. Built for users who do not know Protean — any setting can be configured through the skill, with defaults and plain explanations. Use when someone wants to create a new Protean sample/example server, try a capability, or bootstrap a downstream Protean integration. Triggers: "make a protean sample", "scaffold a protean server", "new protean example", "protean sample 만들어".'
+version: 0.1.0
+license: AGPL-3.0-only
+compatibility:
+  agents:
+    - claude
 ---
 
 # Amoeba Maker

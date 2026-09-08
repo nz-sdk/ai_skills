@@ -25,7 +25,129 @@ import java.util.Optional;
 /** Builds gate-3 probes from a spec. Stateless. */
 public final class ProbeGenerator {
 
+    /**
+     * Load-test ceilings for a caller-supplied plan.
+     *
+     * <p>Gate 3 runs {@code newFixedThreadPool(concurrency)} and fires {@code concurrency x requestsPerThread}
+     * requests at the host, then gives the pool 60s to drain. Both fields are unbounded ints in protean's schema,
+     * so a {@code concurrency: 10000} TYPO spawns 10k threads and only surfaces as a timeout 60s later. The cap
+     * turns that into an immediate, named rejection — which is the practical point here, since the failure needs
+     * no attacker. The totals leave a smoke-load test workable (5000 requests in the gate's own 60s budget is
+     * ~83 req/s) and comfortably clear the documented examples (guide 06 8x20=160, guide 04 4x50=200); a value
+     * above them could not have completed inside that budget anyway.
+     */
+    static final int MAX_CONCURRENCY = 32;
+    static final int MAX_REQUESTS_PER_THREAD = 500;
+    static final int MAX_TOTAL_REQUESTS = 5000;
+
+    /** What gate 3 uses when the caller sets concurrency but leaves requestsPerThread null (VerificationGate:79). */
+    private static final int DEFAULT_REQUESTS_PER_THREAD = 10;
+
     private ProbeGenerator() {
+    }
+
+    /**
+     * Rejects a caller-supplied verification plan that would send gate 3 somewhere it must not go.
+     *
+     * <p>THE PATH RULE ENFORCES A CONTRACT PROTEAN ONLY WROTE DOWN IN PROSE. Every upstream description of this
+     * field calls it a PATH — guide 06 "부하 대상 경로", guide 02 "부하 검증 대상 경로",
+     * {@code ModuleToolSchemas:169} "Target path for load testing" — and every documented or tested example starts
+     * with {@code /} (guide 06 /orders/health, guide 04 /cp/ping, CanaryUpdateTest /canary/ping,
+     * VerificationGateTest /verify/ping). But the type is a bare {@code String} with no schema {@code pattern}, so
+     * {@code protean.mcp.strict-schema} does not constrain it, and {@code VerificationGate:51,147} joins it by raw
+     * concatenation: {@code URI.create("http://localhost:" + port + path)}.
+     *
+     * <p>Requiring a leading {@code /} is what makes the code match that contract: once the appended text starts
+     * with a slash, the authority of the joined URI is fixed at {@code localhost:port}. Without it, a path of
+     * {@code "@elsewhere.example/collect"} yields {@code http://localhost:9200@elsewhere.example/collect}, which
+     * java.net.URI parses with {@code localhost:9200} as USERINFO and {@code elsewhere.example} as the host
+     * (verified against the JDK; HttpRequest.newBuilder accepts it). A leading {@code //} is rejected on top of
+     * that — inert today, since the base already carries an authority, but it is the protocol-relative shape and
+     * relying on a URI parser to keep ignoring it is not a property worth depending on.
+     *
+     * <p>WHAT THIS IS NOT: a security boundary. A caller holding {@code mcp.write} already deploys arbitrary
+     * unsandboxed code into this JVM (application.yml states this outright), so the off-box request is a strictly
+     * weaker capability than what they hold — no privilege is gained by it, and none is taken away here. Nor is it
+     * an external-integration channel worth closing: {@code VerificationGate.send} sets no headers and sends
+     * {@code BodyPublishers.noBody()}, and a non-2xx fails the gate, so an authenticated API call (Jira, GitHub)
+     * was never possible through it. Deploy-time integration belongs in {@code SpecBearingDeployTool.call}, which
+     * wraps the whole deploy and can use its own client, auth and failure policy.
+     *
+     * <p>The load caps below carry most of the practical value: they turn a {@code concurrency: 10000} typo into an
+     * immediate rejection instead of 10k threads and a 60s timeout. That failure needs no attacker.
+     *
+     * <p>Interior {@code //} and {@code @} are deliberately NOT rejected: they cannot change the authority, and
+     * banning them would constrain legitimate probe targets for no security gain.
+     *
+     * <p>Reports every violation in one pass rather than failing on the first, so a caller fixing a hand-written
+     * plan sees the whole list.
+     *
+     * @return the violations found, empty when the plan is acceptable (or null)
+     */
+    public static List<String> violationsOf(VerificationPlan plan) {
+        List<String> violations = new ArrayList<>();
+        if (plan == null) {
+            return violations;
+        }
+        if (plan.integration() != null) {
+            for (int i = 0; i < plan.integration().size(); i++) {
+                VerificationPlan.Probe probe = plan.integration().get(i);
+                String at = "verification.integration[" + i + "].path";
+                checkProbePath(violations, at, probe == null ? null : probe.path());
+            }
+        }
+        if (plan.loadPath() != null) {
+            checkProbePath(violations, "verification.loadPath", plan.loadPath());
+        }
+
+        boolean concurrencyUsable = plan.concurrency() == null;
+        if (plan.concurrency() != null) {
+            int c = plan.concurrency();
+            concurrencyUsable = c >= 1 && c <= MAX_CONCURRENCY;
+            if (!concurrencyUsable) {
+                violations.add("verification.concurrency: must be between 1 and " + MAX_CONCURRENCY + " (was " + c + ")");
+            }
+        }
+        boolean perThreadUsable = plan.requestsPerThread() == null;
+        if (plan.requestsPerThread() != null) {
+            int r = plan.requestsPerThread();
+            perThreadUsable = r >= 1 && r <= MAX_REQUESTS_PER_THREAD;
+            if (!perThreadUsable) {
+                violations.add("verification.requestsPerThread: must be between 1 and " + MAX_REQUESTS_PER_THREAD
+                        + " (was " + r + ")");
+            }
+        }
+        // Only meaningful once both fields are individually sane — otherwise the product just restates a violation
+        // already reported, in a form the caller cannot act on.
+        if (plan.concurrency() != null && concurrencyUsable && perThreadUsable) {
+            int perThread = plan.requestsPerThread() != null ? plan.requestsPerThread() : DEFAULT_REQUESTS_PER_THREAD;
+            long total = (long) plan.concurrency() * perThread;
+            if (total > MAX_TOTAL_REQUESTS) {
+                violations.add("verification: concurrency x requestsPerThread must not exceed " + MAX_TOTAL_REQUESTS
+                        + " (was " + total + ")");
+            }
+        }
+        return violations;
+    }
+
+    /** @see #violationsOf for why the leading slash carries the security property. */
+    private static void checkProbePath(List<String> violations, String at, String path) {
+        if (path == null || path.isBlank()) {
+            violations.add(at + ": required");
+            return;
+        }
+        if (!path.startsWith("/")) {
+            violations.add(at + ": must start with '/' (was '" + path + "')");
+        } else if (path.startsWith("//")) {
+            violations.add(at + ": must not start with '//' (was '" + path + "')");
+        }
+        for (int i = 0; i < path.length(); i++) {
+            char c = path.charAt(i);
+            if (c <= ' ' || c == 0x7f) {
+                violations.add(at + ": must not contain whitespace or control characters (was '" + path + "')");
+                break;
+            }
+        }
     }
 
     /**
@@ -91,6 +213,11 @@ public final class ProbeGenerator {
      * <p>Caller-supplied probes are kept as-is and generated ones are added, minus any duplicate method+path — a
      * hand-written probe is more specific (it can assert {@code bodyContains}), so it wins. Load-test settings pass
      * through untouched.
+     *
+     * <p>"As-is" means this method vets nothing; {@link #violationsOf} is what makes that safe, and it must run on
+     * the caller's plan BEFORE this — note the early return below hands {@code existing} straight back when the spec
+     * yielded no probes, so a check placed here would be skipped exactly when the plan is entirely caller-written.
+     * {@code InterfaceDeployPreparer.existingPlan} is the single place both are wired.
      */
     public static VerificationPlan merge(VerificationPlan existing, List<VerificationPlan.Probe> generated) {
         if (generated.isEmpty()) {

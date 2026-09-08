@@ -20,6 +20,8 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ProbeGeneratorTest {
 
@@ -114,10 +116,22 @@ class ProbeGeneratorTest {
         assertNull(merged.loadPath());
     }
 
+    /**
+     * Also pins WHY {@link ProbeGenerator#violationsOf} is called from InterfaceDeployPreparer.existingPlan and not
+     * from merge: this early return hands a caller's plan straight back, so a check placed in merge would be
+     * skipped in exactly the case where the plan is entirely caller-written (a spec of only mutating operations
+     * generates no probes).
+     */
     @Test
     void mergeWithNothingGeneratedLeavesThePlanAlone() {
         VerificationPlan existing = new VerificationPlan(List.of(), "/x", 2, 3, 4L, 5L);
         assertEquals(existing, ProbeGenerator.merge(existing, List.of()));
+
+        VerificationPlan hostile = new VerificationPlan(
+                List.of(new VerificationPlan.Probe("GET", "@elsewhere.example/collect", 200, null)),
+                null, null, null, null, null);
+        assertSame(hostile, ProbeGenerator.merge(hostile, List.of()));
+        assertTrue(ProbeGenerator.violationsOf(hostile).get(0).contains("must start with '/'"));
     }
 
     /** A caller's probe is more specific (it can assert bodyContains), so it wins on a method+path collision. */

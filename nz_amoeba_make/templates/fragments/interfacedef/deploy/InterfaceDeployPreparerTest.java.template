@@ -289,6 +289,69 @@ class InterfaceDeployPreparerTest {
 
     // --- rejections ---
 
+    /**
+     * Gate 3 concatenates this string onto {@code "http://localhost:" + port}, and a value starting with '@' makes
+     * java.net.URI read the base as userinfo and the rest as the HOST, so the request leaves the box. Requiring a
+     * leading '/' closes it. Not a privilege boundary — see {@link ProbeGenerator#violationsOf} for what this is
+     * and is not — but the field is documented as a path everywhere, and this makes the code say so too.
+     */
+    @Test
+    void aProbePathThatWouldRetargetTheHostIsRefused() {
+        ObjectNode args = args(files -> {
+        });
+        ObjectNode probe = args.putObject("verification").putArray("integration").addObject();
+        probe.put("method", "GET");
+        probe.put("path", "@elsewhere.example/collect");
+        probe.put("expectedStatus", 200);
+        assertTrue(rejects(args).getMessage().contains("must start with '/'"));
+    }
+
+    /** Same escape via the load path, which is a separate field on the same plan. */
+    @Test
+    void aLoadPathThatWouldRetargetTheHostIsRefused() {
+        ObjectNode args = args(files -> {
+        });
+        ObjectNode verification = args.putObject("verification");
+        verification.put("loadPath", "@elsewhere.example/collect");
+        verification.put("concurrency", 2);
+        assertTrue(rejects(args).getMessage().contains("must start with '/'"));
+    }
+
+    /** Protocol-relative shape. Inert against a base that already has an authority, refused anyway — see violationsOf. */
+    @Test
+    void aProtocolRelativeProbePathIsRefused() {
+        ObjectNode args = args(files -> {
+        });
+        ObjectNode probe = args.putObject("verification").putArray("integration").addObject();
+        probe.put("method", "GET");
+        probe.put("path", "//elsewhere.example/collect");
+        probe.put("expectedStatus", 200);
+        assertTrue(rejects(args).getMessage().contains("must not start with '//'"));
+    }
+
+    @Test
+    void anUnboundedLoadIsRefused() {
+        ObjectNode args = args(files -> {
+        });
+        ObjectNode verification = args.putObject("verification");
+        verification.put("loadPath", "/orders");
+        verification.put("concurrency", 10_000);
+        assertTrue(rejects(args).getMessage().contains("verification.concurrency"));
+    }
+
+    /** Each field within range, the product not — the check that a per-field cap alone would miss. */
+    @Test
+    void aLoadWhoseProductExceedsTheCapIsRefused() {
+        ObjectNode args = args(files -> {
+        });
+        ObjectNode verification = args.putObject("verification");
+        verification.put("loadPath", "/orders");
+        verification.put("concurrency", ProbeGenerator.MAX_CONCURRENCY);
+        verification.put("requestsPerThread", ProbeGenerator.MAX_REQUESTS_PER_THREAD);
+        assertTrue(rejects(args).getMessage()
+                .contains("concurrency x requestsPerThread must not exceed " + ProbeGenerator.MAX_TOTAL_REQUESTS));
+    }
+
     /** A manifest cannot carry a specId and cannot be rewritten file-by-file, so it is refused outright. */
     @Test
     void theManifestFormIsRefused() {

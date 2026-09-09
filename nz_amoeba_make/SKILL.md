@@ -306,7 +306,8 @@ Check, and fix or stop on each:
   **forced on, not offered**. `interface_spec_validator` requires `swagger_annotations` because its generator emits
   `@Schema`/`@Operation` into every DTO and controller it writes, and its promotion-gate-2 rule then rejects a field
   that carries none — so without the jar every module deployed through `amoeba.define_interface` fails to compile at
-  its first deploy. Resolve these before step 5 asks about `module_classpath`, and say the entry was forced rather
+  its first deploy. Resolve these before step 7 asks about `module_classpath` (it is the LAST thing step 7's group
+  walk presents, not a step 5 question), and say the entry was forced rather
   than presenting it as still open.
 - **annotations and the rule that requires them** — two **warnings** (never blocking; only the author knows what
   their rule will check):
@@ -480,6 +481,10 @@ Engine:
   create/open/close/detach/destroy; destroy needs `worker.db.allow-destroy` + `confirm=<name>`). Note packing:
   same-scope modules share a worker up to `modules-per-worker` (128); set 1 for strict isolation.
 - **wrapper** — provision with `gradle wrapper --gradle-version 8.14.5` in the new dir (or copy an existing one).
+- **`settings.gradle`** (always) — from `templates/settings.gradle.template`. Easy to forget because nothing else
+  references it, and the cost is not just `rootProject.name`: it carries the **foojay toolchain resolver**, which
+  is what provisions JDK 21 on a machine that does not have one. Omit it and `setup.sh`'s JDK 21 preflight fails
+  on exactly the fresh-clone case the resolver exists for.
 - **README.md** (from template — list the selected capabilities), **`.gitignore`**, **`Application.java`**.
 - **setup.sh** (always — the FINAL artifact) — from `templates/setup.sh.template`, `chmod +x`. A Linux/Ubuntu
   install-and-run script for this exact configuration: preflight (JDK 21 via javac, gradlew, protean jar in

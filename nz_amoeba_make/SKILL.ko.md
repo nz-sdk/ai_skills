@@ -315,7 +315,7 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   엔트리는 **묻지 말고 강제**한다. `interface_spec_validator` 가 `swagger_annotations` 를 요구하는 이유는 생성기가
   자기가 쓰는 모든 DTO·컨트롤러에 `@Schema`/`@Operation` 을 무조건 넣고, 승진 게이트 ② 규칙이 그것이 없는 필드를
   거부하기 때문이다 — 그 jar 가 없으면 `amoeba.define_interface` 로 배포되는 모든 모듈이 첫 배포에서 컴파일에
-  실패한다. 이 해소는 step 5 가 `module_classpath` 를 묻기 **전에** 끝내고, 해당 엔트리는 선택지가 아니라
+  실패한다. 이 해소는 step 7 이 `module_classpath` 를 묻기 **전에** 끝내고(7 단계 group 순회의 맨 마지막이며 step 5 질문이 아니다), 해당 엔트리는 선택지가 아니라
   강제되었음을 알린다.
 - **애노테이션과 그것을 요구하는 규칙** — **경고** 2건(절대 차단 아님. 규칙이 무엇을 검사할지는 작성자만 안다):
   - `code_rule` 을 선택하고 `swagger_annotations` 를 **선택하지 않은** 경우 — 그 규칙이 결국
@@ -492,6 +492,10 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   `confirm=<name>` 필요). 패킹도 적는다: 같은 scope 의 모듈은 `modules-per-worker`(128)까지 worker 를 공유하며,
   엄격한 격리를 원하면 1 로 설정한다.
 - **wrapper** — 새 디렉토리에서 `gradle wrapper --gradle-version 8.14.5` 로 준비한다(또는 기존 것을 복사).
+- **`settings.gradle`**(항상) — `templates/settings.gradle.template` 에서. 아무것도 이 파일을 참조하지 않아
+  빠뜨리기 쉬운데, 잃는 것은 `rootProject.name` 만이 아니다: **foojay toolchain resolver** 가 여기 들어 있고
+  그것이 JDK 21 없는 머신에 JDK 21 을 프로비저닝한다. 빠지면 `setup.sh` 의 JDK 21 사전점검이, 하필 그
+  resolver 가 존재하는 이유인 fresh-clone 상황에서 실패한다.
 - **`README.md`**(템플릿에서 — 선택된 capability 를 나열), **`.gitignore`**, **`Application.java`**.
 - **`setup.sh`**(항상 — **마지막** 산출물) — `templates/setup.sh.template` 에서 만들고 `chmod +x`. 이 구성
   그대로를 위한 Linux/Ubuntu 설치·실행 스크립트다: preflight(javac 로 JDK 21 확인, gradlew, SNAPSHOT 이면

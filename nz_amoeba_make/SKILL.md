@@ -364,9 +364,11 @@ Engine:
   **★ `spring.datasource.password` FOLLOWS THE CONNECTION MODE, and getting it wrong commits a live credential.**
   docker ⇒ `${DB_PASSWORD:{{PW}}}` (a value the skill generated and also wrote into the compose file — throwaway,
   and the two must agree). **existing / other ⇒ `${DB_PASSWORD}` with NO fallback**, because there `{{PW}}` is the
-  password the USER TYPED for a server that already exists. `prototype/nz_trilo` shipped
-  `password: "${DB_PASSWORD:trilo1234!}"` this way while `prototype/nz_ammon` shipped `${DB_PASSWORD}` — one spec,
-  two results, which is what `db-vendors.yaml`'s note now closes.
+  password the USER TYPED for a server that already exists. `prototype/nz_trilo` was generated with
+  `password: "${DB_PASSWORD:trilo1234!}"` while `prototype/nz_ammon` — same skill, same `existing` path — got
+  `${DB_PASSWORD}`. One spec, two results, which is what `db-vendors.yaml`'s note now closes. (Nothing leaked:
+  nz_trilo is not a git repository and nz_ammon, which is tracked, carries the safe form. The point is that which
+  form you get was left to judgment.)
   ⚠ And do NOT present no-fallback here as the OAUTH_ISSUER_URI guarantee: `spring.datasource.*` is bound by the
   `@ConfigurationProperties` Binder, which leaves an unresolved `${...}` as a literal string, and Hikari connects
   lazily — so an unset `DB_PASSWORD` starts the app cleanly and fails at the FIRST QUERY. Say that wherever you

@@ -374,9 +374,11 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   **★ `spring.datasource.password` 는 연결 방식에 따라 달라지며, 틀리면 살아 있는 자격증명을 커밋한다.**
   docker ⇒ `${DB_PASSWORD:{{PW}}}`(스킬이 생성해 compose 파일에도 쓴 값 — 구조상 일회용이고 둘이 일치해야
   한다). **existing / other ⇒ fallback 없는 `${DB_PASSWORD}`** — 이 경로에서 `{{PW}}` 는 이미 존재하는 서버에
-  대해 *사용자가 입력한* 비밀번호다. `prototype/nz_trilo` 는 이렇게 `password: "${DB_PASSWORD:trilo1234!}"` 를
-  실어 보냈고 `prototype/nz_ammon` 은 `${DB_PASSWORD}` 를 썼다 — 한 규정에서 두 결과가 나온 것이고,
-  `db-vendors.yaml` 의 주석이 그 틈을 막는다.
+  대해 *사용자가 입력한* 비밀번호다. `prototype/nz_trilo` 는 `password: "${DB_PASSWORD:trilo1234!}"` 로
+  생성됐고 `prototype/nz_ammon` 은 — 같은 스킬, 같은 `existing` 갈래인데 — `${DB_PASSWORD}` 를 받았다. 한
+  규정에서 두 결과가 나온 것이고, `db-vendors.yaml` 의 주석이 그 틈을 막는다. (실제로 유출된 것은 없다:
+  nz_trilo 는 git 저장소가 아니고, 추적되는 nz_ammon 은 안전한 형태를 갖고 있다. 문제는 어느 형태가
+  나오는지가 판단에 맡겨져 있었다는 점이다.)
   ⚠ 그리고 여기서의 fallback 없음을 OAUTH_ISSUER_URI 의 보장처럼 말하지 말 것: `spring.datasource.*` 는
   `@ConfigurationProperties` Binder 가 바인딩하는데 미해결 `${...}` 를 리터럴 문자열로 남기고 Hikari 는 게으르게
   접속하므로, `DB_PASSWORD` 가 없으면 앱은 멀쩡히 기동하고 **첫 쿼리에서** 실패한다. 이 키를 쓰는 자리마다

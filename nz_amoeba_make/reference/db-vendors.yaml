@@ -86,9 +86,13 @@ vendors:
 #   existing / other  password: ${DB_PASSWORD}          ← NO FALLBACK. Never {{PW}} here.
 #                     On these paths {{PW}} is the password the USER TYPED for a server that already exists, i.e.
 #                     a live secret. Writing it as a fallback puts it in application.yml, which is committed.
-#                     Observed: prototype/nz_trilo shipped `password: "${DB_PASSWORD:trilo1234!}"` this way, while
-#                     prototype/nz_ammon (same skill) shipped `password: "${DB_PASSWORD}"` — two results from one
-#                     spec is what this note removes.
+#                     Observed: prototype/nz_trilo was GENERATED with `password: "${DB_PASSWORD:trilo1234!}"`
+#                     while prototype/nz_ammon (same skill, same `existing` path) got `password: "${DB_PASSWORD}"`.
+#                     Two results from one spec is what this note removes.
+#                     ⚠ To be exact about the blast radius: nz_trilo is NOT a git repository, so that value never
+#                     left the local disk, and nz_ammon — which IS tracked — happens to carry the safe form. So
+#                     nothing was actually leaked. The defect is that WHICH form you get was left to the
+#                     generator's judgment, and the unsafe form in a tracked sample is a commit away.
 #
 # ⚠ AND SAY WHAT NO-FALLBACK DOES *NOT* BUY, because it reads like the OAUTH_ISSUER_URI guarantee and is not:
 # an unset DB_PASSWORD does NOT abort startup. spring.datasource.* is bound by the @ConfigurationProperties

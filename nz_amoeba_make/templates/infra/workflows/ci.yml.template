@@ -210,7 +210,8 @@ jobs:
           tags: protean-{{NAME}}-sample:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      # No `docker save` artifact: the runtime JDK image is ~450MB and the deploy job rebuilds from source
+      # No `docker save` artifact: the runtime JDK image is ~500MB (the copied JDK alone is ~220MB, even after
+      # jmods removal) and the deploy job rebuilds from source
       # anyway. To switch to a registry (GHCR), change `load: true` to `push: true` and add
       # docker/login-action before this step — see docs/ci-cd.md, "Switching to a registry".
 

@@ -59,10 +59,10 @@ class SourceToolRegistrationTest {
     }
 
     /**
-     * The classification that matters on this host: the ModuleActionAuthorizer policy (ExampleAuthorizer, when the
-     * `authorizer` capability is selected) maps CUSTOM — the SPI default — to mcp.admin, the same bucket as
-     * config.set and deploy_shared_lib. A read-only tool left at that default would demand admin rights to list
-     * a file, so each tool overrides action() to READ. This test is what keeps that true.
+     * The classification that matters on this host: when the `authorizer` capability is selected, its
+     * ModuleActionAuthorizer policy maps CUSTOM — the SPI default — to mcp.admin, the same bucket as config.set
+     * and deploy_shared_lib. A read-only tool left at that default would demand admin rights to list a file, so
+     * each tool overrides action() to READ. This test is what keeps that true.
      */
     @Test
     void everyToolClassifiesAsReadNotCustom() {

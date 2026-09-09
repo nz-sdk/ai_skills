@@ -204,7 +204,14 @@ curl localhost:{{PORT}}/platform/modules          # deployment state
 
 The MCP control plane (`/platform/**`) is a **remote code execution surface**: it compiles and hot-loads submitted
 sources. `SecurityConfig` puts an OAuth2 Resource Server in front of it, so every call needs a Bearer token, and
-`ExampleAuthorizer` decides each `ModuleAction` on top of that.
+the `ModuleActionAuthorizer` bean decides each `ModuleAction` on top of that.
+<!-- GENERATOR: name the authorizer class you actually emitted here, and everywhere else in this README. Single
+     fragments are renamed at generation, so a template that hardcodes the placeholder class name ships a
+     dangling reference. -->
+
+<!-- [OPTIONAL secured MCP] When protean.mcp.authorization.resource is NOT set, delete this whole section AND
+     the RCE warning above it must instead say the surface is OPEN — a local demo only. Do not leave a Security
+     section describing protection that was not generated. -->
 
 ### Choosing the issuer value
 

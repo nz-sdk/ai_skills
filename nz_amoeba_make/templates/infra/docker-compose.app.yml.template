@@ -7,9 +7,12 @@
 #   docker compose down              # the module-store volume survives
 #   docker compose down -v           # ★ also discards every deployed module
 #
-# To run standalone without an external database, add the sidecar overlay:
+# [OPTIONAL local-db] To run standalone without an external database, add the sidecar overlay:
 #   docker compose -f docker-compose.yml -f docker-compose.local-db.yml up -d --build
 # (or put COMPOSE_FILE=docker-compose.yml:docker-compose.local-db.yml in .env)
+# ★ GENERATOR: delete this block when docker-compose.local-db.yml is NOT emitted (the DB is an existing server,
+#   or h2/other). Pointing a reader at a file that does not exist is the mildest form of this bug; see the
+#   [OPTIONAL local-db] marker in workflows/deploy.yml.template for the form that breaks a deploy.
 #
 # Rationale and troubleshooting: docs/docker.md   Credentials: docs/secrets.md
 
@@ -48,30 +51,41 @@ services:
       #   instead of being dug out of the logs.
       OAUTH_ISSUER_URI: ${OAUTH_ISSUER_URI:?set OAUTH_ISSUER_URI in .env. It is the EXTERNAL Authorization Server's issuer and must match its issuer identifier character for character, e.g. http://auth.example.internal:9300 (see .env.example)}
 
-      # ★ DB_HOST and DB_USER carry :? guards too. application.yml has no fallback for them, and an unset value
-      #   is just as silent as DB_PASSWORD — the Binder leaves the literal "${DB_HOST}" in place, so it surfaces
-      #   as UnknownHostException rather than "you forgot a variable".
+      # ★ DB_HOST and DB_USER carry :? guards even though application.yml DOES have fallbacks for both —
+      #   db-vendors.yaml specifies ${DB_HOST:localhost} in the JDBC URL and ${DB_USER:{{DB}}} for the user. That
+      #   is exactly why the guards are here: those fallbacks are chosen to be safe to PUBLISH, not to be correct
+      #   in a container.
       #
-      # ⚠ .env still needs DB_HOST even when using the sidecar overlay. compose interpolates each -f file
-      #   SEPARATELY and then merges, so this :? is evaluated before the overlay's override. Write DB_HOST=mysql
-      #   in .env for the sidecar path (see .env.example). The overlay's override still applies — leave an
-      #   external host in .env and add the overlay, and the app talks to the sidecar.
-      DB_HOST: ${DB_HOST:?set DB_HOST in .env. It is `mysql` when using the sidecar overlay (application.yml has no fallback)}
+      #   `localhost` INSIDE A CONTAINER IS THE CONTAINER ITSELF. Nothing listens on the DB port there, so an
+      #   omitted DB_HOST does not fall back to your database — it falls back to a connection refused, and only
+      #   once something first touches the DB (Hikari is lazy). The guard turns that into a compose error before
+      #   the container is created. Same for DB_USER: the fallback names the database, which is only sometimes
+      #   also the account name.
+      #
+      # ⚠ [OPTIONAL local-db] .env still needs DB_HOST even with the sidecar overlay. compose interpolates each
+      #   -f file SEPARATELY and then merges, so this :? is evaluated before the overlay's override. Write
+      #   DB_HOST=mysql in .env for the sidecar path. GENERATOR: drop this paragraph with the overlay.
+      DB_HOST: ${DB_HOST:?set DB_HOST in .env. The application.yml fallback is `localhost`, which inside this container means the container itself — it will never reach an external MySQL}
       DB_PORT: ${DB_PORT:-3306}
-      DB_USER: ${DB_USER:?set DB_USER in .env (application.yml has no fallback)}
+      DB_USER: ${DB_USER:?set DB_USER in .env (the application.yml fallback is the database name, not necessarily this deployment's account)}
       # The schema name is hardcoded in application.yml's JDBC URL — only host/port/user/password change here.
       # To change anything else, override the whole URL with SPRING_DATASOURCE_URL.
 
       # ★ WHY THIS GUARD EXISTS (details in docs/secrets.md):
-      #   the placeholder in application.yml has no fallback, but the @ConfigurationProperties Binder LEAVES an
-      #   unresolved ${...} as a literal string (ignoreUnresolvablePlaceholders=true). So omitting DB_PASSWORD
-      #   lets the app start completely normally, banner and all — it does NOT die loudly the way a missing
-      #   OAUTH_ISSUER_URI does.
+      #   the @ConfigurationProperties Binder LEAVES an unresolved ${...} as a literal string
+      #   (ignoreUnresolvablePlaceholders=true). So omitting DB_PASSWORD lets the app start completely normally,
+      #   banner and all — it does NOT die loudly the way a missing OAUTH_ISSUER_URI does.
       #
       #   ⚠ And it surfaces LATE: Hikari is lazy and nothing probes the database at startup, so a wrong password
-      #   still boots and fails when a module first touches the DB. This guard and setup.sh's check are the only
-      #   early warnings left. Do not remove them.
-      DB_PASSWORD:           ${DB_PASSWORD:?set DB_PASSWORD in .env (application.yml has no fallback)}
+      #   still boots and fails when a module first touches the DB. This guard and setup.sh's external-DB check
+      #   are the only early warnings left. Do not remove them.
+      #
+      #   Whether application.yml carries a password fallback at all depends on the connection mode
+      #   (db-vendors.yaml): a DOCKER database gets ${DB_PASSWORD:<generated>} — throwaway, and it must match the
+      #   compose file — while an EXISTING server gets ${DB_PASSWORD} with no fallback, because there the value is
+      #   a live secret that must not be committed. The guard is right either way: with a fallback it stops a
+      #   deployment from silently using the generated demo password against a real server.
+      DB_PASSWORD:           ${DB_PASSWORD:?set DB_PASSWORD in .env}
 
       JAVA_OPTS: ${JAVA_OPTS:--XX:MaxRAMPercentage=75.0}
 

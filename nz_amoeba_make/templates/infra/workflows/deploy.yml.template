@@ -37,6 +37,11 @@ on:
         type: choice
         options:
           - 'docker-compose.yml'
+          # ★ GENERATOR: [OPTIONAL local-db] DELETE THE NEXT LINE when docker-compose.local-db.yml is not
+          #   emitted (existing DB server, h2, or other). This is the one local-db reference that is not merely
+          #   misleading: a `type: choice` option is SELECTABLE, so an operator picking it runs
+          #   `docker compose -f docker-compose.yml -f docker-compose.local-db.yml` against a file that does not
+          #   exist and the deploy fails at the compose step — on the production host, after CI went green.
           - 'docker-compose.yml:docker-compose.local-db.yml'
 
   # `workflows:` must match ci.yml's `name:` CHARACTER FOR CHARACTER — otherwise the trigger silently never

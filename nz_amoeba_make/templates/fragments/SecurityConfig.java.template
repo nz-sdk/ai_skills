@@ -21,7 +21,6 @@
 // can never verify anything. So those two are rejected here, loudly, with the fix in the message.
 package {{PKG}};
 
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -31,7 +30,6 @@ import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
 
 @Configuration
 public class SecurityConfig {
@@ -118,45 +116,23 @@ public class SecurityConfig {
      *
      * <p>THIS is the seam to edit when the service plane gains its own authentication.
      *
-     * <p><b>Embedded auth (capability {@code embedded_auth}, off unless selected).</b> The login form is added
-     * HERE rather than in a chain of its own, because this chain already matches {@code /login} and is already
-     * {@code permitAll}. A separate chain would need an order number wedged between the existing two, and
-     * renumbering them also reorders the {@code /platform/**} rules above, whose order is load-bearing.
+     * <p><b>STATELESS is unconditional.</b> This app is a Resource Server only — token issuance belongs to an
+     * EXTERNAL Authorization Server (the one named by {@code OAUTH_ISSUER_URI}), so there is no login here, no
+     * session to keep, and no reason for the policy to be conditional. {@code ResourceServerOnlyTest} pins the
+     * absence of the form: a login form reappearing means the service plane silently became stateful again.
      *
-     * <p><b>The session policy flips with it, and must.</b> {@code STATELESS} installs a no-op
-     * {@code SecurityContextRepository}, so a form login on this chain would authenticate and immediately forget
-     * — the redirect back to {@code /oauth2/authorize} would arrive unauthenticated and bounce to {@code /login}
-     * forever. {@code IF_REQUIRED} still creates no session for ordinary service traffic (everything here is
-     * {@code permitAll}); the Authorization Server chain then reads that same {@code HttpSession}.
-     *
-     * <p>CSRF stays disabled either way — module routes may be POST and would break otherwise. That leaves
-     * {@code POST /login} without CSRF protection (login-CSRF). Accepted for an internal control plane; it is a
-     * reason not to expose the form publicly.
-     *
-     * <p>With embedded auth NOT selected the provider is empty and every line below behaves exactly as it did
-     * before the capability existed.
+     * <p>CSRF stays disabled — module routes may be POST and would break otherwise. With {@code permitAll} and no
+     * session there is nothing for CSRF to protect here.
      */
     @Bean
     @Order(2)
-    SecurityFilterChain serviceSecurityFilterChain(
-            HttpSecurity http,
-            ObjectProvider<AuthenticationSuccessHandler> loginSuccessHandler) throws Exception {
-        AuthenticationSuccessHandler successHandler = loginSuccessHandler.getIfAvailable();
-        boolean embeddedAuth = successHandler != null;
-
+    SecurityFilterChain serviceSecurityFilterChain(HttpSecurity http) throws Exception {
         http
             // Modules may declare POST routes; with permitAll and no session, CSRF has nothing to protect.
             .csrf(csrf -> csrf.disable())
-            .sessionManagement(s -> s.sessionCreationPolicy(
-                    embeddedAuth ? SessionCreationPolicy.IF_REQUIRED : SessionCreationPolicy.STATELESS))
+            .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
 
-        if (embeddedAuth) {
-            // No loginPage() — DefaultLoginPageGeneratingFilter renders /login, so there is no template engine,
-            // controller, or extra dependency to carry.
-            http.formLogin(form -> form.successHandler(successHandler))
-                .logout(Customizer.withDefaults());
-        }
         return http.build();
     }
 }

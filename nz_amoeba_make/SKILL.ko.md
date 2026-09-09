@@ -27,10 +27,6 @@
   동반 옵션), `requires_when`(사용자가 값을 제공해야 하는 조건부 요구 — 미충족 시 차단), `build_deps`,
   `fragment`. **이 파일을 훑어 질문과 생성을 구동한다.**
 - **`reference/db-vendors.yaml`** — 데이터베이스 서브플로우(벤더 + 기존 서버/docker/임베디드).
-- **`reference/auth-stores.yaml`** — `embedded_auth` capability 의 사용자 저장소 서브플로우(`memory` | `jdbc`).
-  `db-vendors.yaml` 이 `subflow: db` 로 도달되는 것과 똑같이 `subflow: authstore` 로 도달한다.
-  **`embedded_auth` 는 토큰 서명 키를 MCP RCE 표면 안에 두게 된다** — 제시할 때 그 `security` 노트를 그대로
-  인용하고, 절대 기본값으로 제시하지 말 것.
 - **`reference/protean-capabilities.md`** — 사람이 읽는 서술 + 8가지 등록 메커니즘(배경 지식).
 - **`templates/`** — 파일 템플릿 + capability 별 코드 프래그먼트 + 벤더별 DB 템플릿.
 
@@ -148,16 +144,8 @@
 옵션마다 **전체 프로퍼티 키 + 기본값**을 표시하고, `desc` 만 한국어로 옮기고, 질문당 4개 이하로 쪼개고,
 `advanced`/`requires`/`requires_when` 을 지킨다. 같은 capability 가 `subflow:` 도 선언했다면 **그것을 먼저** 돌려
 서브플로우의 답이 이미 정해진 뒤에 옵션을 묻는다.
-**현재 `options:` 를 가진 capability 는 둘이다.** 이 목록을 믿지 말고 yaml 에서 다시 세라 — 세 번째가 추가되는
+**현재 `options:` 를 가진 capability 는 하나다.** 이 목록을 믿지 말고 yaml 에서 다시 세라 — 두 번째가 추가되는
 순간 낡은 정보가 되며, 그것이 아래 규칙 4가 막으려는 바로 그 실패다.
-- `embedded_auth` — `subflow: authstore` 로 사용자 스토어를 고른 뒤, 9개 `options:` 가 `amoeba.auth.*` 의
-  나머지를 덮는다: 토큰 수명 2종, 서명키 경로, 클라이언트 등록 2건, 그리고 refresh 3종
-  (`refresh-token-enabled` / `-ttl` / `authorization-store`). `enabled`/`store`/`users` 는 이미 정해져
-  있으므로(선택 자체와 서브플로우로) 그 셋만 묻지 않는다.
-  refresh 3종에는 함정이 둘 있다. **`authorization-store` 는 `store` 가 아니다** — 하나는 사용자명을, 다른
-  하나는 발급된 토큰을 담고 서로 독립적으로 고른다. 질문 문구를 서로 헷갈리지 않게 쓴다. 그리고
-  `refresh-token-enabled=true` + `authorization-store=memory` 조합은 허용하되 **경고**한다 — 재시작마다 모든
-  refresh token 이 무효화되어 설정한 ttl 이 보이는 대로 동작하지 않는다.
 - `interface_spec_validator` — `amoeba.skeleton.*` 과 `amoeba.interface.*` 아래 `options:` 4개: 서비스 계층
   형태, 스켈레톤의 데이터 접근, 스펙이 그 둘을 덮어쓸 수 있는지, 그리고 L3 규칙의 킬 스위치.
   `amoeba.skeleton.service-interface` 는 이 프로젝트의 서비스 계층 표준이고, 그 `note` 는 **답이 기본값이어도
@@ -182,7 +170,8 @@ module-store 백엔드가 필요하므로, 셋 다 걸러진다.)
 
 ### 6. 고급 옵션 — 표면을 기능 GROUP 단위로 하나씩 훑는다 (대화형)
 
-이 단계가 걷는 것은 **`groups:` 뿐이다.** capability 자신의 `options:`(예: `embedded_auth` 의 `amoeba.auth.*`)는
+이 단계가 걷는 것은 **`groups:` 뿐이다.** capability 자신의 `options:`(예: `interface_spec_validator` 의
+`amoeba.skeleton.*`)는
 그 키를 소유한 capability 와 함께 step 5 에서 이미 물었다 — `data_access`·`secured_mcp` 를 step 5 에서 다시 묻지
 않는 것과 같은 이유로, 여기서 다시 묻지 않는다.
 
@@ -236,10 +225,10 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 - **requires_when 충족** — `requires_when` 을 가진 모든 옵션에 대해 각 규칙을 평가한다. 그 `when` 조건이 모두
   성립하면 `needs` 키가 빈 값이 아니어야 한다. 자동으로 채울 수 없다(환경별 경로/식별자다) →
   **타이핑으로 묻고, 그래도 비어 있으면 생성을 차단한다.**
-  **capability 에 선언된 옵션도 여기 포함된다** — `amoeba.auth.service-client-id` 는
-  `amoeba.auth.service-client-secret` 을 요구한다. `EmbeddedAuthServerConfig` 가 둘 다 비어있지 않을 때만 그
-  클라이언트를 등록하고, 아니면 **아무 말 없이 등록하지 않기** 때문이다. 자격증명 쌍의 한쪽만 채워진 경우가
-  여기서 유일하게 **에러가 전혀 나지 않는** 사례라, CI 가 처음 401 을 받을 때가 아니라 생성 시점에 잡아야 한다.
+  **`groups:` 아래 옵션만이 아니라 capability 에 선언된 옵션도 여기 포함된다.** 특히 자격증명 쌍을 조심한다
+  (`protean.worker.db.admin-username` / `admin-password`) — 쌍의 한쪽만 채워진 경우가 여기서 유일하게
+  **에러가 전혀 나지 않는** 사례다. 기능이 아무 말 없이 등록되지 않으므로, CI 가 처음 401 을 받을 때가 아니라
+  생성 시점에 잡아야 한다.
 - **enum 범위** — 모든 enum 값이 그 `allowed` 안에 있는지.
 - **sidecar worker runtime 은 트랙별 아티팩트가 필요하다** — `protean.worker.runtime=sidecar` 는 bootJar 를
   펼치는 embed 런타임을 외부 아티팩트로 대체하며, 필요한 키가 격리 모드에 따라 다르다:
@@ -314,11 +303,11 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   `protean.*` 키**를 `protean:` 아래에 묶어 주입하고, 선택한 벤더의 `spring.datasource` 블록을 더한다.
   `protean.*` 가 **아닌** `requires_when` 의 `needs` 키는 자기 최상위 블록으로 들어가며 절대 `protean:` 아래로
   가지 않는다 — 예: `spring.security.oauth2.resourceserver.jwt.issuer-uri` 는 `spring.security` 아래에 놓인다.
-  **capability 의 `options:` 도 같은 규칙을 따른다**: `embedded_auth` 의 키는 `amoeba.auth.*` 이므로 최상위
-  `amoeba:` 블록을 이룬다. `protean:` 아래에 넣으면 아무것도 바인딩되지 않는다 —
-  `@ConfigurationProperties("amoeba.auth")` 가 조용히 기본값만 보게 되어 embedded auth 는 꺼진 채로 남고, 앱은
-  멀쩡해 보이는 상태로 기동한다.
-  그 키는 `${OAUTH_ISSUER_URI}` 로 **fallback 없이** 쓴다(값이 없으면 기동이 중단돼야 한다). 반면 *광고되는*
+  **capability 의 `options:` 도 같은 규칙을 따른다**: `interface_spec_validator` 의 키는 `amoeba.skeleton.*` /
+  `amoeba.interface.*` 이므로 최상위 `amoeba:` 블록을 이룬다. `protean:` 아래에 넣으면 아무것도 바인딩되지
+  않는다 — `@Value`/`@ConfigurationProperties` 조회가 조용히 기본값만 보게 되고, 앱은 멀쩡해 보이는 상태로
+  기동한다.
+  issuer 는 `${OAUTH_ISSUER_URI}` 로 **fallback 없이** 쓴다(값이 없으면 기동이 중단돼야 한다). 반면 *광고되는*
   placeholder 는 모두 fallback 을 유지한다. 광고되는 값에 host 나 port 를 하드코딩하지 말 것:
   `mcp.authorization.resource` 는 `http://${SERVER_HOST:localhost}:${SERVER_PORT:8080}/platform/mcp` 로 쓰고,
   템플릿의 `server.port: ${SERVER_PORT:8080}` 를 유지해 바인드 포트와 광고 포트가 어긋나지 않게 한다
@@ -353,7 +342,16 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
     말 것. Boot 의 MVC 자동설정을 꺼버린다.
   - `<<fragment-checks>>` 에 `Class.forName("{{PKG}}.support.BaseService")` 한 줄을 추가한다.
 - **fragment** — 선택된 `templates/fragments/*.template` 를 각각 `src/main/java/{{PKG_PATH}}/` 로 복사하고,
-  실제 클래스명으로 이름을 바꾸고, 이름들을 치환한다.
+  실제 클래스명으로 이름을 바꾸고, 이름들을 치환한다. **`test_fragment`** 를 가진 키는 그 파일을
+  `src/test/java/{{PKG_PATH}}/` 로도 내보낸다 — 단 **클래스명은 그대로 둔다**(main fragment 와 반대다).
+  프로젝트별 정책이 아니라 구조적 보증을 단정하는 테스트라 이름을 바꿀 근거가 없다. 현재는
+  `protean.mcp.authorization.resource` → `ResourceServerOnlyTest` 하나이며, 이 앱이 **토큰을 검증만 하고 발급하지
+  않는다**는 것을 못박는다 — 앱이 *갖고 있지 않은 것*에 있는 보증이라 main 소스를 아무리 읽어도 확인할 수 없다.
+- **`emit` 지시** — `emit` 을 가진 키·capability 는 라이브러리 기본값이 비어 있어도 반드시 써야 하는 설정을
+  지정한다. `secured_mcp` 는 `scopes-supported: [mcp.read, mcp.write, mcp.admin]` 과
+  `bearer-methods-supported: [header]` 를 요구한다. `SecurityConfig` 가 정확히 그 세 스코프 이름으로 게이팅하므로,
+  광고하지 않으면 클라이언트가 무엇을 요청해야 할지 알 수 없는 디스커버리 문서를 내보내게 된다.
+  빠뜨리면 `ResourceServerOnlyTest` 가 실패한다.
 - **fragment bundle** — `fragment_bundle` 을 가진 capability 는 `templates/fragments/<dir>/` 전체를 한 번에
   내보낸다. 규칙 4개, 각각 단일 fragment 의 정반대다:
   - 각 멤버는 자기 `to:` 에 따라 `src/<main|test>/java/{{PKG_PATH}}/<sub-package>/` 로 간다.

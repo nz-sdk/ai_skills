@@ -8,8 +8,7 @@
 스킬이 `prototype/<name>/` 을 생성할 때 가져다 쓰는 원본 템플릿입니다. **그대로 복사되지 않습니다** — 생성
 엔진이 플레이스홀더를 치환하고, 선택된 `protean.*` 키를 주입하고, 선택된 capability 에 해당하는 블록만
 포함시킵니다. 옵션 표면 자체는 `../reference/protean-options.yaml`(설정 키),
-`../reference/db-vendors.yaml`(데이터베이스 서브플로우), `../reference/auth-stores.yaml`(사용자 저장소
-서브플로우) 에 있습니다.
+`../reference/db-vendors.yaml`(데이터베이스 서브플로우) 에 있습니다.
 
 ## 플레이스홀더
 

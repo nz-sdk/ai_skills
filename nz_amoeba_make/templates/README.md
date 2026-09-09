@@ -4,8 +4,8 @@
 
 Source templates the skill adapts when generating `prototype/<name>/`. They are **not** copied verbatim — the
 generation engine substitutes placeholders, injects selected `protean.*` keys, and includes only the blocks for
-selected capabilities. The option surface itself lives in `../reference/protean-options.yaml` (config keys),
-`../reference/db-vendors.yaml` (database sub-flow) and `../reference/auth-stores.yaml` (user-store sub-flow).
+selected capabilities. The option surface itself lives in `../reference/protean-options.yaml` (config keys) and
+`../reference/db-vendors.yaml` (database sub-flow).
 
 ## Placeholders
 

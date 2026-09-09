@@ -26,10 +26,6 @@ handful of choices. The full catalog is data-driven:
   `requires` (forced companions), `requires_when` (conditional requirement the user must supply — blocks when
   unmet), `build_deps`, `fragment`. **Walk this to drive the questions and generation.**
 - **`reference/db-vendors.yaml`** — the database sub-flow (vendor + existing-server/docker/embedded).
-- **`reference/auth-stores.yaml`** — the user-store sub-flow for the `embedded_auth` capability (`memory` |
-  `jdbc`). Reached via `subflow: authstore`, exactly as `db-vendors.yaml` is reached via `subflow: db`.
-  **`embedded_auth` puts the token signing key inside the MCP RCE surface** — quote its `security` note verbatim
-  when offering it, and never present it as the default.
 - **`reference/protean-capabilities.md`** — human narrative + the 8 registration mechanisms (background).
 - **`templates/`** — file templates + per-capability code fragments + per-vendor DB templates.
 
@@ -142,16 +138,8 @@ keys are asked HERE — step 6 walks `groups:`, and these are not in a group, so
 never asked at all. Same rules as step 6: show each option's **full property key + default**, translate only the
 `desc`, split into ≤4-option questions, and honour `advanced`/`requires`/`requires_when`. Run it after any
 `subflow:` the capability also declares, so the sub-flow's answer is already known.
-**Two capabilities carry `options:` today.** Recount them in the yaml rather than trusting this list — it goes
-stale the moment a third is added, which is the same failure mode rule 4 below exists to prevent.
-- `embedded_auth` — `subflow: authstore` picks the user store, then its nine `options:` cover the rest of
-  `amoeba.auth.*`: token lifetimes, signing-key path, the two client registrations, and the refresh-token trio
-  (`refresh-token-enabled` / `-ttl` / `authorization-store`). Its `enabled`/`store`/`users` are already settled (by
-  the selection itself and by the sub-flow), so those three are the only ones you do not ask.
-  Two traps in that trio. **`authorization-store` is not `store`** — one holds usernames, the other holds issued
-  tokens, and they are independently chosen; word the questions so they cannot be mistaken for each other.
-  And `refresh-token-enabled=true` with `authorization-store=memory` is legal but WARNS: every restart voids
-  every refresh token, so the configured ttl is not what it appears to be.
+**One capability carries `options:` today.** Recount in the yaml rather than trusting this list — it goes
+stale the moment a second is added, which is the same failure mode rule 4 below exists to prevent.
 - `interface_spec_validator` — four `options:` under `amoeba.skeleton.*` and `amoeba.interface.*`: the
   service-layer shape, the skeleton's data access, whether a spec may override either, and the L3 rule's kill
   switch. `amoeba.skeleton.service-interface` is the project's service-layer standard, and its note says to write
@@ -176,7 +164,8 @@ Recount this list against the yaml rather than trusting the number written here 
 capability is added, and a stale total is exactly the failure mode rule 4 exists to prevent.
 
 ### 6. Advanced options — WALK the surface, one functional GROUP at a time (interactive)
-This step walks **`groups:` only**. A capability's own `options:` (e.g. `embedded_auth`'s `amoeba.auth.*`) were
+This step walks **`groups:` only**. A capability's own `options:` (e.g. `interface_spec_validator`'s
+`amoeba.skeleton.*`) were
 asked in step 5 with the capability that owns them — do not re-ask them here, the same way `data_access` and
 `secured_mcp` are not re-offered in step 5.
 
@@ -228,10 +217,10 @@ Check, and fix or stop on each:
 - **requires_when satisfied** — for every option carrying `requires_when`, evaluate each rule: when all its `when`
   conditions hold, the `needs` key must be set to a non-empty value. It cannot be auto-filled (it is an
   environment-specific path/identifier) → **prompt for it (typed), and block generation if still empty.**
-  Options declared on a **capability** count here too — `amoeba.auth.service-client-id` requires
-  `amoeba.auth.service-client-secret`, because `EmbeddedAuthServerConfig` registers that client only when both are
-  non-blank and otherwise registers **nothing, silently**. Half of a credential pair is the one case here that
-  produces no error at all, so it has to be caught at generation rather than when CI first gets a 401.
+  Options declared on a **capability** count here too, not just those under `groups:`. Watch credential pairs in
+  particular (`protean.worker.db.admin-username` / `admin-password`): half a pair is the one case here that can
+  produce **no error at all** — the feature registers nothing, silently — so it has to be caught at generation
+  rather than when CI first gets a 401.
 - **enum in range** — every enum value is one of its `allowed` values.
 - **sidecar worker runtime needs its artifact (per track)** — `protean.worker.runtime=sidecar` replaces the
   bootJar-exploding embed runtime with an external artifact, and the required key differs by isolation mode:
@@ -304,11 +293,11 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
   `protean.*` key** grouped under `protean:`, plus the `spring.datasource` block for the chosen vendor. A
   `requires_when` `needs` key that is **not** `protean.*` goes into its own top-level block, never under
   `protean:` — e.g. `spring.security.oauth2.resourceserver.jwt.issuer-uri` lands under `spring.security`.
-  **The same rule governs a capability's `options:`**: `embedded_auth`'s keys are `amoeba.auth.*`, so they form a
-  top-level `amoeba:` block. Putting them under `protean:` binds nothing —
-  `@ConfigurationProperties("amoeba.auth")` would silently see defaults, embedded auth would stay off, and the app
-  would start looking correct. Write
-  that one as `${OAUTH_ISSUER_URI}` **with no fallback** (an unset value must abort startup) while every
+  **The same rule governs a capability's `options:`**: `interface_spec_validator`'s keys are `amoeba.skeleton.*` /
+  `amoeba.interface.*`, so they form a top-level `amoeba:` block. Putting them under `protean:` binds nothing —
+  the `@Value`/`@ConfigurationProperties` lookups would silently see defaults and the app would start looking
+  correct. Write the issuer
+  as `${OAUTH_ISSUER_URI}` **with no fallback** (an unset value must abort startup) while every
   *advertised* placeholder keeps a fallback. Never hardcode a host or port into an advertised value: write
   `mcp.authorization.resource` as `http://${SERVER_HOST:localhost}:${SERVER_PORT:8080}/platform/mcp`, and keep
   the template's `server.port: ${SERVER_PORT:8080}` so the bind port and the advertised port cannot drift
@@ -342,7 +331,16 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
     with — and never add `@EnableWebMvc`, which would switch off Boot's MVC autoconfiguration.
   - Add a `Class.forName("{{PKG}}.support.BaseService")` line to `<<fragment-checks>>`.
 - **fragments** — copy each selected `templates/fragments/*.template` into `src/main/java/{{PKG_PATH}}/`, rename
-  to a real class, substitute names.
+  to a real class, substitute names. A key carrying **`test_fragment`** also emits that one into
+  `src/test/java/{{PKG_PATH}}/` — **keep its class name** (unlike a main fragment): the test asserts a structural
+  guarantee, not a project-specific policy, so there is nothing to rename it after. Today that is
+  `protean.mcp.authorization.resource` → `ResourceServerOnlyTest`, which pins that this app **verifies tokens and
+  never issues them** — a guarantee that lives in what the app does not carry, so no reading of the main sources
+  can confirm it.
+- **`emit` instructions** — a key or capability carrying `emit` names config that must be written even though its
+  library default is empty. `secured_mcp` requires `scopes-supported: [mcp.read, mcp.write, mcp.admin]` and
+  `bearer-methods-supported: [header]`: `SecurityConfig` gates on exactly those three scope names, so leaving them
+  unadvertised ships a discovery document a client cannot act on. `ResourceServerOnlyTest` fails if you skip it.
 - **fragment bundles** — a capability carrying `fragment_bundle` emits a whole `templates/fragments/<dir>/` at
   once. Four rules, each the opposite of a single fragment's:
   - each member goes to `src/<main|test>/java/{{PKG_PATH}}/<sub-package>/` per its `to:`, **not** flat into

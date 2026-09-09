@@ -1,0 +1,93 @@
+# protean-{{NAME}}-sample — the app alone. The database is an ALREADY-RUNNING server.
+#
+#   cp .env.example .env             # OAUTH_ISSUER_URI + DB_HOST + DB_USER + DB_PASSWORD (all required)
+#   docker compose up -d --build
+#   docker compose logs -f
+#   docker compose ps                # wait for STATUS to read (healthy)
+#   docker compose down              # the module-store volume survives
+#   docker compose down -v           # ★ also discards every deployed module
+#
+# To run standalone without an external database, add the sidecar overlay:
+#   docker compose -f docker-compose.yml -f docker-compose.local-db.yml up -d --build
+# (or put COMPOSE_FILE=docker-compose.yml:docker-compose.local-db.yml in .env)
+#
+# Rationale and troubleshooting: docs/docker.md   Credentials: docs/secrets.md
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: protean-{{NAME}}-sample:${IMAGE_TAG:-local}
+    container_name: {{NAME_KEBAB}}
+    restart: unless-stopped
+    # ⚠ unless-stopped only revives an EXITED container. One that keeps running while unhealthy is not
+    #   restarted — check STATUS with `docker compose ps` yourself.
+
+    ports:
+      # ★ THE SAME NUMBER ON BOTH SIDES. Not a mistake.
+      #   protean.mcp.authorization.resource is assembled as
+      #   http://${SERVER_HOST}:${SERVER_PORT}/platform/mcp, and inside the container SERVER_PORT is the BIND
+      #   port. Publish them differently (say "9300:{{PORT}}") and discovery hands MCP clients
+      #   http://<host>:{{PORT}}/platform/mcp while the host actually listens on 9300, where nothing answers.
+      #   This is what application.yml's `# ONE port concept` comment requires.
+      #   To change the external port, change SERVER_PORT alone — OAUTH_ISSUER_URI names an EXTERNAL
+      #   Authorization Server, so it does not move with this port.
+      - "${SERVER_PORT:-{{PORT}}}:${SERVER_PORT:-{{PORT}}}"
+
+    environment:
+      SERVER_PORT: ${SERVER_PORT:-{{PORT}}}
+      # The ADVERTISED hostname, not a bind address (that would be server.address). Behind a reverse proxy, put
+      # the name the client sees.
+      SERVER_HOST: ${SERVER_HOST:-localhost}
+
+      # ★ REQUIRED, and ★ NOT this app's own address — it is the EXTERNAL Authorization Server's issuer.
+      #   It must equal that server's issuer identifier character for character. Get it wrong and the app starts
+      #   perfectly while every request 401s — the hardest failure in this project to diagnose.
+      #   The :? guard stops compose before the container is even created, so the cause is visible immediately
+      #   instead of being dug out of the logs.
+      OAUTH_ISSUER_URI: ${OAUTH_ISSUER_URI:?set OAUTH_ISSUER_URI in .env. It is the EXTERNAL Authorization Server's issuer and must match its issuer identifier character for character, e.g. http://auth.example.internal:9300 (see .env.example)}
+
+      # ★ DB_HOST and DB_USER carry :? guards too. application.yml has no fallback for them, and an unset value
+      #   is just as silent as DB_PASSWORD — the Binder leaves the literal "${DB_HOST}" in place, so it surfaces
+      #   as UnknownHostException rather than "you forgot a variable".
+      #
+      # ⚠ .env still needs DB_HOST even when using the sidecar overlay. compose interpolates each -f file
+      #   SEPARATELY and then merges, so this :? is evaluated before the overlay's override. Write DB_HOST=mysql
+      #   in .env for the sidecar path (see .env.example). The overlay's override still applies — leave an
+      #   external host in .env and add the overlay, and the app talks to the sidecar.
+      DB_HOST: ${DB_HOST:?set DB_HOST in .env. It is `mysql` when using the sidecar overlay (application.yml has no fallback)}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USER: ${DB_USER:?set DB_USER in .env (application.yml has no fallback)}
+      # The schema name is hardcoded in application.yml's JDBC URL — only host/port/user/password change here.
+      # To change anything else, override the whole URL with SPRING_DATASOURCE_URL.
+
+      # ★ WHY THIS GUARD EXISTS (details in docs/secrets.md):
+      #   the placeholder in application.yml has no fallback, but the @ConfigurationProperties Binder LEAVES an
+      #   unresolved ${...} as a literal string (ignoreUnresolvablePlaceholders=true). So omitting DB_PASSWORD
+      #   lets the app start completely normally, banner and all — it does NOT die loudly the way a missing
+      #   OAUTH_ISSUER_URI does.
+      #
+      #   ⚠ And it surfaces LATE: Hikari is lazy and nothing probes the database at startup, so a wrong password
+      #   still boots and fails when a module first touches the DB. This guard and setup.sh's check are the only
+      #   early warnings left. Do not remove them.
+      DB_PASSWORD:           ${DB_PASSWORD:?set DB_PASSWORD in .env (application.yml has no fallback)}
+
+      JAVA_OPTS: ${JAVA_OPTS:--XX:MaxRAMPercentage=75.0}
+
+      # PROTEAN_MODULESTORE_DIR is already in the image ENV — not repeated here.
+
+    volumes:
+      # The deployed-module store (PROTEAN_MODULESTORE_DIR). Lose it and every deployed module is gone.
+      - {{NAME_KEBAB}}-modules:/var/lib/protean/modules
+
+    # healthcheck is INHERITED from the Dockerfile's HEALTHCHECK. Do not restate it here — compose's CMD-SHELL
+    # is /bin/sh (dash), where the bash-only /dev/tcp trick fails silently.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  {{NAME_KEBAB}}-modules:

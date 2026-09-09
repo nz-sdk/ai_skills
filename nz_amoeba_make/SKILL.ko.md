@@ -105,7 +105,7 @@
 - **격리 모드** — `protean.isolation.mode`: in-process / worker / container.
 - **MCP 표면** — `protean.mcp.enabled` on/off.
 - **MCP OAuth** — `/platform/**` 을 OAuth2 Resource Server 로 보호할지? (MCP 가 켜졌을 때만 묻는다.) 예 ⇒
-  `secured_mcp` capability 를 선택한 것과 동일하다. `mcp.authorization.resource` 를 묻게 되고, 그것이 step 7 의
+  `secured_mcp` capability 를 선택한 것과 동일하다. `mcp.authorization.resource` 를 묻게 되고, 그것이 step 8 의
   JWT issuer 프롬프트로 연쇄되며 security starter 를 끌어온다. 아니오 ⇒ MCP 표면이 열려 있는 상태 — 로컬 데모
   전용이며, README 가 그 사실을 반드시 밝혀야 한다.
 - **데이터 접근** — 모듈이 데이터베이스를 필요로 하는가? (예 → step 4 의 DB 서브플로우. in-process 로 강제됨.)
@@ -134,20 +134,20 @@
 **interface spec validator**. 각 항목의 `requires` 를 적용한다(예: 커스텀 툴 → `mcp.enabled` 강제).
 
 대부분은 `fragment` 를 떨어뜨리지만, **전부가 그렇지는 않다 — 목록을 fragment 가 있는 항목으로 줄이지 말 것.**
-`fragment` 가 없는 capability 는 *관문*이다. `secured_mcp` 는 사용자가 step 6 에서 `advanced` 키
+`fragment` 가 없는 capability 는 *관문*이다. `secured_mcp` 는 사용자가 step 7 에서 `advanced` 키
 `mcp.authorization.resource` 를 찾아내야 하는 대신 여기서 "MCP 표면을 보호한다"를 고를 수 있게 존재하며, 그
-`requires` 의 bare key 는 그 값을 물어야 함을 뜻한다(그것이 다시 step 7 의 JWT issuer 프롬프트를 강제한다).
+`requires` 의 bare key 는 그 값을 물어야 함을 뜻한다(그것이 다시 step 8 의 JWT issuer 프롬프트를 강제한다).
 `scope_admin` 은 문서화 전용이다. 어떤 항목은 대신 **`fragment_bundle`**(여러 파일을 서브패키지로)을 가질 수
 있는데, 나머지와 똑같이 제시한다. capability 가 간접적으로 가리키는 fragment 를 다시 내보내지 말 것 —
 `secured_mcp` 는 옵션을 통해 `SecurityConfig` 를 끌어오므로 한 번만 내보내는 것이 맞다.
 
 **둘은 step 3 에서 이미 결정됐다 — 여기서 다시 묻지 말 것:** `data_access`(step 3 의 "데이터 접근")와
 `secured_mcp`(step 3 의 "MCP OAuth"). step 3 의 답을 그대로 관통시킨다 — MCP OAuth 에 예라고 했으면 여전히
-`mcp.authorization.resource` 를 묻고 step 7 의 issuer 프롬프트로 연쇄된다. 여기서 골랐을 때와 똑같이.
+`mcp.authorization.resource` 를 묻고 step 8 의 issuer 프롬프트로 연쇄된다. 여기서 골랐을 때와 똑같이.
 
 **`options:` 를 가진 capability 는 그것까지 걸어야 끝난 것이다.** 설정 네임스페이스를 통째로 소유한 capability 는
-그것을 group 과 **같은 레코드 형태**의 `options:` 목록으로 선언하며, 그 키들은 **여기서** 묻는다 — step 6 은
-`groups:` 를 걷고 이것들은 group 이 아니므로, 여기서 건너뛰면 **영영 묻지 않게 된다**. 규칙은 step 6 과 같다:
+그것을 group 과 **같은 레코드 형태**의 `options:` 목록으로 선언하며, 그 키들은 **여기서** 묻는다 — step 7 은
+`groups:` 를 걷고 이것들은 group 이 아니므로, 여기서 건너뛰면 **영영 묻지 않게 된다**. 규칙은 step 7 과 같다:
 옵션마다 **전체 프로퍼티 키 + 기본값**을 표시하고, `desc` 만 한국어로 옮기고, 질문당 4개 이하로 쪼개고,
 `advanced`/`requires`/`requires_when` 을 지킨다. 같은 capability 가 `subflow:` 도 선언했다면 **그것을 먼저** 돌려
 서브플로우의 답이 이미 정해진 뒤에 옵션을 묻는다.
@@ -175,7 +175,45 @@ module-store 백엔드가 필요하므로, 셋 다 걸러진다.)
 여기 적힌 숫자를 믿지 말고 yaml 을 세라 — capability 가 추가될 때마다 개수가 움직이고, 낡은 총계는 바로 규칙 4가
 막으려는 그 실패다.
 
-### 6. 고급 옵션 — 표면을 기능 GROUP 단위로 하나씩 훑는다 (대화형)
+### 6. 배포 인프라 (선택 1개)
+
+**생성된 프로젝트가 자기 배포를 어디까지 안고 갈지**를 묻는다. 질문 하나, 네 수준이며 각각이 앞 수준의
+상위집합이다. 기본값은 **`container`** — 조직이나 하드웨어를 아무것도 가정하지 않고, 이미지와 compose 파일은
+어디서나 쓸모가 있다.
+
+| 수준 | 생성물 (전부 `templates/infra/` 에서) |
+|---|---|
+| `none` | 없음. 호스트에서 `setup.sh` 로 끝 |
+| `container` | `Dockerfile` · `docker-compose.yml` · `.env.example` · `.dockerignore` · `.gitattributes` · `docs/docker.md` |
+| `container + CI` | 위 + `.github/workflows/ci.yml` · `docs/ci-cd.md` |
+| `full` | 위 + `.github/workflows/deploy.yml` · `.github/runner/{docker-compose.yml,.env.example}` · `docs/secrets.md` |
+
+**마지막 수준이 무엇을 감수하는 것인지 고르기 전에 말해 줄 것.** `full` 은 "파일이 더 많은" 정도가 아니다 —
+**self-hosted 러너 자신의 호스트 Docker** 로 배포하며, free plan private repo 에서는 **승인 게이트를 쓸 수 없다**
+(브랜치 보호·룰셋·Environment 보호 규칙이 모두 `403 Upgrade to GitHub Pro`). 즉 CI 가 초록이면 사람 확인 없이
+실배포된다. 그것을 원하지 않는 사용자에게는 `workflow_dispatch` 전용 변형(`workflow_run:` 블록 삭제)을 제시한다.
+
+`full` 은 그 수준에서만 묻는 typed 입력이 둘 더 있다:
+- **저장소 URL** → `{{REPO_URL}}`(예: `https://github.com/<owner>/<repo>`). 러너가 여기에 등록된다.
+- **배포 호스트 러너 이름** → 운영자가 `DEPLOY_RUNNER_NAME` Actions 변수로 저장해야 하는 값.
+  임의로 만들지 말고, `deploy.yml` 이 이 값을 `$RUNNER_NAME` 과 비교해 다르면 배포를 거부한다는 것과, 생성되는
+  파일이 아니라 GitHub UI 에서 설정한다는 것을 설명한다.
+
+이 단계가 **다른 곳을 바꾸는 것 둘** — 놓치기 쉽다:
+
+1. **수준이 `container` 이상이면 `docker-compose.yml` 은 앱의 것이다.** `none` 이면 docker DB 가 지금까지의
+   동작대로 `templates/db/` 의 벤더 compose 를 `docker-compose.yml` 로 쓴다. `container` 이상에서는 그 이름이
+   앱에 가므로, DB 는 `templates/infra/docker-compose.local-db.<vendor>.yml.template` 를 써서
+   `docker-compose.local-db.yml` 로 나간다 — 앱 서비스에 `depends_on` 과 `DB_HOST` 를 덧붙이는 **오버레이**다.
+   같은 이름으로 둘을 내보내면 안 된다.
+2. **`.gitignore` 에 `.env`/`.env.local` 이 붙는다**(`templates/gitignore.template` 에 `[OPTIONAL infra]` 로
+   표시돼 있다).
+
+적용될 수 없으면 질문 자체를 건너뛴다: `h2` 인메모리 + MCP 표면 없음이면 배포할 것이 없다. 인프라 생성은
+`protean.isolation.mode` 와도 무관하다 — `worker`/`container` 격리는 **모듈**이 어디서 도는지에 관한 것이고,
+앱 자체를 어떻게 실어 보내는지가 아니다.
+
+### 7. 고급 옵션 — 표면을 기능 GROUP 단위로 하나씩 훑는다 (대화형)
 
 이 단계가 걷는 것은 **`groups:` 뿐이다.** capability 자신의 `options:`(예: `interface_spec_validator` 의
 `amoeba.skeleton.*`)는
@@ -221,9 +259,9 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 체크는 "이 기본값을 덮어쓰고 싶다"는 뜻일 뿐이고, 그다음 값을 수집한다. enum: 허용값 중에서 고르는 선택
 (기본값을 문구에서 미리 표시).
 
-### 7. 검증 + 의존성 해소
+### 8. 검증 + 의존성 해소
 
-모든 선택(step 3–6)이 끝나면, 아무것도 쓰기 전에 확정된 전체 집합에 대해 **검증 패스**를 돌린다. 각 항목을
+모든 선택(step 3–7)이 끝나면, 아무것도 쓰기 전에 확정된 전체 집합에 대해 **검증 패스**를 돌린다. 각 항목을
 확인하고, 고치거나 멈춘다:
 
 - **requires 충족** — 선택된 모든 옵션/capability 의 `requires` 가 만족되는지. 동반 옵션을 강제로 켜거나,
@@ -301,7 +339,7 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 `build_deps` 와 `fragment` 를 수집하고, DB 서브플로우를 해소하고, **최종 확정 구성을 echo** 한다(옵션 집합 +
 강제된 동반 옵션 + 의존성 + 쓰일 파일들) — 키·값·경로의 원문 목록을 한국어 서술이 감싸는 형태로.
 
-### 8. 생성 (Generate)
+### 9. 생성 (Generate)
 
 `{{NAME}}`, `{{PKG}}`(step 1 에서 입력받은 패키지), `{{PKG_PATH}}`(=`{{PKG}}` 의 `.`→`/`),
 `{{PORT}}`(step 1 에서 입력받은 포트), `{{COORD}}`, `{{VERSION}}`, 그리고 DB 토큰 `{{DB}}`/`{{PW}}` 를
@@ -373,10 +411,32 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   번들마다 `<<fragment-checks>>` 에 `Class.forName` 한 줄을 추가하고(대표 클래스. 예:
   `{{PKG}}.interfacedef.InterfaceSpecValidator`), 번들의 테스트 멤버가 `ConfigMatchesSelectionTest` 와 함께
   `./gradlew test` 로 돌아간다는 점을 기억한다.
-- **infra** — DB docker 경로: `templates/db/*` 에서 `docker-compose.yml`. 그 `init/*.sql` 은 DataSource 의
+- **DB 인프라** — DB docker 경로: `templates/db/*` 에서 `docker-compose.yml`. 그 `init/*.sql` 은 DataSource 의
   **용도**에 따라 다르다: **데이터 접근**용 DataSource 는 `init/01-schema.sql`(`items` 테이블)을 받고,
   **jdbc module-store** 만 받치는 DataSource 는 받지 않는다(Protean 이 자체 store 테이블을 만든다) — items init 을
   생략한다. H2 데이터 접근: `schema.sql`. existing/other: 없음.
+  ⚠ **6 단계가 `none` 일 때만이다.** `container` 이상에서는 `docker-compose.yml` 이 앱의 파일이므로, DB 는
+  `templates/infra/docker-compose.local-db.<vendor>.yml.template` 로 `docker-compose.local-db.yml` 에 쓴다.
+  그 오버레이는 `init/` 마운트를 갖지 않는다(디렉터리 바인드가 엔트리포인트를 깨뜨리는 이유는 그 파일의
+  주석에 있다) — seed SQL 이 필요하면 파일 하나를 직접 마운트한다.
+- **배포 인프라 (6 단계)** — 고른 수준에 따라 `templates/infra/` 에서 복사하며 파일명을 바꾼다:
+  `Dockerfile.template` → `Dockerfile`, `dockerignore.template` → `.dockerignore`,
+  `gitattributes.template` → `.gitattributes`, `env.example.template` → `.env.example`,
+  `docker-compose.app.yml.template` → `docker-compose.yml`, `workflows/*.template` → `.github/workflows/*`,
+  `runner/docker-compose.yml.template` → `.github/runner/docker-compose.yml`,
+  `runner/env.example.template` → `.github/runner/.env.example`, `docs/*.md.template` → `docs/*.md`.
+  `{{NAME}}`, `{{NAME_KEBAB}}`(= `{{NAME}}` 의 `_`→`-`. 컨테이너·볼륨·compose 프로젝트 이름을 만든다),
+  `{{PKG}}`, `{{PORT}}`, `{{DB}}`, 그리고 `full` 수준에서는 `{{REPO_URL}}` 을 치환한다.
+  틀리기 쉬운 것 셋:
+  - **`{{...}}` 가 항상 플레이스홀더는 아니다.** `ci.yml` 에는 `{{.State.Health.Status}}` 가 있고 이것은
+    docker inspect 의 Go 템플릿이다. 스킬 플레이스홀더는 `{{UPPER_SNAKE_CASE}}` 뿐이며, 그 밖의 것은 그대로 둔다.
+  - **load-bearing 한 부분을 "정리"하지 말 것.** 각각이 조용히 나는 실패를 설명하는 주석이다: `java -jar` 금지,
+    build 스테이지에서의 `jmods` 제거, CI 의 `services:`/`--network host` 금지, 아티팩트 업로드의
+    `overwrite: true`, deploy-host 라벨 + `$RUNNER_NAME` 자기검증, 스모크가 `localhost` 가 아니라
+    `SERVER_HOST` 를 치는 것, `ports` 양쪽 숫자를 같게 하는 것.
+  - **사람만 할 수 있는 일을 알려줄 것**: `git update-index --chmod=+x gradlew setup.sh`(`.gitattributes` 가
+    고칠 수 없는 mode 비트), 그리고 `full` 에서는 `docs/secrets.md` 에 적힌 Actions Secrets/Variables 등록
+    (`DEPLOY_RUNNER_NAME` 포함).
 - **프로비저닝 admin (D5)** — `worker.db.auto-provision=true` 이고 DB 가 docker 로 관리될 때,
   `init/00-provision-admin.sql` 을 생성해 `worker.db.admin-username`/`admin-password` 계정을 만든다. MySQL 은
   CREATE DATABASE/USER + GRANT, Postgres 는 CREATE SCHEMA/ROLE — 그래야 배포 시점에 프로비저닝이 동작한다.
@@ -411,8 +471,9 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   자동 방어선이다 — 없으면 jar 누락이 **첫 배포**에서 모듈 컴파일 에러로만 드러난다. `build.gradle` 은 이미
   `testImplementation spring-boot-starter-test` 를 추가한다. 이 테스트는 `application.yml` 을 로드해 선택과
   일치하는지 단언하며, 서버를 기동하지 않는다.
+  (MCP 표면을 보호하면 `ResourceServerOnlyTest` 도 함께 나간다 — 9 단계의 `test_fragment` 항목 참고.)
 
-### 9. 검증 (출력만, 실행하지 않음)
+### 10. 검증 (출력만, 실행하지 않음)
 
 Linux/Ubuntu 서버용 원커맨드 설치를 앞세우고, 그다음 수동 등가물을 보여준다. **각 단계를 한국어로 설명하고,
 모든 명령은 한 바이트도 바꾸지 말고 출력한다** — 번역하거나 "정돈한" 명령은 사용자가 붙여넣을 수 없는 명령이다.
@@ -425,7 +486,22 @@ Linux/Ubuntu 서버용 원커맨드 설치를 앞세우고, 그다음 수동 등
 - (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
 - 배포된 모듈 엔드포인트를 호출해 본다. 상태는 `curl localhost:{{PORT}}/platform/modules`.
 - 서버 없이도 사용자가 돌릴 수 있는 sanity check: `./gradlew compileJava`(protean jar 를 대상으로 컴파일)와
-  `./gradlew test`(`ConfigMatchesSelectionTest` 실행 — 생성된 설정이 선택과 일치하는지 단언).
+  `./gradlew test`(`ConfigMatchesSelectionTest` 실행 — 생성된 설정이 선택과 일치하는지 단언. MCP 표면을
+  보호했다면 `ResourceServerOnlyTest` 도 함께).
+- **(6 단계 ≥ `container`) 컨테이너 경로**를 별도의 짧은 블록으로 출력한다:
+  ```
+  cp .env.example .env          # 필수값을 채운다 — OAUTH_ISSUER_URI 는 기본값이 없다
+  docker compose up -d --build
+  docker compose ps             # STATUS 가 (healthy) 가 될 때까지
+  ```
+  사이드카 오버레이:
+  `docker compose -f docker-compose.yml -f docker-compose.local-db.yml up -d --build`.
+  `down` 은 모듈 스토어 볼륨을 남기고 `down -v` 는 배포된 모듈을 전부 폐기한다는 것을 말해 준다.
+- **(6 단계 = `full`) CI 가 돌기 전에 사람이 해야 하는 일** — 검증이 아니라 설정이므로, 그대로 붙여넣는 명령이
+  아니라 체크리스트로 출력한다: `git update-index --chmod=+x gradlew setup.sh`; 러너 등록
+  (`cd .github/runner && cp .env.example .env && docker compose up -d`); `docs/secrets.md` 의 Actions
+  Secrets/Variables 등록(`DEPLOY_RUNNER_NAME` 포함); 그리고 **GitHub UI 에서** 러너 딱 1대에 `deploy-host`
+  라벨 붙이기 — 라벨은 등록 시점 값이라 compose 파일을 나중에 고쳐도 바뀌지 않는다.
 
 ## 참고 (Notes)
 

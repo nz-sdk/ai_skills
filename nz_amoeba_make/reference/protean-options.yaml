@@ -15,7 +15,7 @@
 #                  For a guarantee that lives in what the generated app does NOT contain, which no amount of
 #                  reading the main source can confirm.
 #   emit        generation-time instruction attached to a capability — keys that MUST be written even though
-#                  their library default is empty. Read it in step 8; it is not a user-facing question.
+#                  their library default is empty. Read it in step 9; it is not a user-facing question.
 #   fragment_bundle  a MULTI-FILE fragment: a whole templates/fragments/<dir>/ emitted into a SUB-PACKAGE.
 #                  {dir, package, rename: false, files: [{src, to: main|test, when: <k=v, optional>}]}
 #                  `src` MAY CARRY A RELATIVE PATH (e.g. `deploy/SpecResource.java.template`). The template
@@ -46,8 +46,8 @@
 #                    - THE KEYS ARE NOT `protean.*`, so they are injected into their OWN top-level block of
 #                      application.yml (`amoeba:`), never under `protean:` — the same rule `requires_when.needs`
 #                      already follows for another namespace.
-#                    - THEY ARE ASKED IN STEP 5, with the capability that owns them, NOT in step 6's group walk.
-#                      Step 6 walks `groups:`, and these are not in a group.
+#                    - THEY ARE ASKED IN STEP 5, with the capability that owns them, NOT in step 7's group walk.
+#                      Step 7 walks `groups:`, and these are not in a group.
 #                  Written this way so the walker needs no special case: same record, same "show the full property
 #                  key + default", same 4-per-question split.
 #
@@ -675,7 +675,7 @@ capabilities:
     requires: [protean.mcp.enabled=true, protean.mcp.authorization.resource]
     desc: >-
       The user-facing GATE for "protect the MCP surface" — without it the only way in is stumbling onto the
-      advanced protean.mcp.authorization.resource key in step 6. Offer it in step 5 right after mcp.enabled=true.
+      advanced protean.mcp.authorization.resource key in step 7. Offer it in step 5 right after mcp.enabled=true.
       It declares NO fragment on purpose: the wiring all hangs off that option key (fragment SecurityConfig +
       the two security starters in its build_deps + the issuer-uri requires_when). Re-declaring the fragment here
       would emit SecurityConfig.java twice. Selecting this asks for the resource identifier, which in turn forces
@@ -700,7 +700,7 @@ capabilities:
       the permissive default lets through. Decides on OAuth SCOPES read off the Authentication (SCOPE_mcp.*), so it
       needs spring-security-core on the classpath — hence the build_dep. It does NOT require
       oauth2-resource-server: bring `secured_mcp` for the supported chain, or wire your own authenticating filter
-      chain. With no chain at all every caller is scope-less and the policy denies everything (see the step 7
+      chain. With no chain at all every caller is scope-less and the policy denies everything (see the step 8
       "authorizer needs authentication" check).
     note: >-
       Guards the MCP surface ONLY. protean calls authorize() from exactly one place (McpDispatcher), so the

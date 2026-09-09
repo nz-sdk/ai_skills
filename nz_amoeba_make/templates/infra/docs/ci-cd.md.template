@@ -1,0 +1,245 @@
+# CI / CD
+
+```
+  push:main ─┐
+             ├─► CI ──► build-test ──► image ──┐
+  PR:main ───┘         (test gate)  (build +   │
+                                     smoke)    │  workflow_run: CI success on main
+  workflow_dispatch ───────────────────────────┴─► Deploy ──► compose up -d --build ──► smoke
+```
+
+## Two kinds of runner
+
+| Trigger | Runner | Why |
+|---|---|---|
+| `push: main`, `workflow_dispatch` | `[self-hosted, linux, docker]` | a private repo bills Actions minutes; self-hosted costs none |
+| `pull_request` | `ubuntu-latest` | **PR code must never run on the self-hosted runner** — it holds `docker.sock`, which is equivalent to host root |
+| `deploy.yml` | `[self-hosted, linux, docker, deploy-host]` | deployment targets the runner's own host Docker |
+
+The selection is one expression, and **both branches must return an array**:
+
+```yaml
+runs-on: ${{ github.event_name == 'pull_request'
+  && fromJSON('["ubuntu-latest"]')
+  || fromJSON('["self-hosted","linux","docker"]') }}
+```
+
+A bare string on one side changes how `runs-on` is parsed, so the two paths would diverge.
+
+## Because there are two paths, the workflow cannot depend on the runner's network model
+
+The self-hosted runner runs as a container (`myoung34/github-runner`) with `docker.sock` mounted. Containers a
+job creates are **siblings** of the runner, not children: their ports open on the Docker host, which is *not*
+the runner container's `localhost`. Both `services:` port mapping and `--network host` assume
+"runner localhost == Docker host" and break.
+
+So the `image` job creates a **job-scoped network** and talks over **network aliases**, with a small
+`curlimages/curl` container to run the probes (the job step's own shell cannot reach that network). This
+behaves identically hosted and self-hosted.
+
+It also makes the smoke test mean more: `http://localhost:<port>` is self-evident — every server calls itself
+that — whereas `http://<alias>:<port>` only matches when `SERVER_HOST` genuinely reaches the advertised value.
+
+## `build-test`
+
+- `actions/setup-java@v4` with `temurin` / `21` — same vendor as the image base, same version as the Gradle
+  toolchain, so foojay downloads no second JDK. Deliberately **not** `cache: gradle`.
+- `gradle/actions/setup-gradle@v4` instead of `actions/cache`: Gradle-aware cache keys, automatic read-only off
+  the default branch (a PR cannot poison main's cache), wrapper-distribution caching, and `validate-wrappers`
+  to detect a tampered `gradle-wrapper.jar`.
+- `--offline` is **not** usable: `settings.gradle`'s foojay-resolver reaches the network at configuration time.
+- ⚠️ **`overwrite: true` on both `upload-artifact` steps is required.** Neither name carries a `run_attempt`
+  axis, and `upload-artifact@v4` hard-fails with 409 Conflict when an artifact of that name survives from a
+  previous attempt — "Re-run all jobs" would die at the upload rather than in the build. `run_attempt` is kept
+  out of the names on purpose, so a link keeps pointing at "the jar for that commit".
+- The uploaded bootJar is a **diagnostic artifact, not a way to run the app** (see docs/docker.md, constraint 2).
+
+## `image` — four smokes
+
+Each catches one failure mode that is otherwise silent.
+
+| # | Check | Catches |
+|---|---|---|
+| 0 | `/.well-known/oauth-protected-resource` → 200 | the app never came up |
+| 1 | `resource` == `$BASE/platform/mcp` **and** `authorization_servers` == `["$EXPECTED_ISSUER"]` | the two discovery axes diverging |
+| 2 | `POST /platform/mcp` without a token → 401 | the RCE surface falling open |
+| 3 | both AS metadata paths and `POST /oauth2/token` → 404 | someone re-adding the Authorization Server starter |
+
+Smoke 1 pins **two independent axes**:
+
+```
+  resource              = this app itself      ← SERVER_HOST / SERVER_PORT
+  authorization_servers = the external AS      ← OAUTH_ISSUER_URI
+```
+
+If they diverge, the app starts perfectly and every request 401s. In particular, `authorization_servers`
+coming back as the app's own base URL means a fallback-to-self was reintroduced, and MCP clients would come
+here for tokens this app cannot issue. It is matched **including the brackets**, as a single element — Jackson
+serialises without spaces.
+
+Smoke 3 is the runtime counterpart to `ResourceServerOnlyTest`, which only inspects the *test* classpath. This
+one catches a restored starter even after the build file is reverted.
+
+The issuer is deliberately unreachable (`.invalid`, reserved by RFC 2606). Boot wraps the decoder in a
+`SupplierJwtDecoder` that defers discovery to the first token verification, and no smoke presents a token — so
+the job stays hermetic, at the cost of **not verifying that a real token passes**.
+
+### Switching to a registry
+
+The `image` job uses `load: true` (local daemon, no registry). To publish to GHCR instead:
+
+1. change `load: true` → `push: true`;
+2. add before it:
+   ```yaml
+   - uses: docker/login-action@v3
+     with: { registry: ghcr.io, username: ${{ github.actor }}, password: ${{ secrets.GITHUB_TOKEN }} }
+   ```
+3. add `packages: write` to the job's `permissions`;
+4. tag as `ghcr.io/<owner>/<repo>:${{ github.sha }}`;
+5. change `deploy.yml` from `up -d --build` to pulling that tag.
+
+## `deploy.yml`
+
+Triggered by `workflow_run` (CI completed on main) plus `workflow_dispatch`.
+
+- `workflow_run`, not `push`: this job bakes an image and runs no tests, so on `push` it would race CI and
+  deploy commits whose tests are broken.
+- `types: [completed]` fires on **failed** CI too, hence
+  `if: github.event.workflow_run.conclusion == 'success'`.
+- Checkout uses `github.event.workflow_run.head_sha`, **not** `main` — deploy exactly the commit CI verified.
+- `COMPOSE_PROJECT_NAME` is pinned: the runner's checkout directory differs from a developer's, and without it
+  compose would treat the deployment as a different project and build a second stack alongside the running one.
+- `inputs.*` are **empty** under `workflow_run`, so `COMPOSE_FILE` needs the `|| 'docker-compose.yml'` fallback.
+- The smoke test curls `vars.SERVER_HOST`, never `localhost` — same sibling-container reason as above, and a
+  200 there proves both that the published port is alive and that the advertised address resolves.
+
+### ⚠️ There is no approval gate
+
+On a free-plan private repository, branch protection, rulesets and Environment protection rules are all
+unavailable (the API answers `403 Upgrade to GitHub Pro`). A green CI therefore deploys with no human
+confirmation, and the only way back is another deploy.
+
+If that is unacceptable, either delete the `workflow_run` block (leaving `workflow_dispatch` as the only
+trigger) or upgrade the plan and enable: Environments ▸ `production` ▸ Required reviewers, Deployment branches
+→ `main`, and a ruleset requiring the `build-test` and `image` checks.
+
+### ★ NEVER add a `pull_request` trigger to deploy.yml
+
+It would execute arbitrary PR code on a runner holding `docker.sock`. Do not reach for
+`pull_request: types: [closed]` to mean "merged only" either — the moment someone widens `types`, it becomes
+that hole. `main` is reachable only by PR, so `workflow_run` is sufficient.
+
+## ★ Pinning the deploy host — label + self-verification
+
+Deployment happens on the runner's **own host Docker**, while the target configuration is a single set of repo
+variables. With several identically-labelled runners, GitHub hands the job to whichever is idle — machine B
+runs `compose up` while the smoke test hits `SERVER_HOST` (= machine A) and **goes green**: B gets a second
+stack and A keeps serving the old build. `concurrency` prevents simultaneous runs; it does not pin a machine.
+
+Two layers, because either alone is insufficient:
+
+1. **Label** — `runs-on: [self-hosted, linux, docker, deploy-host]`. Set `RUNNER_LABELS=docker,deploy-host` in
+   `.env` on exactly one machine.
+2. **Self-verification** — a step *before* checkout compares the built-in `$RUNNER_NAME` against the
+   `DEPLOY_RUNNER_NAME` variable and fails if they differ. Needed because anyone can attach a label in the
+   GitHub UI, and a new machine copying the runner `.env` inherits `RUNNER_LABELS` with it. Placing it before
+   checkout means a wrong machine creates no workspace and no `.env`.
+
+⚠️ **Labels are fixed at registration time.** Editing the runner's compose file changes nothing on an
+already-registered runner — the entrypoint sees `/runner-data/.runner` and skips `config.sh`. Add the label
+under Settings ▸ Actions ▸ Runners ▸ *(runner)* ▸ Labels.
+
+## Registering a self-hosted runner
+
+```bash
+cd .github/runner
+cp .env.example .env      # ACCESS_TOKEN + RUNNER_HOST_ID
+docker compose up -d
+docker compose logs -f    # "Listening for Jobs" means success
+```
+
+PAT scopes: classic → `repo`; fine-grained → this repository + Administration: Read and write.
+
+### ★ RUNNER_HOST_ID must be unique per machine
+
+The image's entrypoint runs:
+
+```
+_RUNNER_NAME=${RUNNER_NAME:-github-runner-<random>}
+./config.sh ... --name "$_RUNNER_NAME" --unattended --replace
+```
+
+An explicit `RUNNER_NAME` gets **no random suffix**, and `--replace` is **unconditional**. Two machines sharing
+a name means the one that starts later **steals** the earlier one's registration. The dispossessed machine
+still has `/runner-data/.runner`, so it reports "already been configured" and skips re-registration, and
+`DISABLE_AUTOMATIC_DEREGISTRATION=true` + `restart: unless-stopped` stop it recovering → a 401 restart loop,
+silently offline, while GitHub shows one apparently healthy runner.
+
+Adding a new machine: pick an unused `RUNNER_HOST_ID`, leave `RUNNER_LABELS` empty (CI only), `up -d`, and
+confirm a new entry appears under Settings ▸ Actions ▸ Runners.
+
+### Runner image facts
+
+No JDK is present — `setup-java` fetches it, which is why `/opt/hostedtoolcache` is a persisted volume.
+Docker CLI, compose v2 and buildx are present; `git`, `jq` and `curl` are available.
+
+| Volume | Purpose |
+|---|---|
+| `runner-data` | registration state (`CONFIGURED_ACTIONS_RUNNER_FILES_DIR`) |
+| `runner-work` | job workspaces |
+| `runner-toolcache` | `/opt/hostedtoolcache`, so JDK 21 is not re-downloaded every run |
+
+`runner-data` and `runner-work` need the `init` container's `chown 1001:121`: a named volume inherits the
+ownership of its image-side mount point, and those paths do not exist in the image, so Docker creates them
+root-owned and the runner (uid 1001) cannot write. `/opt/hostedtoolcache` **does** exist in the image, so it is
+not in that list.
+
+⚠️ **Steps that bind-mount the workspace do not work on this runner.** The workspace is a named volume, and the
+host daemon would have to resolve a path that exists only inside the runner container. Keep CI deployments on
+`docker-compose.yml` (named volumes only).
+
+⚠️ **`docker.sock` access is equivalent to host root.** Use this runner only on trusted machines.
+
+## Housekeeping
+
+A self-hosted runner is not a fresh VM. The `image` job removes its containers and network in an
+`if: always()` step; if runs are interrupted, sweep leftovers periodically:
+
+```bash
+docker network prune -f --filter until=24h
+```
+
+Left unchecked, abandoned bridge networks exhaust Docker's default IPv4 address pool and new networks fail to
+create.
+
+Also note both stacks use fixed container names, so a locally-running `docker compose up` and a CI deployment
+on the same machine will collide. Stop one before the other runs.
+
+## The gradlew executable bit
+
+`.gitattributes` fixes line endings but **cannot** fix the mode bit. git on Windows records new files as
+100644, so a CI checkout would fail with `./gradlew: Permission denied`. On the first commit:
+
+```bash
+git update-index --chmod=+x gradlew setup.sh
+git ls-files -s gradlew        # must read 100755
+```
+
+The workflow and the Dockerfile also `chmod +x` as a second line of defence.
+
+## Artifact retention
+
+| Artifact | Retention |
+|---|---|
+| `test-results-<run_id>` | 7 days |
+| `bootjar-<sha>` | 14 days |
+
+## Reproducing CI locally
+
+```bash
+./gradlew --no-daemon --console=plain build
+docker compose up -d --build
+curl -s localhost:{{PORT}}/.well-known/oauth-protected-resource
+curl -s -o /dev/null -w '%{http_code}\n' -XPOST localhost:{{PORT}}/platform/mcp \
+  -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'   # expect 401
+```

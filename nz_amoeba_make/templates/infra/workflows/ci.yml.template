@@ -1,0 +1,308 @@
+# =====================================================================
+# CI — protean-{{NAME}}-sample
+# Gradle 8.14.5 (wrapper) · JDK 21 (runtime javac → JDK required) · Spring Boot 3.5.16
+#
+# build/test/package are ONE job on purpose: all three are the same Gradle invocation
+# (`build` = test + bootJar), and splitting them would only pay the cache-restore cost three times.
+#
+# ★ TWO KINDS OF RUNNER (see the runs-on expression below)
+#   push:main · workflow_dispatch → self-hosted (a local machine). Spends no Actions minutes on a private repo.
+#   pull_request                  → ubuntu-latest. PR code must NOT run on the self-hosted runner: it holds
+#                                   docker.sock, which is equivalent to host root.
+#
+# ★ THEREFORE THIS WORKFLOW MUST NOT DEPEND ON THE RUNNER'S NETWORK MODEL — it has to behave identically on
+#   both paths. That is why it uses neither `services:` nor `--network host`, but a job-scoped user-defined
+#   network plus container names (see the image job's comment).
+#
+# Job graph, rationale, runner registration: docs/ci-cd.md
+# =====================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # A new commit on a PR cancels the previous run. main is never cancelled — which commit was green is the
+  # basis for the deploy decision, so it must not be cut short.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read          # Least privilege. Widened only in the job that needs it.
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────
+  # Build + test gate. If this breaks, no image is built.
+  # ───────────────────────────────────────────────────────────────────
+  build-test:
+    # ★ Only PRs run hosted — see "TWO KINDS OF RUNNER" above. BOTH branches must return an ARRAY, or `runs-on`
+    #   parses inconsistently (a bare string on one side changes how it is interpreted).
+    runs-on: ${{ github.event_name == 'pull_request'
+      && fromJSON('["ubuntu-latest"]')
+      || fromJSON('["self-hosted","linux","docker"]') }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      checks: write       # Needed only to publish the JUnit report to the Checks tab
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin     # Same vendor as the Dockerfile base image
+          java-version: '21'        # Matches the build.gradle toolchain, so foojay downloads no second JDK
+          # Deliberately NOT `cache: gradle` — setup-gradle below does it better, and together they overwrite
+          # each other.
+
+      # Why gradle/actions/setup-gradle instead of actions/cache:
+      #   · cache keys that understand Gradle (no hand-written key)
+      #   · automatically read-only off the default branch → a PR cannot poison main's cache
+      #   · caches the wrapper distribution, handles the configuration cache, writes a per-task timing summary
+      #   · validate-wrappers checks gradle-wrapper.jar for tampering
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          validate-wrappers: true
+
+      # A gradlew first committed from Windows can be recorded 100644 (.gitattributes only fixes line endings).
+      # The repo pins 100755 via `git update-index --chmod=+x`, but re-assert it here — without this line the
+      # failure reads `Permission denied`, which hides the cause.
+      - run: chmod +x ./gradlew
+
+      # `build` = test + bootJar. Every test is offline: no database and no reachable Authorization Server
+      # (ResourceServerOnlyTest uses RANDOM_PORT and an unreachable issuer), so there are no port collisions
+      # whether the runner is a container or a binary on the host.
+      - name: Build and test
+        run: ./gradlew --no-daemon --console=plain build
+
+      - name: Publish test report
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: build/test-results/test/TEST-*.xml
+          check_name: Unit tests
+          detailed_summary: true
+
+      # Unconditional fallback so results are visible even if publishing fails (permissions/network).
+      #
+      # ⚠️ `overwrite` IS REQUIRED. Neither artifact name has an attempt axis (run_id · sha), and
+      #    upload-artifact@v4 HARD-FAILS with 409 Conflict when an artifact of the same name survives from a
+      #    previous attempt → "Re-run all jobs" would die here rather than in the build. run_attempt is
+      #    deliberately NOT in the name: the link would then differ per attempt and stop pointing at
+      #    "the jar for that commit".
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ github.run_id }}
+          path: |
+            build/reports/tests/test
+            build/test-results/test
+          retention-days: 7
+          overwrite: true
+
+      # ⚠ This jar is a DIAGNOSTIC ARTIFACT, not a way to run the app. `java -jar` makes Protean's
+      #   RuntimeCompiler see only the fat jar on java.class.path and module compilation fails. The image
+      #   explodes this jar and runs a flat classpath.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootjar-${{ github.sha }}
+          path: build/libs/protean-{{NAME}}-sample.jar
+          retention-days: 14
+          overwrite: true
+
+  # ───────────────────────────────────────────────────────────────────
+  # Build the image and verify it ACTUALLY COMES UP.
+  #
+  # ★ A job-scoped network is created by hand rather than using `services:`, and neither `--network host` nor
+  #   `curl localhost` appears. Why:
+  #
+  #   The self-hosted runner runs as a container (myoung34/github-runner) with docker.sock mounted. Containers
+  #   created from there are SIBLINGS of the runner, not children, so their ports open on the Docker host —
+  #   which is not the runner container's localhost. `services:` port mapping and `--network host` both assume
+  #   "the runner's localhost == the Docker host" and break here.
+  #
+  #   Talking over container names removes that assumption entirely → IDENTICAL behaviour hosted and
+  #   self-hosted. Since PRs are hosted and pushes are self-hosted, both paths must work; this is not optional.
+  #
+  #   It also makes smoke #1 mean something. An expectation of `http://localhost:<port>` is self-evident (every
+  #   server calls itself that), whereas `http://<alias>:<port>` only matches when SERVER_HOST genuinely reaches
+  #   the advertised value.
+  # ───────────────────────────────────────────────────────────────────
+  image:
+    needs: build-test
+    runs-on: ${{ github.event_name == 'pull_request'
+      && fromJSON('["ubuntu-latest"]')
+      || fromJSON('["self-hosted","linux","docker"]') }}
+    timeout-minutes: 30
+    env:
+      # Container NAMES are unique per run — a self-hosted runner is not a fresh VM, so two pushes to main
+      # share one Docker daemon (concurrency only cancels PRs).
+      NET: ci-${{ github.run_id }}-${{ github.run_attempt }}
+      DB_CT: ci-db-${{ github.run_id }}-${{ github.run_attempt }}
+      APP_CT: ci-app-${{ github.run_id }}-${{ github.run_attempt }}
+      PROBE_CT: ci-probe-${{ github.run_id }}-${{ github.run_attempt }}
+      # ★ The names used for communication are network ALIASES. They stay fixed even as container names change
+      #   per run, which keeps the advertised strings stable.
+      #   APP_HOST must be two things at once: the container alias AND SERVER_HOST.
+      APP_HOST: app
+      DB_ALIAS: db
+      # ★ Stands in for the external Authorization Server's issuer. This job uses a DELIBERATELY UNREACHABLE
+      #   value — .invalid is reserved by RFC 2606 and resolves nowhere, so it cannot accidentally hit a real
+      #   host.
+      #   Unreachable is fine because Boot wraps the decoder in a SupplierJwtDecoder that defers issuer
+      #   discovery until the FIRST token verification, and the smokes below present no token (they only check
+      #   the no-token 401).
+      #   ⇒ the job stays hermetic, at the cost of NOT verifying that a real token passes.
+      #   The same value feeds the app's env and the smoke expectation — changing only one would make the
+      #   smoke self-evident.
+      EXPECTED_ISSUER: http://as.invalid:9300
+      # Same as the application.yml / Dockerfile ENV default. The job's network is isolated so there is no
+      # collision risk; the point is to verify the default actually reaches the advertised value.
+      APP_PORT: '{{PORT}}'
+      # Credentials for a container that lives only inside this job. Deliberately unlike any real account —
+      # a name left in the repository should exist nowhere.
+      DB_NAME: {{DB}}
+      DB_USER: ci-db-user
+      DB_PW: ci-db-pw
+      DB_ROOT_PW: root-pw
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Replaces `services:`. The job, not the runner, owns the lifetime — hence the cleanup step.
+      - name: Create job network and start the database
+        run: |
+          set -e
+          docker network create "$NET"
+          docker run -d --name "$DB_CT" --network "$NET" --network-alias "$DB_ALIAS" \
+            -e MYSQL_ROOT_PASSWORD="$DB_ROOT_PW" \
+            -e MYSQL_DATABASE="$DB_NAME" \
+            -e MYSQL_USER="$DB_USER" \
+            -e MYSQL_PASSWORD="$DB_PW" \
+            --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -p$DB_ROOT_PW --silent" \
+            --health-interval=10s --health-timeout=5s --health-retries=12 \
+            mysql:8.4 --default-time-zone=+00:00
+          # Wait for the healthcheck to flip to healthy. `services:` did this for us; having built it by hand,
+          # we wait by hand.
+          for i in $(seq 1 60); do
+            # ★ GENERATOR: `{{.State.Health.Status}}` is docker inspect's Go template, NOT a skill placeholder.
+            #   Copy it through verbatim. Skill placeholders are {{UPPER_SNAKE_CASE}} only.
+            s=$(docker inspect -f '{{.State.Health.Status}}' "$DB_CT" 2>/dev/null || echo starting)
+            if [ "$s" = "healthy" ]; then echo "database healthy after $((i*2))s"; break; fi
+            if [ "$i" = "60" ]; then
+              echo "database never became healthy (last status: $s)"
+              docker logs "$DB_CT" || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true                   # Load into the local daemon. No registry.
+          tags: protean-{{NAME}}-sample:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # No `docker save` artifact: the runtime JDK image is ~450MB and the deploy job rebuilds from source
+      # anyway. To switch to a registry (GHCR), change `load: true` to `push: true` and add
+      # docker/login-action before this step — see docs/ci-cd.md, "Switching to a registry".
+
+      - name: Run the image
+        run: |
+          # ★ OAUTH_ISSUER_URI is NOT this app's own address — it is the EXTERNAL Authorization Server's issuer.
+          #   Why an unreachable value is used: see the EXPECTED_ISSUER comment in env above. Verifying with a
+          #   real token would mean standing up the Authorization Server as a third container; that is separate
+          #   work. The manual procedure is in the README.
+          docker run -d --name "$APP_CT" --network "$NET" --network-alias "$APP_HOST" \
+            -e SERVER_PORT="$APP_PORT" \
+            -e SERVER_HOST="$APP_HOST" \
+            -e OAUTH_ISSUER_URI="$EXPECTED_ISSUER" \
+            -e DB_HOST="$DB_ALIAS" \
+            -e DB_PORT=3306 \
+            -e DB_USER="$DB_USER" \
+            -e DB_PASSWORD="$DB_PW" \
+            protean-{{NAME}}-sample:${{ github.sha }}
+
+      # Smoke curls run via docker exec: the job step's shell lives inside the runner container and cannot
+      # reach $NET. Running `docker run --rm` per loop iteration would create 60 containers, so one probe
+      # container is started and exec'd into.
+      - name: Start probe container
+        run: |
+          docker run -d --name "$PROBE_CT" --network "$NET" \
+            --entrypoint sleep curlimages/curl:8.11.1 900
+
+      # Four smokes. Each catches one specific failure mode that is otherwise SILENT.
+      # All of them run inside the probe container.
+      - name: Smoke
+        run: |
+          set -e
+          BASE="http://$APP_HOST:$APP_PORT"
+          probe() { docker exec "$PROBE_CT" curl "$@"; }
+
+          # (0) Wait for startup.
+          #     ★ Probe the protected-resource document, NOT /.well-known/oauth-authorization-server — that
+          #     endpoint exists only on an Authorization Server, so here it is 404 and this loop would spin
+          #     until timeout.
+          for i in $(seq 1 60); do
+            code=$(probe -s -o /dev/null -w '%{http_code}' \
+                   "$BASE/.well-known/oauth-protected-resource" || true)
+            if [ "$code" = "200" ]; then echo "up after $((i*2))s"; break; fi
+            if [ "$i" = "60" ]; then echo "app never became ready"; exit 1; fi
+            sleep 2
+          done
+
+          # (1) TWO INDEPENDENT AXES, pinned separately:
+          #
+          #       resource              = this app itself ($BASE/platform/mcp)  ← SERVER_HOST/PORT axis
+          #       authorization_servers = the external AS ($EXPECTED_ISSUER)    ← OAUTH_ISSUER_URI axis
+          #
+          #     If these diverge the app starts perfectly and every request 401s — the hardest failure in this
+          #     project to diagnose. In particular, authorization_servers coming back as $BASE means a fallback
+          #     to self has been reintroduced, and MCP clients would come HERE for tokens this app cannot issue.
+          #     Pinned INCLUDING the brackets, as a single element — Jackson serialises without spaces.
+          meta=$(probe -s "$BASE/.well-known/oauth-protected-resource")
+          echo "$meta"
+          echo "$meta" | grep -q "\"resource\":\"$BASE/platform/mcp\"" \
+            || { echo "resource mismatch (expected $BASE/platform/mcp)"; exit 1; }
+          echo "$meta" | grep -q "\"authorization_servers\":\[\"$EXPECTED_ISSUER\"\]" \
+            || { echo "authorization_servers mismatch (expected [$EXPECTED_ISSUER])"; exit 1; }
+          echo "discovery ok (resource=$BASE/platform/mcp, as=$EXPECTED_ISSUER)"
+
+          # (2) Is the RCE surface closed without a token? /platform/mcp compiles and hot-loads submitted source.
+          code=$(probe -s -o /dev/null -w '%{http_code}' -XPOST "$BASE/platform/mcp" \
+                 -H 'Content-Type: application/json' \
+                 -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+          [ "$code" = "401" ] || { echo "expected 401 on /platform/mcp, got $code"; exit 1; }
+          echo "mcp closed ok"
+
+          # (3) Pin that this app is NOT an Authorization Server. A 200 here means someone re-added the AS
+          #     starter. This catches it even if build.gradle is restored afterwards, because
+          #     ResourceServerOnlyTest only inspects the TEST classpath.
+          for p in oauth-authorization-server openid-configuration; do
+            code=$(probe -s -o /dev/null -w '%{http_code}' "$BASE/.well-known/$p" || true)
+            [ "$code" = "404" ] || { echo "$p returned $code, expected 404 — the authorization server is back"; exit 1; }
+          done
+          code=$(probe -s -o /dev/null -w '%{http_code}' -XPOST "$BASE/oauth2/token" || true)
+          [ "$code" = "404" ] || { echo "/oauth2/token returned $code, expected 404"; exit 1; }
+          echo "not an authorization server ok"
+
+      - name: Container logs
+        if: always()
+        run: |
+          docker logs "$APP_CT" || true
+          echo "----- database -----"
+          docker logs --tail=50 "$DB_CT" || true
+
+      # Remove the network too. A self-hosted runner is not a fresh VM, so leftovers accumulate.
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f "$APP_CT" "$DB_CT" "$PROBE_CT" || true
+          docker network rm "$NET" || true

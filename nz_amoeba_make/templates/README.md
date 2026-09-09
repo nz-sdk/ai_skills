@@ -52,6 +52,20 @@ fills from the option/vendor specs.
   Each fragment's header states its dependency (e.g. requires `mcp.enabled`).
   A key's `test_fragment` is the exception: `ResourceServerOnlyTest.java.template` goes to `src/test/java/` **with
   its class name kept**, because it asserts a structural guarantee rather than a project-specific policy.
+- `infra/` — **deployment infrastructure**, emitted per the level chosen in SKILL.md step 6
+  (`none` / `container` / `container + CI` / `full`). Filenames are rewritten on emit:
+  `Dockerfile.template` → `Dockerfile`, `dockerignore.template` → `.dockerignore`,
+  `gitattributes.template` → `.gitattributes`, `env.example.template` → `.env.example`,
+  `docker-compose.app.yml.template` → `docker-compose.yml`, `workflows/*` → `.github/workflows/*`,
+  `runner/*` → `.github/runner/*`, `docs/*.md.template` → `docs/*.md`.
+  - `docker-compose.local-db.{mysql,postgres}.yml.template` → `docker-compose.local-db.yml`, an **overlay**
+    that patches `depends_on` + `DB_HOST` onto the app service. It REPLACES `db/docker-compose.*` at this
+    level, because `docker-compose.yml` then belongs to the app. Never emit both under that name.
+  - Extra placeholders here: `{{NAME_KEBAB}}` (`{{NAME}}` with `_`→`-`; names containers, volumes and the
+    compose project) and `{{REPO_URL}}` (`full` only).
+  - ⚠ `{{...}}` is not always a placeholder: `workflows/ci.yml.template` contains
+    `{{.State.Health.Status}}`, which is docker inspect's Go template. Skill placeholders are
+    `{{UPPER_SNAKE_CASE}}` only — copy anything else through verbatim.
 - `fragments/<dir>/` — a **fragment bundle**: several files emitted together into a sub-package, class names kept
   (they reference each other) and a member may target the test source set. `fragments/interfacedef/` is one, driven
   by the `interface_spec_validator` capability. See `fragment_bundle` in `../reference/protean-options.yaml`.

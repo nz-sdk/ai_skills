@@ -1,0 +1,124 @@
+# Local self-hosted Actions runner (for {{NAME}} only).
+#
+#   cp .env.example .env      # fill in ACCESS_TOKEN + RUNNER_HOST_ID
+#   docker compose up -d
+#   docker compose logs -f    # "Listening for Jobs" means registration succeeded
+#
+# ★ WHY SELF-HOSTED — on a private repository, jobs on ubuntu-latest consume the account's Actions minutes.
+#   Self-hosted runners consume none. Artifact storage is still used either way.
+#
+# ★ WHAT THIS RUNNER PICKS UP — ci.yml's push:main and workflow_dispatch, plus deploy.yml.
+#   **pull_request stays on ubuntu-latest.** See the security note below.
+#
+# Details: ../../docs/ci-cd.md
+
+# ★ Pin the project name. Without it compose derives one from the directory name (`runner`), and since every
+#   repository's runner compose lives at the SAME path `.github/runner/`, the project names collide — two
+#   runners would then share the volume set below, their registration state (runner-data) would overwrite each
+#   other, and one would go quietly offline.
+name: gh-runner-{{NAME_KEBAB}}
+
+services:
+  # ★ Fix volume ownership up front. Without this the runner dies with exit 1 right after registering and
+  #   falls into a restart loop.
+  #
+  #   A named volume INHERITS THE OWNERSHIP OF ITS MOUNT POINT AS IT EXISTS IN THE IMAGE. When the image has no
+  #   such path, Docker creates it root-owned. The runner process runs as uid 1001 (runner), but /runner-data
+  #   and /runner-work do not exist in the image, so they end up root-owned and unwritable.
+  #   (/opt/hostedtoolcache DOES exist in the image and is created as 1001 — which is why it is not listed here.)
+  #
+  #   Same trap the app's own Dockerfile solves with mkdir+chown. Here the image cannot be modified, so an init
+  #   container does it.
+  init:
+    image: myoung34/github-runner:latest
+    user: root
+    entrypoint: ["sh", "-c", "chown -R 1001:121 /runner-data /runner-work"]
+    volumes:
+      - runner-data:/runner-data
+      - runner-work:/runner-work
+
+  runner:
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    image: myoung34/github-runner:latest
+    container_name: gh-runner-{{NAME_KEBAB}}
+    restart: unless-stopped
+
+    environment:
+      RUNNER_SCOPE: repo
+      REPO_URL: {{REPO_URL}}
+      # A PAT (repo scope). Unlike a single-use RUNNER_TOKEN, this re-registers even when the container is
+      # recreated.
+      ACCESS_TOKEN: ${ACCESS_TOKEN:?set ACCESS_TOKEN in .env (a GitHub PAT with repo scope)}
+
+      # ★ MUST DIFFER PER MACHINE. The runner image's entrypoint does
+      #     _RUNNER_NAME=${RUNNER_NAME:-github-runner-<random 13 chars>}
+      #     ./config.sh ... --name "$_RUNNER_NAME" --unattended --replace
+      #   so (1) an explicit RUNNER_NAME gets NO random suffix and (2) --replace is unconditional. Two machines
+      #   sharing a name means THE ONE THAT STARTS LATER STEALS THE EARLIER ONE'S REGISTRATION.
+      #   The dispossessed machine still has /runner-data/.runner, so the entrypoint reports "already been
+      #   configured" and skips re-registration, and DISABLE_AUTOMATIC_DEREGISTRATION=true plus
+      #   restart: unless-stopped prevent it from recovering → a 401 restart loop, silently offline.
+      #   Same failure as the project-name note above, on a different axis (across repos vs across machines).
+      RUNNER_NAME: {{NAME_KEBAB}}-${RUNNER_HOST_ID:?set RUNNER_HOST_ID in .env (a value identifying THIS machine; it must be unique across every machine running this runner)}
+
+      # self-hosted · Linux · X64 are added automatically. Only what is listed here is added on top.
+      # The default is just `docker` → matches ci.yml's `runs-on: [self-hosted, linux, docker]`.
+      #
+      # ★ deploy.yml additionally requires `deploy-host` (deployment happens on the runner's own host Docker
+      #   while the target configuration is a single set of repo variables — so if any machine can take the
+      #   job, it deploys to the wrong place while the smoke test hits the intended host and goes green).
+      #   Widen this to RUNNER_LABELS=docker,deploy-host in .env on THE ONE MACHINE designated as deploy host.
+      #
+      # ⚠️ Labels are fixed AT REGISTRATION TIME. Editing this on an already-registered runner changes nothing
+      #   (the entrypoint sees .runner and skips config.sh) → attach it in the GitHub UI instead.
+      #   Procedure: ../../docs/ci-cd.md, "Pinning the deploy host".
+      #
+      # Compose interpolation has no `:+`, so a conditional append is impossible — the whole list is one
+      # variable.
+      LABELS: ${RUNNER_LABELS:-docker}
+
+      # Do not let the runner binary update itself — that is how a pipeline that passed yesterday behaves
+      # differently today.
+      DISABLE_AUTO_UPDATE: 1
+
+      # ★ Paired with CONFIGURED_ACTIONS_RUNNER_FILES_DIR below (which makes state reusable). Without this,
+      #   GitHub DEREGISTERS the runner every time the container stops, while /runner-data keeps its "already
+      #   configured" state — so the next start comes up holding a registration the server no longer has, and
+      #   dies. The runner image itself warns about this combination in its logs.
+      DISABLE_AUTOMATIC_DEREGISTRATION: "true"
+
+      # Keep registration state on a volume. Without it, every container recreation registers as a NEW runner
+      # and dead entries pile up under Settings ▸ Runners.
+      CONFIGURED_ACTIONS_RUNNER_FILES_DIR: /runner-data
+      RUNNER_WORKDIR: /runner-work
+
+    volumes:
+      # ★ Uses the HOST Docker directly (not dind). Containers a job creates are SIBLINGS of the runner, not
+      #   children — that is precisely why ci.yml's image job uses a job-scoped network.
+      #
+      # ⚠️ THIS SOCKET IS EQUIVALENT TO HOST ROOT. That is why pull_request is never routed to this runner.
+      #    Use it only on trusted machines.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      - runner-data:/runner-data
+      # ★ A named volume, not a host bind. Two reasons:
+      #   1) speed — on Windows a bind crosses the VM boundary and file I/O makes Gradle/npm far slower.
+      #   2) under Docker Desktop the "host" is a Linux VM anyway, so the container's workspace path cannot be
+      #      made to match the host's.
+      #
+      # ⚠️ CONSEQUENCE: STEPS THAT BIND-MOUNT THE WORKSPACE DO NOT WORK ON THIS RUNNER. The host daemon has to
+      #    resolve a path that exists only inside the container. Keep deploy.yml on the default
+      #    `docker-compose.yml` (named volumes only) in CI; if the sidecar overlay is ever given a file bind,
+      #    bring it up by hand on that machine instead.
+      - runner-work:/runner-work
+
+      # Toolchains fetched by setup-java / setup-node. The runner image ships NO JDK, so without preserving
+      # this, every run re-downloads JDK 21.
+      - runner-toolcache:/opt/hostedtoolcache
+
+volumes:
+  runner-data:
+  runner-work:
+  runner-toolcache:

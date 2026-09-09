@@ -55,6 +55,19 @@
   바꿉니다. 각 프래그먼트 헤더에 의존 조건이 적혀 있습니다(예: `mcp.enabled` 필요).
   키의 `test_fragment` 는 예외입니다: `ResourceServerOnlyTest.java.template` 은 **클래스명을 유지한 채**
   `src/test/java/` 로 갑니다 — 프로젝트별 정책이 아니라 구조적 보증을 단정하기 때문입니다.
+- `infra/` — **배포 인프라**. SKILL.md 6 단계에서 고른 수준(`none` / `container` / `container + CI` / `full`)에
+  따라 내보냅니다. 파일명은 내보낼 때 바뀝니다: `Dockerfile.template` → `Dockerfile`,
+  `dockerignore.template` → `.dockerignore`, `gitattributes.template` → `.gitattributes`,
+  `env.example.template` → `.env.example`, `docker-compose.app.yml.template` → `docker-compose.yml`,
+  `workflows/*` → `.github/workflows/*`, `runner/*` → `.github/runner/*`, `docs/*.md.template` → `docs/*.md`.
+  - `docker-compose.local-db.{mysql,postgres}.yml.template` → `docker-compose.local-db.yml`. 앱 서비스에
+    `depends_on` 과 `DB_HOST` 를 덧붙이는 **오버레이**입니다. 이 수준에서는 `docker-compose.yml` 이 앱의
+    파일이므로 `db/docker-compose.*` 를 **대체**합니다. 두 개를 같은 이름으로 내보내지 마세요.
+  - 여기서만 쓰는 플레이스홀더: `{{NAME_KEBAB}}`(`{{NAME}}` 의 `_`→`-`. 컨테이너·볼륨·compose 프로젝트
+    이름을 만든다)와 `{{REPO_URL}}`(`full` 전용).
+  - ⚠ `{{...}}` 가 항상 플레이스홀더는 아닙니다: `workflows/ci.yml.template` 의
+    `{{.State.Health.Status}}` 는 docker inspect 의 Go 템플릿입니다. 스킬 플레이스홀더는
+    `{{UPPER_SNAKE_CASE}}` 뿐이며, 그 밖의 것은 그대로 복사합니다.
 - `fragments/<dir>/` — **프래그먼트 번들**. 여러 파일을 서브패키지로 한꺼번에 내보내며, 클래스명을 유지하고
   (멤버끼리 서로를 참조하므로) 일부 멤버는 테스트 소스셋을 대상으로 할 수 있습니다. `fragments/interfacedef/`
   가 그 예이며 `interface_spec_validator` capability 가 이를 구동합니다. `../reference/protean-options.yaml` 의

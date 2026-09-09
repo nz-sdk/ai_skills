@@ -105,7 +105,7 @@ Ask the few decisions that shape everything else:
 - **MCP surface** — `protean.mcp.enabled` on/off.
 - **MCP OAuth** — protect `/platform/**` with an OAuth2 Resource Server? (only ask when MCP is on). Yes ⇒ same as
   selecting the `secured_mcp` capability: it asks for `mcp.authorization.resource`, which chains to the JWT issuer
-  prompt in step 7 and pulls in the security starters. No ⇒ the MCP surface is open — a local demo only, and the
+  prompt in step 8 and pulls in the security starters. No ⇒ the MCP surface is open — a local demo only, and the
   README must say so.
 - **Data access** — does a module need a database? (yes → the DB sub-flow in step 4; forces in-process).
 - **Gate profile** — strict (`tests`+`review` on, default) / relaxed (`review` off) / custom (set each gate).
@@ -130,20 +130,20 @@ custom MCP tool (type a name), override a built-in tool, custom `CodeRule`, `Mod
 
 Most drop a `fragment`, but **not all do — do not filter the list to fragment-bearing entries.** A capability with
 no `fragment` is a *gate*: `secured_mcp` exists so the user can choose "protect the MCP surface" here instead of
-having to find the `advanced` key `mcp.authorization.resource` in step 6, and its `requires` bare key means you
-must ask for that value (which in turn forces the JWT issuer prompt in step 7). `scope_admin` is documentation-only.
+having to find the `advanced` key `mcp.authorization.resource` in step 7, and its `requires` bare key means you
+must ask for that value (which in turn forces the JWT issuer prompt in step 8). `scope_admin` is documentation-only.
 An entry may instead carry a **`fragment_bundle`** (several files into a sub-package) — offer those exactly like
 the rest. Never re-emit a fragment a capability points at indirectly — `secured_mcp` pulls `SecurityConfig` in
 through the option, so emitting it once is correct.
 
 **Two are already decided in step 3 — do not ask them again here:** `data_access` (step 3's "Data access") and
 `secured_mcp` (step 3's "MCP OAuth"). Carry each step 3 answer straight through — a yes on MCP OAuth still asks for
-`mcp.authorization.resource` and chains to the issuer prompt in step 7, exactly as if it had been picked here.
+`mcp.authorization.resource` and chains to the issuer prompt in step 8, exactly as if it had been picked here.
 
 **A selected capability that carries `options:` is not finished until you have walked them.** A capability owning a
 whole configuration namespace declares it as an `options:` list in the same record shape a group uses, and those
-keys are asked HERE — step 6 walks `groups:`, and these are not in a group, so skipping them here means they are
-never asked at all. Same rules as step 6: show each option's **full property key + default**, translate only the
+keys are asked HERE — step 7 walks `groups:`, and these are not in a group, so skipping them here means they are
+never asked at all. Same rules as step 7: show each option's **full property key + default**, translate only the
 `desc`, split into ≤4-option questions, and honour `advanced`/`requires`/`requires_when`. Run it after any
 `subflow:` the capability also declares, so the sub-flow's answer is already known.
 **One capability carries `options:` today.** Recount in the yaml rather than trusting this list — it goes
@@ -171,7 +171,44 @@ Worked example, in-process + MCP enabled (the common case): seven survive — `c
 Recount this list against the yaml rather than trusting the number written here — the count moves whenever a
 capability is added, and a stale total is exactly the failure mode rule 4 exists to prevent.
 
-### 6. Advanced options — WALK the surface, one functional GROUP at a time (interactive)
+### 6. Deployment infrastructure (one selection)
+Ask **how far the generated project should carry its own deployment**. One question, four levels, each a
+superset of the one before. Default **`container`** — it assumes nothing about the user's organisation or
+hardware, and an image plus a compose file is useful anywhere.
+
+| Level | Emits (all from `templates/infra/`) |
+|---|---|
+| `none` | nothing. `setup.sh` on a host is the whole story |
+| `container` | `Dockerfile` · `docker-compose.yml` · `.env.example` · `.dockerignore` · `.gitattributes` · `docs/docker.md` |
+| `container + CI` | the above + `.github/workflows/ci.yml` · `docs/ci-cd.md` |
+| `full` | the above + `.github/workflows/deploy.yml` · `.github/runner/{docker-compose.yml,.env.example}` · `docs/secrets.md` |
+
+**Say what the last level commits them to before they pick it.** `full` is not merely "more files": it deploys
+to a **self-hosted runner's own host Docker**, and on a free-plan private repository there is **no approval
+gate available** (branch protection, rulesets and Environment protection rules all return
+`403 Upgrade to GitHub Pro`), so a green CI reaches production with no human confirmation. Offer the
+`workflow_dispatch`-only variant — delete the `workflow_run:` block — to anyone who does not want that.
+
+`full` needs two more typed inputs, asked only at that level:
+- **repository URL** → `{{REPO_URL}}` (e.g. `https://github.com/<owner>/<repo>`). The runner registers against it.
+- **deploy-host runner name** → the value the operator must store as the `DEPLOY_RUNNER_NAME` Actions variable.
+  Do not invent it; explain that `deploy.yml` compares it to `$RUNNER_NAME` and refuses to deploy on a mismatch,
+  and that it is set in the GitHub UI, not in a generated file.
+
+Two things this step CHANGES elsewhere, both easy to miss:
+
+1. **`docker-compose.yml` means the APP once this level is ≥ `container`.** At `none`, a docker DB keeps
+   today's behaviour and writes the vendor compose from `templates/db/` as `docker-compose.yml`. At
+   `container` or above that name belongs to the app, so the database moves to `docker-compose.local-db.yml`
+   using `templates/infra/docker-compose.local-db.<vendor>.yml.template` — an OVERLAY that patches
+   `depends_on` and `DB_HOST` onto the app service. Never emit both under the same name.
+2. **`.gitignore` gains `.env`/`.env.local`** (already marked `[OPTIONAL infra]` in `templates/gitignore.template`).
+
+Skip the question entirely when it cannot apply: `h2` in-memory with no MCP surface has nothing to deploy.
+Emitting infra is also independent of `protean.isolation.mode` — `worker`/`container` isolation describes where
+MODULES run, not how the app itself is shipped.
+
+### 7. Advanced options — WALK the surface, one functional GROUP at a time (interactive)
 This step walks **`groups:` only**. A capability's own `options:` (e.g. `interface_spec_validator`'s
 `amoeba.skeleton.*`) were
 asked in step 5 with the capability that owns them — do not re-ask them here, the same way `data_access` and
@@ -216,7 +253,7 @@ Non-booleans (int/long/duration/string): a "check which to set" multi-select, th
 (typed) — checking only means "I want to override this default", then you collect the value. Enums: a selection
 of the allowed values (default preselected in wording).
 
-### 7. Validation + dependency resolution
+### 8. Validation + dependency resolution
 After all selections (steps 3–6), run a **validation pass** over the full resolved set before writing anything.
 Check, and fix or stop on each:
 - **requires satisfied** — every selected option/capability's `requires` is met; force the companion on, or prompt
@@ -294,7 +331,7 @@ go back and prompt for the fix. Then collect `build_deps`, `fragment`s, resolve 
 final resolved configuration** (option set + forced companions + deps + files to be written) for confirmation —
 Korean prose around a verbatim list of keys, values and paths.
 
-### 8. Generate
+### 9. Generate
 Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (=`{{PKG}}` with `.`→`/`),
 `{{PORT}}` (the port typed in step 1), `{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`. Engine:
 - **`application.yml`** — start from `templates/application.yml.template` (minimal base) and **inject every set
@@ -362,10 +399,32 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
   Add one `Class.forName` line per bundle to `<<fragment-checks>>` (the representative class, e.g.
   `{{PKG}}.interfacedef.InterfaceSpecValidator`), and remember the bundle's test members run under
   `./gradlew test` alongside `ConfigMatchesSelectionTest`.
-- **infra** — DB docker path: `docker-compose.yml` from `templates/db/*`. Its `init/*.sql` depends on the
+- **DB infra** — DB docker path: `docker-compose.yml` from `templates/db/*`. Its `init/*.sql` depends on the
   DataSource's PURPOSE: a **data-access** DataSource gets `init/01-schema.sql` (the `items` table); a DataSource
   that only backs the **jdbc module-store** does NOT (Protean creates its own store tables) — omit the items init.
   H2 data-access: `schema.sql`. existing/other: none.
+  ⚠ **Only when step 6 chose `none`.** At `container` or above, `docker-compose.yml` is the APP's file, so the
+  database is written as `docker-compose.local-db.yml` from
+  `templates/infra/docker-compose.local-db.<vendor>.yml.template` instead. That overlay carries no `init/`
+  mount (see its comment on why a directory bind breaks the entrypoint) — put seed SQL in a single-file mount.
+- **deployment infra (step 6)** — copy from `templates/infra/` per the chosen level, mapping filenames:
+  `Dockerfile.template` → `Dockerfile`, `dockerignore.template` → `.dockerignore`,
+  `gitattributes.template` → `.gitattributes`, `env.example.template` → `.env.example`,
+  `docker-compose.app.yml.template` → `docker-compose.yml`, `workflows/*.template` → `.github/workflows/*`,
+  `runner/docker-compose.yml.template` → `.github/runner/docker-compose.yml`,
+  `runner/env.example.template` → `.github/runner/.env.example`, `docs/*.md.template` → `docs/*.md`.
+  Substitute `{{NAME}}`, `{{NAME_KEBAB}}` (= `{{NAME}}` with `_`→`-`; it names containers, volumes and the
+  compose project), `{{PKG}}`, `{{PORT}}`, `{{DB}}`, and at the `full` level `{{REPO_URL}}`.
+  Three things to get right:
+  - **`{{...}}` is not always a placeholder.** `ci.yml` contains `{{.State.Health.Status}}`, which is docker
+    inspect's Go template. Skill placeholders are `{{UPPER_SNAKE_CASE}}` only — copy anything else verbatim.
+  - **Do not "simplify" the load-bearing parts.** Each is a comment explaining a failure that is otherwise
+    silent: no `java -jar`, `jmods` removed in the build stage, no `services:`/`--network host` in CI,
+    `overwrite: true` on the artifact uploads, the deploy-host label plus `$RUNNER_NAME` self-check, the smoke
+    hitting `SERVER_HOST` rather than `localhost`, and identical numbers on both sides of `ports`.
+  - **Tell the user what only a human can do**: `git update-index --chmod=+x gradlew setup.sh` (a mode bit
+    `.gitattributes` cannot fix), and — at `full` — registering the Actions Secrets/Variables listed in
+    `docs/secrets.md`, including `DEPLOY_RUNNER_NAME`.
 - **provisioning admin (D5)** — when `worker.db.auto-provision=true` AND the DB is docker-managed, generate
   `init/00-provision-admin.sql` creating the `worker.db.admin-username`/`admin-password` account with
   CREATE DATABASE/USER + GRANT (MySQL) or CREATE SCHEMA/ROLE (Postgres), so provisioning works at deploy. For an
@@ -400,7 +459,7 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
   compile error. `build.gradle` already adds `testImplementation spring-boot-starter-test`. This test loads
   `application.yml` and asserts it matches the selection — it does not start the server.
 
-### 9. Verify (print, do not run)
+### 10. Verify (print, do not run)
 Lead with the one-command install for a Linux/Ubuntu server, then the manual equivalents. **Explain each step in
 Korean; print every command byte-for-byte** — a translated or "tidied" command is one the user cannot paste.
 - **`./setup.sh`** — preflight-checks the environment and prerequisites, brings up the DB (if any), and runs the
@@ -411,7 +470,23 @@ Korean; print every command byte-for-byte** — a translated or "tidied" command
 - (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
 - Hit a deployed module endpoint; `curl localhost:{{PORT}}/platform/modules` for state.
 - Sanity checks the user can run without the server: `./gradlew compileJava` (compiles against the protean jar)
-  and `./gradlew test` (runs `ConfigMatchesSelectionTest` — asserts the generated config matches the selection).
+  and `./gradlew test` (runs `ConfigMatchesSelectionTest` — asserts the generated config matches the selection;
+  plus `ResourceServerOnlyTest` when the MCP surface is secured).
+- **(step 6 ≥ `container`) the container path**, printed as its own short block:
+  ```
+  cp .env.example .env          # fill in the required values — OAUTH_ISSUER_URI has no default
+  docker compose up -d --build
+  docker compose ps             # wait for STATUS to read (healthy)
+  ```
+  With the sidecar overlay:
+  `docker compose -f docker-compose.yml -f docker-compose.local-db.yml up -d --build`.
+  Say that `down` keeps the module-store volume and `down -v` discards every deployed module.
+- **(step 6 = `full`) what a human must do before CI can work** — this is setup, not verification, so print it
+  as a checklist rather than as commands to paste blindly: `git update-index --chmod=+x gradlew setup.sh`;
+  register the runner (`cd .github/runner && cp .env.example .env && docker compose up -d`); add the Actions
+  Secrets/Variables from `docs/secrets.md`, `DEPLOY_RUNNER_NAME` included; and add the `deploy-host` label to
+  exactly one runner **in the GitHub UI** — labels are fixed at registration time, so editing the compose file
+  afterwards changes nothing.
 
 ## Notes
 - MCP is an RCE surface (compiles + hot-loads submitted sources) — off by default. Enabling it in a sample is a

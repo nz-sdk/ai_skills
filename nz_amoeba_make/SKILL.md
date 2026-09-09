@@ -1,11 +1,12 @@
 ---
 name: nz_amoeba_make
 description: 'Scaffold a runnable Protean-consuming sample server from scratch under prototype/<name>. Walks the user through the FULL Protean option surface (every protean.* setting + every consumer extension point + a database sub-flow) and generates the matching build, config, code, infra, and README. Built for users who do not know Protean — any setting can be configured through the skill, with defaults and plain explanations. Use when someone wants to create a new Protean sample/example server, try a capability, or bootstrap a downstream Protean integration. Triggers: "make a protean sample", "scaffold a protean server", "new protean example", "protean sample 만들어".'
-version: 0.1.0
 license: AGPL-3.0-only
 compatibility:
   agents:
     - claude
+metadata:
+  version: 0.2.0
 ---
 
 # Amoeba Maker
@@ -26,10 +27,6 @@ handful of choices. The full catalog is data-driven:
   `requires` (forced companions), `requires_when` (conditional requirement the user must supply — blocks when
   unmet), `build_deps`, `fragment`. **Walk this to drive the questions and generation.**
 - **`reference/db-vendors.yaml`** — the database sub-flow (vendor + existing-server/docker/embedded).
-- **`reference/auth-stores.yaml`** — the user-store sub-flow for the `embedded_auth` capability (`memory` |
-  `jdbc`). Reached via `subflow: authstore`, exactly as `db-vendors.yaml` is reached via `subflow: db`.
-  **`embedded_auth` puts the token signing key inside the MCP RCE surface** — quote its `security` note verbatim
-  when offering it, and never present it as the default.
 - **`reference/protean-capabilities.md`** — human narrative + the 8 registration mechanisms (background).
 - **`templates/`** — file templates + per-capability code fragments + per-vendor DB templates.
 
@@ -77,14 +74,22 @@ own text and is taken verbatim; never translate or normalise an entered name, pa
 
 ## Flow
 
-### 1. Target folder + Java package (typed)
-Two typed inputs — ask **both** here (the user types each; a default suggestion is allowed, but never offer a
-name list).
+### 1. Target folder + Java package + HTTP port (typed)
+Three typed inputs — ask **all three** here (the user types each; a default suggestion is allowed, but never offer
+a name list).
 
 1. **Folder name** — validate `[a-z0-9_-]+`; generate under `prototype/<name>/`; refuse if it exists.
 2. **Java package** — default `prototype.<name>` (replace `-`→`_`). The user may type any package
    (e.g. `kr.newzen.amoeba.api`). Validate: dot-separated segments, each matching `[a-z_][a-z0-9_]*`, and no
    segment may be a Java reserved word. This becomes `{{PKG}}`; `{{PKG_PATH}}` = `{{PKG}}` with `.`→`/`.
+3. **HTTP port** — default `8080`; validate 1024–65535. This becomes `{{PORT}}`.
+   **Ask it rather than assuming**, because samples are generated into the same `prototype/` tree and run on the
+   same machine: a fixed default means the second one cannot start next to the first, and the collision surfaces
+   as a `BindException` at run time rather than a question at generation time. Tell the user which ports their
+   other samples already use if you can see them.
+   It only ever appears as the DEFAULT in `${SERVER_PORT:{{PORT}}}` — never as a bare literal — so an operator can
+   still override it per deployment without touching the generated files. That is the ONE port concept: the same
+   variable drives the bind port and the advertised discovery address, so the two cannot drift.
 
 ### 2. Coordinate / version (typed) + maven-central check
 Ask them to **type** the coordinate/version (default `org.htcom:protean:0.0.1` — the released version, live on
@@ -101,7 +106,7 @@ Ask the few decisions that shape everything else:
 - **MCP surface** — `protean.mcp.enabled` on/off.
 - **MCP OAuth** — protect `/platform/**` with an OAuth2 Resource Server? (only ask when MCP is on). Yes ⇒ same as
   selecting the `secured_mcp` capability: it asks for `mcp.authorization.resource`, which chains to the JWT issuer
-  prompt in step 7 and pulls in the security starters. No ⇒ the MCP surface is open — a local demo only, and the
+  prompt in step 8 and pulls in the security starters. No ⇒ the MCP surface is open — a local demo only, and the
   README must say so.
 - **Data access** — does a module need a database? (yes → the DB sub-flow in step 4; forces in-process).
 - **Gate profile** — strict (`tests`+`review` on, default) / relaxed (`review` off) / custom (set each gate).
@@ -126,32 +131,24 @@ custom MCP tool (type a name), override a built-in tool, custom `CodeRule`, `Mod
 
 Most drop a `fragment`, but **not all do — do not filter the list to fragment-bearing entries.** A capability with
 no `fragment` is a *gate*: `secured_mcp` exists so the user can choose "protect the MCP surface" here instead of
-having to find the `advanced` key `mcp.authorization.resource` in step 6, and its `requires` bare key means you
-must ask for that value (which in turn forces the JWT issuer prompt in step 7). `scope_admin` is documentation-only.
+having to find the `advanced` key `mcp.authorization.resource` in step 7, and its `requires` bare key means you
+must ask for that value (which in turn forces the JWT issuer prompt in step 8). `scope_admin` is documentation-only.
 An entry may instead carry a **`fragment_bundle`** (several files into a sub-package) — offer those exactly like
 the rest. Never re-emit a fragment a capability points at indirectly — `secured_mcp` pulls `SecurityConfig` in
 through the option, so emitting it once is correct.
 
 **Two are already decided in step 3 — do not ask them again here:** `data_access` (step 3's "Data access") and
 `secured_mcp` (step 3's "MCP OAuth"). Carry each step 3 answer straight through — a yes on MCP OAuth still asks for
-`mcp.authorization.resource` and chains to the issuer prompt in step 7, exactly as if it had been picked here.
+`mcp.authorization.resource` and chains to the issuer prompt in step 8, exactly as if it had been picked here.
 
 **A selected capability that carries `options:` is not finished until you have walked them.** A capability owning a
 whole configuration namespace declares it as an `options:` list in the same record shape a group uses, and those
-keys are asked HERE — step 6 walks `groups:`, and these are not in a group, so skipping them here means they are
-never asked at all. Same rules as step 6: show each option's **full property key + default**, translate only the
+keys are asked HERE — step 7 walks `groups:`, and these are not in a group, so skipping them here means they are
+never asked at all. Same rules as step 7: show each option's **full property key + default**, translate only the
 `desc`, split into ≤4-option questions, and honour `advanced`/`requires`/`requires_when`. Run it after any
 `subflow:` the capability also declares, so the sub-flow's answer is already known.
-**Two capabilities carry `options:` today.** Recount them in the yaml rather than trusting this list — it goes
-stale the moment a third is added, which is the same failure mode rule 4 below exists to prevent.
-- `embedded_auth` — `subflow: authstore` picks the user store, then its nine `options:` cover the rest of
-  `amoeba.auth.*`: token lifetimes, signing-key path, the two client registrations, and the refresh-token trio
-  (`refresh-token-enabled` / `-ttl` / `authorization-store`). Its `enabled`/`store`/`users` are already settled (by
-  the selection itself and by the sub-flow), so those three are the only ones you do not ask.
-  Two traps in that trio. **`authorization-store` is not `store`** — one holds usernames, the other holds issued
-  tokens, and they are independently chosen; word the questions so they cannot be mistaken for each other.
-  And `refresh-token-enabled=true` with `authorization-store=memory` is legal but WARNS: every restart voids
-  every refresh token, so the configured ttl is not what it appears to be.
+**One capability carries `options:` today.** Recount in the yaml rather than trusting this list — it goes
+stale the moment a second is added, which is the same failure mode rule 4 below exists to prevent.
 - `interface_spec_validator` — four `options:` under `amoeba.skeleton.*` and `amoeba.interface.*`: the
   service-layer shape, the skeleton's data access, whether a spec may override either, and the L3 rule's kill
   switch. `amoeba.skeleton.service-interface` is the project's service-layer standard, and its note says to write
@@ -175,8 +172,46 @@ Worked example, in-process + MCP enabled (the common case): seven survive — `c
 Recount this list against the yaml rather than trusting the number written here — the count moves whenever a
 capability is added, and a stale total is exactly the failure mode rule 4 exists to prevent.
 
-### 6. Advanced options — WALK the surface, one functional GROUP at a time (interactive)
-This step walks **`groups:` only**. A capability's own `options:` (e.g. `embedded_auth`'s `amoeba.auth.*`) were
+### 6. Deployment infrastructure (one selection)
+Ask **how far the generated project should carry its own deployment**. One question, four levels, each a
+superset of the one before. Default **`container`** — it assumes nothing about the user's organisation or
+hardware, and an image plus a compose file is useful anywhere.
+
+| Level | Emits (all from `templates/infra/`) |
+|---|---|
+| `none` | nothing. `setup.sh` on a host is the whole story |
+| `container` | `Dockerfile` · `docker-compose.yml` · `.env.example` · `.dockerignore` · `.gitattributes` · `docs/docker.md` |
+| `container + CI` | the above + `.github/workflows/ci.yml` · `docs/ci-cd.md` |
+| `full` | the above + `.github/workflows/deploy.yml` · `.github/runner/{docker-compose.yml,.env.example}` · `docs/secrets.md` |
+
+**Say what the last level commits them to before they pick it.** `full` is not merely "more files": it deploys
+to a **self-hosted runner's own host Docker**, and on a free-plan private repository there is **no approval
+gate available** (branch protection, rulesets and Environment protection rules all return
+`403 Upgrade to GitHub Pro`), so a green CI reaches production with no human confirmation. Offer the
+`workflow_dispatch`-only variant — delete the `workflow_run:` block — to anyone who does not want that.
+
+`full` needs two more typed inputs, asked only at that level:
+- **repository URL** → `{{REPO_URL}}` (e.g. `https://github.com/<owner>/<repo>`). The runner registers against it.
+- **deploy-host runner name** → the value the operator must store as the `DEPLOY_RUNNER_NAME` Actions variable.
+  Do not invent it; explain that `deploy.yml` compares it to `$RUNNER_NAME` and refuses to deploy on a mismatch,
+  and that it is set in the GitHub UI, not in a generated file.
+
+Two things this step CHANGES elsewhere, both easy to miss:
+
+1. **`docker-compose.yml` means the APP once this level is ≥ `container`.** At `none`, a docker DB keeps
+   today's behaviour and writes the vendor compose from `templates/db/` as `docker-compose.yml`. At
+   `container` or above that name belongs to the app, so the database moves to `docker-compose.local-db.yml`
+   using `templates/infra/docker-compose.local-db.<vendor>.yml.template` — an OVERLAY that patches
+   `depends_on` and `DB_HOST` onto the app service. Never emit both under the same name.
+2. **`.gitignore` gains `.env`/`.env.local`** (already marked `[OPTIONAL infra]` in `templates/gitignore.template`).
+
+Skip the question entirely when it cannot apply: `h2` in-memory with no MCP surface has nothing to deploy.
+Emitting infra is also independent of `protean.isolation.mode` — `worker`/`container` isolation describes where
+MODULES run, not how the app itself is shipped.
+
+### 7. Advanced options — WALK the surface, one functional GROUP at a time (interactive)
+This step walks **`groups:` only**. A capability's own `options:` (e.g. `interface_spec_validator`'s
+`amoeba.skeleton.*`) were
 asked in step 5 with the capability that owns them — do not re-ask them here, the same way `data_access` and
 `secured_mcp` are not re-offered in step 5.
 
@@ -219,7 +254,7 @@ Non-booleans (int/long/duration/string): a "check which to set" multi-select, th
 (typed) — checking only means "I want to override this default", then you collect the value. Enums: a selection
 of the allowed values (default preselected in wording).
 
-### 7. Validation + dependency resolution
+### 8. Validation + dependency resolution
 After all selections (steps 3–6), run a **validation pass** over the full resolved set before writing anything.
 Check, and fix or stop on each:
 - **requires satisfied** — every selected option/capability's `requires` is met; force the companion on, or prompt
@@ -228,10 +263,10 @@ Check, and fix or stop on each:
 - **requires_when satisfied** — for every option carrying `requires_when`, evaluate each rule: when all its `when`
   conditions hold, the `needs` key must be set to a non-empty value. It cannot be auto-filled (it is an
   environment-specific path/identifier) → **prompt for it (typed), and block generation if still empty.**
-  Options declared on a **capability** count here too — `amoeba.auth.service-client-id` requires
-  `amoeba.auth.service-client-secret`, because `EmbeddedAuthServerConfig` registers that client only when both are
-  non-blank and otherwise registers **nothing, silently**. Half of a credential pair is the one case here that
-  produces no error at all, so it has to be caught at generation rather than when CI first gets a 401.
+  Options declared on a **capability** count here too, not just those under `groups:`. Watch credential pairs in
+  particular (`protean.worker.db.admin-username` / `admin-password`): half a pair is the one case here that can
+  produce **no error at all** — the feature registers nothing, silently — so it has to be caught at generation
+  rather than when CI first gets a 401.
 - **enum in range** — every enum value is one of its `allowed` values.
 - **sidecar worker runtime needs its artifact (per track)** — `protean.worker.runtime=sidecar` replaces the
   bootJar-exploding embed runtime with an external artifact, and the required key differs by isolation mode:
@@ -271,7 +306,8 @@ Check, and fix or stop on each:
   **forced on, not offered**. `interface_spec_validator` requires `swagger_annotations` because its generator emits
   `@Schema`/`@Operation` into every DTO and controller it writes, and its promotion-gate-2 rule then rejects a field
   that carries none — so without the jar every module deployed through `amoeba.define_interface` fails to compile at
-  its first deploy. Resolve these before step 5 asks about `module_classpath`, and say the entry was forced rather
+  its first deploy. Resolve these before step 7 asks about `module_classpath` (it is the LAST thing step 7's group
+  walk presents, not a step 5 question), and say the entry was forced rather
   than presenting it as still open.
 - **annotations and the rule that requires them** — two **warnings** (never blocking; only the author knows what
   their rule will check):
@@ -297,21 +333,48 @@ go back and prompt for the fix. Then collect `build_deps`, `fragment`s, resolve 
 final resolved configuration** (option set + forced companions + deps + files to be written) for confirmation —
 Korean prose around a verbatim list of keys, values and paths.
 
-### 8. Generate
+### 9. Generate
 Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (=`{{PKG}}` with `.`→`/`),
-`{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`. Engine:
+`{{PORT}}` (the port typed in step 1), `{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`.
+
+**★ `{{COORD}}` IS `group:artifact` — WITHOUT THE VERSION.** Step 2 asks the user for a *coordinate* that
+includes it (`org.htcom:protean:0.0.1`), so the two are not the same string and you must split before
+substituting: `{{COORD}}` = `org.htcom:protean`, `{{VERSION}}` = `0.0.1`. Templates combine them themselves —
+`build.gradle.template` writes `'{{COORD}}:{{VERSION}}'`, and `setup.sh.template` re-splits `{{COORD}}` with
+`${COORD%%:*}` / `${COORD##*:}` to locate the mavenLocal pom. Substituting the full three-part coordinate yields
+`org.htcom:protean:0.0.1:0.0.1` in `build.gradle` and a broken mavenLocal path in `setup.sh`.
+
+**★ Placeholders the generator must fill that are NOT typed by the user**, listed here because each is a boolean
+the templates branch on and an unset one silently reads as "false": `{{NAME_KEBAB}}`, `{{IS_SNAPSHOT}}`,
+`{{HAS_DB_DOCKER}}`, `{{HAS_DB_EXTERNAL}}` (data access whose connection mode is `existing` or `other` — this is
+what arms `setup.sh`'s external-DB preflight), `{{ISOLATION}}`, `{{WORKER_RUNTIME}}`, `{{SIDECAR_*}}`,
+`{{OAUTH}}`, `{{REPO_URL}}`.
+
+Engine:
 - **`application.yml`** — start from `templates/application.yml.template` (minimal base) and **inject every set
   `protean.*` key** grouped under `protean:`, plus the `spring.datasource` block for the chosen vendor. A
   `requires_when` `needs` key that is **not** `protean.*` goes into its own top-level block, never under
   `protean:` — e.g. `spring.security.oauth2.resourceserver.jwt.issuer-uri` lands under `spring.security`.
-  **The same rule governs a capability's `options:`**: `embedded_auth`'s keys are `amoeba.auth.*`, so they form a
-  top-level `amoeba:` block. Putting them under `protean:` binds nothing —
-  `@ConfigurationProperties("amoeba.auth")` would silently see defaults, embedded auth would stay off, and the app
-  would start looking correct. Write
-  that one as `${OAUTH_ISSUER_URI}` **with no fallback** (an unset value must abort startup) while every
-  *advertised* placeholder keeps a fallback. Never hardcode a host or port into an advertised value: write
-  `mcp.authorization.resource` as `http://${SERVER_HOST:localhost}:${SERVER_PORT:8080}/platform/mcp`, and keep
-  the template's `server.port: ${SERVER_PORT:8080}` so the bind port and the advertised port cannot drift
+  **The same rule governs a capability's `options:`**: `interface_spec_validator`'s keys are `amoeba.skeleton.*` /
+  `amoeba.interface.*`, so they form a top-level `amoeba:` block. Putting them under `protean:` binds nothing —
+  the `@Value`/`@ConfigurationProperties` lookups would silently see defaults and the app would start looking
+  correct. Write the issuer
+  as `${OAUTH_ISSUER_URI}` **with no fallback** (an unset value must abort startup) while every
+  *advertised* placeholder keeps a fallback.
+  **★ `spring.datasource.password` FOLLOWS THE CONNECTION MODE, and getting it wrong commits a live credential.**
+  docker ⇒ `${DB_PASSWORD:{{PW}}}` (a value the skill generated and also wrote into the compose file — throwaway,
+  and the two must agree). **existing / other ⇒ `${DB_PASSWORD}` with NO fallback**, because there `{{PW}}` is the
+  password the USER TYPED for a server that already exists. `prototype/nz_trilo` was generated with
+  `password: "${DB_PASSWORD:trilo1234!}"` while `prototype/nz_ammon` — same skill, same `existing` path — got
+  `${DB_PASSWORD}`. One spec, two results, which is what `db-vendors.yaml`'s note now closes. (Nothing leaked:
+  nz_trilo is not a git repository and nz_ammon, which is tracked, carries the safe form. The point is that which
+  form you get was left to judgment.)
+  ⚠ And do NOT present no-fallback here as the OAUTH_ISSUER_URI guarantee: `spring.datasource.*` is bound by the
+  `@ConfigurationProperties` Binder, which leaves an unresolved `${...}` as a literal string, and Hikari connects
+  lazily — so an unset `DB_PASSWORD` starts the app cleanly and fails at the FIRST QUERY. Say that wherever you
+  write the key. Never hardcode a host or port into an advertised value: write
+  `mcp.authorization.resource` as `http://${SERVER_HOST:localhost}:${SERVER_PORT:{{PORT}}}/platform/mcp`, and keep
+  the template's `server.port: ${SERVER_PORT:{{PORT}}}` so the bind port and the advertised port cannot drift
   (`SERVER_PORT` is the exact name Spring relaxed-binds to `server.port` — see the template's comment). Unset
   keys are omitted (library default) — optionally leave the most relevant as commented edit-points.
 - **`build.gradle`** — from the template: always `org.htcom:protean:<ver>` + `spring-boot-starter-web`; add each
@@ -342,7 +405,16 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
     with — and never add `@EnableWebMvc`, which would switch off Boot's MVC autoconfiguration.
   - Add a `Class.forName("{{PKG}}.support.BaseService")` line to `<<fragment-checks>>`.
 - **fragments** — copy each selected `templates/fragments/*.template` into `src/main/java/{{PKG_PATH}}/`, rename
-  to a real class, substitute names.
+  to a real class, substitute names. A key carrying **`test_fragment`** also emits that one into
+  `src/test/java/{{PKG_PATH}}/` — **keep its class name** (unlike a main fragment): the test asserts a structural
+  guarantee, not a project-specific policy, so there is nothing to rename it after. Today that is
+  `protean.mcp.authorization.resource` → `ResourceServerOnlyTest`, which pins that this app **verifies tokens and
+  never issues them** — a guarantee that lives in what the app does not carry, so no reading of the main sources
+  can confirm it.
+- **`emit` instructions** — a key or capability carrying `emit` names config that must be written even though its
+  library default is empty. `secured_mcp` requires `scopes-supported: [mcp.read, mcp.write, mcp.admin]` and
+  `bearer-methods-supported: [header]`: `SecurityConfig` gates on exactly those three scope names, so leaving them
+  unadvertised ships a discovery document a client cannot act on. `ResourceServerOnlyTest` fails if you skip it.
 - **fragment bundles** — a capability carrying `fragment_bundle` emits a whole `templates/fragments/<dir>/` at
   once. Four rules, each the opposite of a single fragment's:
   - each member goes to `src/<main|test>/java/{{PKG_PATH}}/<sub-package>/` per its `to:`, **not** flat into
@@ -356,10 +428,49 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
   Add one `Class.forName` line per bundle to `<<fragment-checks>>` (the representative class, e.g.
   `{{PKG}}.interfacedef.InterfaceSpecValidator`), and remember the bundle's test members run under
   `./gradlew test` alongside `ConfigMatchesSelectionTest`.
-- **infra** — DB docker path: `docker-compose.yml` from `templates/db/*`. Its `init/*.sql` depends on the
+- **DB infra** — DB docker path: `docker-compose.yml` from `templates/db/*`. Its `init/*.sql` depends on the
   DataSource's PURPOSE: a **data-access** DataSource gets `init/01-schema.sql` (the `items` table); a DataSource
   that only backs the **jdbc module-store** does NOT (Protean creates its own store tables) — omit the items init.
   H2 data-access: `schema.sql`. existing/other: none.
+  ⚠ **Only when step 6 chose `none`.** At `container` or above, `docker-compose.yml` is the APP's file, so the
+  database is written as `docker-compose.local-db.yml` from
+  `templates/infra/docker-compose.local-db.<vendor>.yml.template` instead. That overlay carries no `init/`
+  mount (see its comment on why a directory bind breaks the entrypoint) — put seed SQL in a single-file mount.
+- **deployment infra (step 6)** — copy from `templates/infra/` per the chosen level, mapping filenames:
+  `Dockerfile.template` → `Dockerfile`, `dockerignore.template` → `.dockerignore`,
+  `gitattributes.template` → `.gitattributes`, `env.example.template` → `.env.example`,
+  `docker-compose.app.yml.template` → `docker-compose.yml`, `workflows/*.template` → `.github/workflows/*`,
+  `runner/docker-compose.yml.template` → `.github/runner/docker-compose.yml`,
+  `runner/env.example.template` → `.github/runner/.env.example`, `docs/*.md.template` → `docs/*.md`.
+  Substitute `{{NAME}}`, `{{NAME_KEBAB}}` (= `{{NAME}}` with `_`→`-`; it names containers, volumes and the
+  compose project), `{{PKG}}`, `{{PORT}}`, `{{DB}}`, and at the `full` level `{{REPO_URL}}`.
+  Four things to get right:
+  - **★ PRUNE EVERY `[OPTIONAL local-db]` BLOCK WHEN NO OVERLAY IS EMITTED.** `docker-compose.local-db.yml` is
+    written only for a **docker-managed** database at infra ≥ `container`. For an existing server, `h2`, `other`,
+    or no data access at all, the overlay does not exist — but four templates reference it anyway, and they are
+    marked `[OPTIONAL local-db]` so you can find them: `workflows/deploy.yml.template`,
+    `docker-compose.app.yml.template`, `env.example.template`, `docs/docker.md.template` (each carries the
+    replacement text in its own comment). **`deploy.yml` is the one that is not merely cosmetic**: the reference
+    is a `type: choice` OPTION, so it is selectable, and an operator who picks it runs `docker compose -f
+    docker-compose.yml -f docker-compose.local-db.yml` against a missing file — the deploy fails at the compose
+    step, on the production host, after CI went green. Delete that option line.
+  - **★ RENAMED FRAGMENTS MUST BE RENAMED EVERYWHERE, NOT JUST IN THEIR OWN FILE.** A single `fragment` is
+    renamed to a real class (step 9), but other templates refer to those classes in prose and in
+    `<<fragment-checks>>`. After emitting, grep the generated tree for the template placeholder names
+    (`ExampleTool`, `ExampleAuthorizer`, `ExampleCodeRule`, `ExampleUnloadCallback`, `ExampleToolOverride`) and
+    replace each with the name you actually used — `README.md`, `SecurityConfig.java` and the
+    `module_source_tools` bundle's tests all mention the authorizer or the custom tool. A leftover placeholder
+    name is a reference to a class that does not exist. (`fragment_bundle` members are the opposite: `rename:
+    false`, so never touch those.)
+  - **`{{...}}` is not always a placeholder.** `ci.yml` contains `{{.State.Health.Status}}`, which is docker
+    inspect's Go template. Skill placeholders are `{{UPPER_SNAKE_CASE}}` only — copy anything else verbatim.
+  - **Do not "simplify" the load-bearing parts.** Each is a comment explaining a failure that is otherwise
+    silent: no `java -jar`, `jmods` removed in the build stage, no `services:`/`--network host` in CI,
+    `overwrite: true` on the artifact uploads, the deploy-host label plus `$RUNNER_NAME` self-check, the smoke
+    hitting `SERVER_HOST` rather than `localhost`, and identical numbers on both sides of `ports`.
+  - **Tell the user what only a human can do**: `git update-index --chmod=+x gradlew setup.sh` (a mode bit
+    `.gitattributes` cannot fix), and — at `full` — registering the Actions Secrets/Variables listed in
+    `docs/secrets.md`, including `DEPLOY_RUNNER_NAME`.
 - **provisioning admin (D5)** — when `worker.db.auto-provision=true` AND the DB is docker-managed, generate
   `init/00-provision-admin.sql` creating the `worker.db.admin-username`/`admin-password` account with
   CREATE DATABASE/USER + GRANT (MySQL) or CREATE SCHEMA/ROLE (Postgres), so provisioning works at deploy. For an
@@ -372,13 +483,21 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
   create/open/close/detach/destroy; destroy needs `worker.db.allow-destroy` + `confirm=<name>`). Note packing:
   same-scope modules share a worker up to `modules-per-worker` (128); set 1 for strict isolation.
 - **wrapper** — provision with `gradle wrapper --gradle-version 8.14.5` in the new dir (or copy an existing one).
+- **`settings.gradle`** (always) — from `templates/settings.gradle.template`. Easy to forget because nothing else
+  references it, and the cost is not just `rootProject.name`: it carries the **foojay toolchain resolver**, which
+  is what provisions JDK 21 on a machine that does not have one. Omit it and `setup.sh`'s JDK 21 preflight fails
+  on exactly the fresh-clone case the resolver exists for.
 - **README.md** (from template — list the selected capabilities), **`.gitignore`**, **`Application.java`**.
 - **setup.sh** (always — the FINAL artifact) — from `templates/setup.sh.template`, `chmod +x`. A Linux/Ubuntu
   install-and-run script for this exact configuration: preflight (JDK 21 via javac, gradlew, protean jar in
   mavenLocal when SNAPSHOT, Docker daemon + compose when a docker DB, sidecar artifact when
   `worker.runtime=sidecar`, free port) → `docker compose up -d --wait` (if docker DB) → `./gradlew run`. Fill
   `{{IS_SNAPSHOT}}` (version ends with `-SNAPSHOT`) and `{{HAS_DB_DOCKER}}` (data access OR jdbc-store DataSource
-  selected AND connection = docker), `{{ISOLATION}}` (the isolation mode — the script checks Docker when it is
+  selected AND connection = docker), **`{{HAS_DB_EXTERNAL}}`** (the same but connection = `existing`/`other` —
+  arms the external-DB preflight: `DB_PASSWORD` present, `DB_HOST` not silently falling back to `localhost`, a
+  TCP probe, and the reminder that no tool runs DDL. That block is what
+  `docker-compose.app.yml.template` means when it says "setup.sh's check", so the two must not drift),
+  `{{ISOLATION}}` (the isolation mode — the script checks Docker when it is
   `container`), and the sidecar trio `{{WORKER_RUNTIME}}` (`embed`|`sidecar`, `embed` when isolation is
   in-process), `{{SIDECAR_JAR}}`, `{{SIDECAR_IMAGE}}`, `{{SIDECAR_SHARED_API}}` (each empty when unset — the script
   then checks the artifact required for this track and skips the bootJar build under `runtime=sidecar`). Also fill
@@ -394,7 +513,7 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
   compile error. `build.gradle` already adds `testImplementation spring-boot-starter-test`. This test loads
   `application.yml` and asserts it matches the selection — it does not start the server.
 
-### 9. Verify (print, do not run)
+### 10. Verify (print, do not run)
 Lead with the one-command install for a Linux/Ubuntu server, then the manual equivalents. **Explain each step in
 Korean; print every command byte-for-byte** — a translated or "tidied" command is one the user cannot paste.
 - **`./setup.sh`** — preflight-checks the environment and prerequisites, brings up the DB (if any), and runs the
@@ -402,10 +521,33 @@ Korean; print every command byte-for-byte** — a translated or "tidied" command
 - (mavenLocal path) `cd <protean repo> && ./gradlew publishToMavenLocal`.
 - (DB docker) `docker compose up -d`.
 - `./gradlew run` (JDK 21).
-- (MCP) `curl -s localhost:8080/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
-- Hit a deployed module endpoint; `curl localhost:8080/platform/modules` for state.
-- Sanity checks the user can run without the server: `./gradlew compileJava` (compiles against the protean jar)
-  and `./gradlew test` (runs `ConfigMatchesSelectionTest` — asserts the generated config matches the selection).
+- (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
+- Hit a deployed module endpoint; `curl localhost:{{PORT}}/platform/modules` for state.
+- Sanity checks that need no running deployment: `./gradlew compileJava` (compiles against the protean jar) and
+  `./gradlew test` (runs `ConfigMatchesSelectionTest` — asserts the generated config matches the selection; plus
+  `ResourceServerOnlyTest` when the MCP surface is secured, and both fragment bundles' tests).
+  **Do not describe this as "without the server".** `ConfigMatchesSelectionTest` starts nothing, but
+  `ResourceServerOnlyTest` is `@SpringBootTest(webEnvironment = RANDOM_PORT)` and brings up a real Tomcat — on a
+  random port, so it cannot clash with a running instance, and against an `.invalid` issuer, so no Authorization
+  Server has to exist. Say what is actually true: the suite is **offline** and needs no AS and no reachable
+  database. And say why the database part is not a guarantee — the DataSource is fully wired and Hikari merely
+  connects lazily, so a green `./gradlew test` proves nothing about the DB. That is what `./setup.sh --check` is
+  for.
+- **(step 6 ≥ `container`) the container path**, printed as its own short block:
+  ```
+  cp .env.example .env          # fill in the required values — OAUTH_ISSUER_URI has no default
+  docker compose up -d --build
+  docker compose ps             # wait for STATUS to read (healthy)
+  ```
+  With the sidecar overlay:
+  `docker compose -f docker-compose.yml -f docker-compose.local-db.yml up -d --build`.
+  Say that `down` keeps the module-store volume and `down -v` discards every deployed module.
+- **(step 6 = `full`) what a human must do before CI can work** — this is setup, not verification, so print it
+  as a checklist rather than as commands to paste blindly: `git update-index --chmod=+x gradlew setup.sh`;
+  register the runner (`cd .github/runner && cp .env.example .env && docker compose up -d`); add the Actions
+  Secrets/Variables from `docs/secrets.md`, `DEPLOY_RUNNER_NAME` included; and add the `deploy-host` label to
+  exactly one runner **in the GitHub UI** — labels are fixed at registration time, so editing the compose file
+  afterwards changes nothing.
 
 ## Notes
 - MCP is an RCE surface (compiles + hot-loads submitted sources) — off by default. Enabling it in a sample is a

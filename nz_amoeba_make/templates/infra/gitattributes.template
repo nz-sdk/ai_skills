@@ -1,0 +1,31 @@
+# Shell scripts and container inputs must keep LF even when checked out on Windows, or they will not run on
+# Linux (container / CI / server). Under core.autocrlf=true, a CRLF gradlew makes the container build die with
+# `bad interpreter: /bin/sh^M`, and a CRLF Dockerfile breaks the line continuations (\) in RUN.
+gradlew         text eol=lf
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.sql           text eol=lf
+
+# ★ These are REQUIRED, not nice-to-have. Checked out as CRLF on a Windows clone with core.autocrlf=true:
+#     .env.example  → values copied into .env gain a trailing \r. OAUTH_ISSUER_URI becomes
+#                     "http://host:{{PORT}}\r", so the string the Resource Server verifies differs character
+#                     for character from the `iss` the Authorization Server stamps — and the app starts
+#                     perfectly while every request 401s.
+#     .dockerignore → a pattern becomes ".env\r" and can fail to match. Those patterns are the only thing
+#                     keeping credentials out of the build context.
+.env.example    text eol=lf
+.dockerignore   text eol=lf
+.gitignore      text eol=lf
+
+# Windows batch keeps CRLF
+*.bat           text eol=crlf
+gradlew.bat     text eol=crlf
+
+# ⚠ THIS FILE FIXES LINE ENDINGS ONLY — it cannot fix the executable bit.
+#   git on Windows records newly added files as 100644, so gradlew gets committed non-executable and a CI
+#   checkout fails with `./gradlew: Permission denied`. On the first commit you MUST run:
+#       git update-index --chmod=+x gradlew setup.sh
+#   Verify:  git ls-files -s gradlew   → must read 100755
+#   (The workflow and the Dockerfile also chmod +x as a second line of defence.)

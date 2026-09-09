@@ -185,7 +185,7 @@ class ListModuleFilesToolTest {
     }
 
     /**
-     * Classification matters: the SPI default is CUSTOM, and the ModuleActionAuthorizer policy (ExampleAuthorizer)
+     * Classification matters: the SPI default is CUSTOM, and the ModuleActionAuthorizer policy
      * puts CUSTOM behind mcp.admin alongside config.set and deploy_shared_lib. A read tool must not sit there.
      */
     @Test

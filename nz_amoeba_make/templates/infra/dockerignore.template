@@ -1,0 +1,35 @@
+# What to keep OUT of the build context. What must not get in matters more than image size.
+
+# ★★ SECRETS. .gitignore only stops git. Without these lines the first `docker build` uploads .env to the
+#     daemon and BuildKit caches it. Once a credential lands in an image layer, anyone who can pull the image
+#     can read it.
+.env
+.env.*
+
+# Host build outputs — the image rebuilds inside the container, so there is no reason to send these, and doing
+# so lets stale host classes poison the cache.
+build/
+.gradle/
+run.log
+
+# vcs / ci / docs / editors — no effect on the build
+.git
+.gitignore
+.gitattributes
+.github/
+docs/
+README.md
+*.md
+.claude/
+.idea/
+.vscode/
+
+# Container inputs themselves
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CAUTION: the build needs these — never exclude them
+#   src/ · gradle/ · gradlew · build.gradle · settings.gradle
+# ─────────────────────────────────────────────────────────────────────────────

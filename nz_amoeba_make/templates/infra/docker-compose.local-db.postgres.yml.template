@@ -1,0 +1,94 @@
+# PostgreSQL 16 sidecar overlay — lets the project start straight from a clone with no external database.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local-db.yml up -d --build
+#
+# To avoid passing both -f every time, put this in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.local-db.yml
+#
+# Reset (the only way to re-apply the schema — see the initdb caveat at the bottom):
+#   docker compose -f docker-compose.yml -f docker-compose.local-db.yml down -v
+#
+# ─────────────────────────────────────────────────────────────────────
+# ★ WHY A SEPARATE FILE RATHER THAN `profiles: [local-db]`
+#
+# Compose v2.20+ AUTO-ACTIVATES the profile of any service that an active service depends_on. So attaching
+# depends_on: postgres to the profile-less app service brings the sidecar up even in the default configuration
+# (`docker compose up`) — which defeats the point of the profile. Older versions do the opposite and fail with
+# `service "app" depends on undefined service "postgres"`. Neither is wanted. An overlay file adds the service
+# AND the depends_on together, and does nothing at all when not passed.
+# ─────────────────────────────────────────────────────────────────────
+
+services:
+  app:
+    depends_on:
+      # Long form, so it merges cleanly into a base file that has no depends_on.
+      #
+      # The app itself would survive starting first — Hikari is lazy and nothing probes the database at startup.
+      # service_healthy is kept anyway: the point of the sidecar is a set that works straight from a clone, and
+      # if the app wins the race the FIRST module deploy hits a still-initialising database. That failure
+      # surfaces in module compile/run output rather than the app log, which obscures the cause.
+      postgres:
+        condition: service_healthy
+    environment:
+      # Override with the container-network name, so the app talks to the sidecar even when .env names an
+      # external host.
+      #
+      # ⚠ This does NOT exempt DB_HOST from .env. The base file's ${DB_HOST:?...} guard fires while compose
+      #   interpolates each file, before the merge, so it is unaffected by this override. For the sidecar path,
+      #   write DB_HOST=postgres in .env (see .env.example).
+      DB_HOST: postgres
+      DB_PORT: "5432"
+
+  postgres:
+    image: postgres:16
+    container_name: {{NAME_KEBAB}}-postgres
+    restart: unless-stopped
+    environment:
+      # ★ NOT configurable. The database name is hardcoded in application.yml's JDBC URL. Change it here and
+      #   the app connects to a database that does not exist.
+      POSTGRES_DB: {{DB}}
+      # The base file already guards these with ${DB_USER:?...} / ${DB_PASSWORD:?...} — giving fallbacks here
+      # would let the two files disagree (the sidecar creates account A while the app connects as B).
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env (it is both the sidecar account password and the app's connection password)}
+      # Postgres stores `timestamp with time zone` in UTC regardless of this, but it fixes the SESSION zone so a
+      # plain `timestamp` column and any now() default read back consistently for every client.
+      PGTZ: UTC
+      TZ: UTC
+
+    ports:
+      # Host side only. The app connects over the container network to postgres:5432 and is unaffected.
+      # If the host already runs Postgres on 5432, step aside with POSTGRES_HOST_PORT=15432.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+
+    volumes:
+      - {{NAME_KEBAB}}-postgres-data:/var/lib/postgresql/data
+
+      # ★ NO initdb MOUNT HERE BY DEFAULT — and if you add one, mount a SINGLE FILE, never a directory.
+      #   ⚠ Never leave a bind pointing at a path that does not exist: Docker creates an empty DIRECTORY on the
+      #   host, and the entrypoint's script scan then behaves unpredictably. Mounting a directory (./init) :ro
+      #   and layering files inside it does NOT work either — Docker cannot create a mountpoint inside a
+      #   read-only mount and the container refuses to start. The numeric prefix is the execution order:
+      #   - ./sql/items.sql:/docker-entrypoint-initdb.d/01-items.sql:ro
+
+    healthcheck:
+      # -h 127.0.0.1 forces TCP rather than the unix socket: during the initdb phase the temporary server
+      # listens only on the socket, so a socket check would report ready before the real server accepts
+      # connections — which is precisely what service_healthy above must wait for.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  {{NAME_KEBAB}}-postgres-data:
+
+# ⚠ Scripts in /docker-entrypoint-initdb.d run ONLY when the data directory is empty. Editing DDL after the
+#   first `up` does nothing — you must clear the volume with `down -v` for it to run again.

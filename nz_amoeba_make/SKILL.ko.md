@@ -12,6 +12,8 @@
 |---|---|
 | `name` | `nz_amoeba_make` |
 | 표시 이름 | Amoeba Maker |
+| `metadata.version` | `0.2.0` |
+| `license` | `AGPL-3.0-only` |
 | `description` | `prototype/<name>` 아래에 실행 가능한 Protean 소비 샘플 서버를 처음부터 스캐폴딩한다. **Protean 옵션 표면 전체**(모든 `protean.*` 설정 + 모든 소비자 확장 지점 + 데이터베이스 서브플로우)를 사용자와 함께 훑고, 그에 맞는 build·config·code·infra·README 를 생성한다. Protean 을 모르는 사용자를 위해 만들어졌다 — 어떤 설정이든 기본값과 평이한 설명을 곁들여 스킬을 통해 구성할 수 있다. 새 Protean 샘플/예제 서버를 만들거나, capability 를 시험해 보거나, 다운스트림 Protean 통합을 부트스트랩할 때 사용한다. 트리거: "make a protean sample", "scaffold a protean server", "new protean example", "protean sample 만들어" |
 
 # Amoeba Maker
@@ -27,10 +29,6 @@
   동반 옵션), `requires_when`(사용자가 값을 제공해야 하는 조건부 요구 — 미충족 시 차단), `build_deps`,
   `fragment`. **이 파일을 훑어 질문과 생성을 구동한다.**
 - **`reference/db-vendors.yaml`** — 데이터베이스 서브플로우(벤더 + 기존 서버/docker/임베디드).
-- **`reference/auth-stores.yaml`** — `embedded_auth` capability 의 사용자 저장소 서브플로우(`memory` | `jdbc`).
-  `db-vendors.yaml` 이 `subflow: db` 로 도달되는 것과 똑같이 `subflow: authstore` 로 도달한다.
-  **`embedded_auth` 는 토큰 서명 키를 MCP RCE 표면 안에 두게 된다** — 제시할 때 그 `security` 노트를 그대로
-  인용하고, 절대 기본값으로 제시하지 말 것.
 - **`reference/protean-capabilities.md`** — 사람이 읽는 서술 + 8가지 등록 메커니즘(배경 지식).
 - **`templates/`** — 파일 템플릿 + capability 별 코드 프래그먼트 + 벤더별 DB 템플릿.
 
@@ -75,15 +73,22 @@
 
 ## 흐름 (Flow)
 
-### 1. 대상 폴더 + Java 패키지 (타이핑)
+### 1. 대상 폴더 + Java 패키지 + HTTP 포트 (타이핑)
 
-타이핑 입력 2개 — 여기서 **둘 다** 묻는다(각각 사용자가 입력한다. 기본값 제시는 허용하되, 이름 목록을 제시하지는
+타이핑 입력 3개 — 여기서 **셋 다** 묻는다(각각 사용자가 입력한다. 기본값 제시는 허용하되, 이름 목록을 제시하지는
 말 것).
 
 1. **폴더명** — `[a-z0-9_-]+` 검증. `prototype/<name>/` 아래에 생성하고, 이미 존재하면 거부한다.
 2. **Java 패키지** — 기본값 `prototype.<name>`(`-`→`_` 치환). 사용자는 어떤 패키지든 입력할 수 있다
    (예: `kr.newzen.amoeba.api`). 검증: 점으로 구분된 각 세그먼트가 `[a-z_][a-z0-9_]*` 를 만족하고, 어떤
    세그먼트도 Java 예약어가 아닐 것. 이 값이 `{{PKG}}` 가 되고, `{{PKG_PATH}}` 는 `{{PKG}}` 의 `.`→`/` 다.
+3. **HTTP 포트** — 기본값 `8080`, 1024–65535 검증. 이 값이 `{{PORT}}` 가 된다.
+   **가정하지 말고 묻는다.** 샘플들은 같은 `prototype/` 트리에 생성돼 같은 머신에서 돌기 때문에, 기본값을
+   고정하면 두 번째 샘플이 첫 번째 옆에서 기동하지 못하고, 그 충돌이 생성 시점의 질문이 아니라 실행 시점의
+   `BindException` 으로 드러난다. 다른 샘플이 쓰는 포트를 알 수 있으면 사용자에게 알려 준다.
+   이 값은 `${SERVER_PORT:{{PORT}}}` 의 **기본값 자리에만** 들어가고 맨 리터럴로는 절대 쓰이지 않는다 —
+   그래서 운영자는 생성된 파일을 고치지 않고 배포마다 덮어쓸 수 있다. 그것이 ONE port concept 이다:
+   같은 변수가 바인드 포트와 광고되는 디스커버리 주소를 함께 몰기 때문에 둘이 어긋날 수 없다.
 
 ### 2. 좌표 / 버전 (타이핑) + maven-central 확인
 
@@ -102,7 +107,7 @@
 - **격리 모드** — `protean.isolation.mode`: in-process / worker / container.
 - **MCP 표면** — `protean.mcp.enabled` on/off.
 - **MCP OAuth** — `/platform/**` 을 OAuth2 Resource Server 로 보호할지? (MCP 가 켜졌을 때만 묻는다.) 예 ⇒
-  `secured_mcp` capability 를 선택한 것과 동일하다. `mcp.authorization.resource` 를 묻게 되고, 그것이 step 7 의
+  `secured_mcp` capability 를 선택한 것과 동일하다. `mcp.authorization.resource` 를 묻게 되고, 그것이 step 8 의
   JWT issuer 프롬프트로 연쇄되며 security starter 를 끌어온다. 아니오 ⇒ MCP 표면이 열려 있는 상태 — 로컬 데모
   전용이며, README 가 그 사실을 반드시 밝혀야 한다.
 - **데이터 접근** — 모듈이 데이터베이스를 필요로 하는가? (예 → step 4 의 DB 서브플로우. in-process 로 강제됨.)
@@ -131,33 +136,25 @@
 **interface spec validator**. 각 항목의 `requires` 를 적용한다(예: 커스텀 툴 → `mcp.enabled` 강제).
 
 대부분은 `fragment` 를 떨어뜨리지만, **전부가 그렇지는 않다 — 목록을 fragment 가 있는 항목으로 줄이지 말 것.**
-`fragment` 가 없는 capability 는 *관문*이다. `secured_mcp` 는 사용자가 step 6 에서 `advanced` 키
+`fragment` 가 없는 capability 는 *관문*이다. `secured_mcp` 는 사용자가 step 7 에서 `advanced` 키
 `mcp.authorization.resource` 를 찾아내야 하는 대신 여기서 "MCP 표면을 보호한다"를 고를 수 있게 존재하며, 그
-`requires` 의 bare key 는 그 값을 물어야 함을 뜻한다(그것이 다시 step 7 의 JWT issuer 프롬프트를 강제한다).
+`requires` 의 bare key 는 그 값을 물어야 함을 뜻한다(그것이 다시 step 8 의 JWT issuer 프롬프트를 강제한다).
 `scope_admin` 은 문서화 전용이다. 어떤 항목은 대신 **`fragment_bundle`**(여러 파일을 서브패키지로)을 가질 수
 있는데, 나머지와 똑같이 제시한다. capability 가 간접적으로 가리키는 fragment 를 다시 내보내지 말 것 —
 `secured_mcp` 는 옵션을 통해 `SecurityConfig` 를 끌어오므로 한 번만 내보내는 것이 맞다.
 
 **둘은 step 3 에서 이미 결정됐다 — 여기서 다시 묻지 말 것:** `data_access`(step 3 의 "데이터 접근")와
 `secured_mcp`(step 3 의 "MCP OAuth"). step 3 의 답을 그대로 관통시킨다 — MCP OAuth 에 예라고 했으면 여전히
-`mcp.authorization.resource` 를 묻고 step 7 의 issuer 프롬프트로 연쇄된다. 여기서 골랐을 때와 똑같이.
+`mcp.authorization.resource` 를 묻고 step 8 의 issuer 프롬프트로 연쇄된다. 여기서 골랐을 때와 똑같이.
 
 **`options:` 를 가진 capability 는 그것까지 걸어야 끝난 것이다.** 설정 네임스페이스를 통째로 소유한 capability 는
-그것을 group 과 **같은 레코드 형태**의 `options:` 목록으로 선언하며, 그 키들은 **여기서** 묻는다 — step 6 은
-`groups:` 를 걷고 이것들은 group 이 아니므로, 여기서 건너뛰면 **영영 묻지 않게 된다**. 규칙은 step 6 과 같다:
+그것을 group 과 **같은 레코드 형태**의 `options:` 목록으로 선언하며, 그 키들은 **여기서** 묻는다 — step 7 은
+`groups:` 를 걷고 이것들은 group 이 아니므로, 여기서 건너뛰면 **영영 묻지 않게 된다**. 규칙은 step 7 과 같다:
 옵션마다 **전체 프로퍼티 키 + 기본값**을 표시하고, `desc` 만 한국어로 옮기고, 질문당 4개 이하로 쪼개고,
 `advanced`/`requires`/`requires_when` 을 지킨다. 같은 capability 가 `subflow:` 도 선언했다면 **그것을 먼저** 돌려
 서브플로우의 답이 이미 정해진 뒤에 옵션을 묻는다.
-**현재 `options:` 를 가진 capability 는 둘이다.** 이 목록을 믿지 말고 yaml 에서 다시 세라 — 세 번째가 추가되는
+**현재 `options:` 를 가진 capability 는 하나다.** 이 목록을 믿지 말고 yaml 에서 다시 세라 — 두 번째가 추가되는
 순간 낡은 정보가 되며, 그것이 아래 규칙 4가 막으려는 바로 그 실패다.
-- `embedded_auth` — `subflow: authstore` 로 사용자 스토어를 고른 뒤, 9개 `options:` 가 `amoeba.auth.*` 의
-  나머지를 덮는다: 토큰 수명 2종, 서명키 경로, 클라이언트 등록 2건, 그리고 refresh 3종
-  (`refresh-token-enabled` / `-ttl` / `authorization-store`). `enabled`/`store`/`users` 는 이미 정해져
-  있으므로(선택 자체와 서브플로우로) 그 셋만 묻지 않는다.
-  refresh 3종에는 함정이 둘 있다. **`authorization-store` 는 `store` 가 아니다** — 하나는 사용자명을, 다른
-  하나는 발급된 토큰을 담고 서로 독립적으로 고른다. 질문 문구를 서로 헷갈리지 않게 쓴다. 그리고
-  `refresh-token-enabled=true` + `authorization-store=memory` 조합은 허용하되 **경고**한다 — 재시작마다 모든
-  refresh token 이 무효화되어 설정한 ttl 이 보이는 대로 동작하지 않는다.
 - `interface_spec_validator` — `amoeba.skeleton.*` 과 `amoeba.interface.*` 아래 `options:` 4개: 서비스 계층
   형태, 스켈레톤의 데이터 접근, 스펙이 그 둘을 덮어쓸 수 있는지, 그리고 L3 규칙의 킬 스위치.
   `amoeba.skeleton.service-interface` 는 이 프로젝트의 서비스 계층 표준이고, 그 `note` 는 **답이 기본값이어도
@@ -180,9 +177,48 @@ module-store 백엔드가 필요하므로, 셋 다 걸러진다.)
 여기 적힌 숫자를 믿지 말고 yaml 을 세라 — capability 가 추가될 때마다 개수가 움직이고, 낡은 총계는 바로 규칙 4가
 막으려는 그 실패다.
 
-### 6. 고급 옵션 — 표면을 기능 GROUP 단위로 하나씩 훑는다 (대화형)
+### 6. 배포 인프라 (선택 1개)
 
-이 단계가 걷는 것은 **`groups:` 뿐이다.** capability 자신의 `options:`(예: `embedded_auth` 의 `amoeba.auth.*`)는
+**생성된 프로젝트가 자기 배포를 어디까지 안고 갈지**를 묻는다. 질문 하나, 네 수준이며 각각이 앞 수준의
+상위집합이다. 기본값은 **`container`** — 조직이나 하드웨어를 아무것도 가정하지 않고, 이미지와 compose 파일은
+어디서나 쓸모가 있다.
+
+| 수준 | 생성물 (전부 `templates/infra/` 에서) |
+|---|---|
+| `none` | 없음. 호스트에서 `setup.sh` 로 끝 |
+| `container` | `Dockerfile` · `docker-compose.yml` · `.env.example` · `.dockerignore` · `.gitattributes` · `docs/docker.md` |
+| `container + CI` | 위 + `.github/workflows/ci.yml` · `docs/ci-cd.md` |
+| `full` | 위 + `.github/workflows/deploy.yml` · `.github/runner/{docker-compose.yml,.env.example}` · `docs/secrets.md` |
+
+**마지막 수준이 무엇을 감수하는 것인지 고르기 전에 말해 줄 것.** `full` 은 "파일이 더 많은" 정도가 아니다 —
+**self-hosted 러너 자신의 호스트 Docker** 로 배포하며, free plan private repo 에서는 **승인 게이트를 쓸 수 없다**
+(브랜치 보호·룰셋·Environment 보호 규칙이 모두 `403 Upgrade to GitHub Pro`). 즉 CI 가 초록이면 사람 확인 없이
+실배포된다. 그것을 원하지 않는 사용자에게는 `workflow_dispatch` 전용 변형(`workflow_run:` 블록 삭제)을 제시한다.
+
+`full` 은 그 수준에서만 묻는 typed 입력이 둘 더 있다:
+- **저장소 URL** → `{{REPO_URL}}`(예: `https://github.com/<owner>/<repo>`). 러너가 여기에 등록된다.
+- **배포 호스트 러너 이름** → 운영자가 `DEPLOY_RUNNER_NAME` Actions 변수로 저장해야 하는 값.
+  임의로 만들지 말고, `deploy.yml` 이 이 값을 `$RUNNER_NAME` 과 비교해 다르면 배포를 거부한다는 것과, 생성되는
+  파일이 아니라 GitHub UI 에서 설정한다는 것을 설명한다.
+
+이 단계가 **다른 곳을 바꾸는 것 둘** — 놓치기 쉽다:
+
+1. **수준이 `container` 이상이면 `docker-compose.yml` 은 앱의 것이다.** `none` 이면 docker DB 가 지금까지의
+   동작대로 `templates/db/` 의 벤더 compose 를 `docker-compose.yml` 로 쓴다. `container` 이상에서는 그 이름이
+   앱에 가므로, DB 는 `templates/infra/docker-compose.local-db.<vendor>.yml.template` 를 써서
+   `docker-compose.local-db.yml` 로 나간다 — 앱 서비스에 `depends_on` 과 `DB_HOST` 를 덧붙이는 **오버레이**다.
+   같은 이름으로 둘을 내보내면 안 된다.
+2. **`.gitignore` 에 `.env`/`.env.local` 이 붙는다**(`templates/gitignore.template` 에 `[OPTIONAL infra]` 로
+   표시돼 있다).
+
+적용될 수 없으면 질문 자체를 건너뛴다: `h2` 인메모리 + MCP 표면 없음이면 배포할 것이 없다. 인프라 생성은
+`protean.isolation.mode` 와도 무관하다 — `worker`/`container` 격리는 **모듈**이 어디서 도는지에 관한 것이고,
+앱 자체를 어떻게 실어 보내는지가 아니다.
+
+### 7. 고급 옵션 — 표면을 기능 GROUP 단위로 하나씩 훑는다 (대화형)
+
+이 단계가 걷는 것은 **`groups:` 뿐이다.** capability 자신의 `options:`(예: `interface_spec_validator` 의
+`amoeba.skeleton.*`)는
 그 키를 소유한 capability 와 함께 step 5 에서 이미 물었다 — `data_access`·`secured_mcp` 를 step 5 에서 다시 묻지
 않는 것과 같은 이유로, 여기서 다시 묻지 않는다.
 
@@ -225,9 +261,9 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 체크는 "이 기본값을 덮어쓰고 싶다"는 뜻일 뿐이고, 그다음 값을 수집한다. enum: 허용값 중에서 고르는 선택
 (기본값을 문구에서 미리 표시).
 
-### 7. 검증 + 의존성 해소
+### 8. 검증 + 의존성 해소
 
-모든 선택(step 3–6)이 끝나면, 아무것도 쓰기 전에 확정된 전체 집합에 대해 **검증 패스**를 돌린다. 각 항목을
+모든 선택(step 3–7)이 끝나면, 아무것도 쓰기 전에 확정된 전체 집합에 대해 **검증 패스**를 돌린다. 각 항목을
 확인하고, 고치거나 멈춘다:
 
 - **requires 충족** — 선택된 모든 옵션/capability 의 `requires` 가 만족되는지. 동반 옵션을 강제로 켜거나,
@@ -236,10 +272,10 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 - **requires_when 충족** — `requires_when` 을 가진 모든 옵션에 대해 각 규칙을 평가한다. 그 `when` 조건이 모두
   성립하면 `needs` 키가 빈 값이 아니어야 한다. 자동으로 채울 수 없다(환경별 경로/식별자다) →
   **타이핑으로 묻고, 그래도 비어 있으면 생성을 차단한다.**
-  **capability 에 선언된 옵션도 여기 포함된다** — `amoeba.auth.service-client-id` 는
-  `amoeba.auth.service-client-secret` 을 요구한다. `EmbeddedAuthServerConfig` 가 둘 다 비어있지 않을 때만 그
-  클라이언트를 등록하고, 아니면 **아무 말 없이 등록하지 않기** 때문이다. 자격증명 쌍의 한쪽만 채워진 경우가
-  여기서 유일하게 **에러가 전혀 나지 않는** 사례라, CI 가 처음 401 을 받을 때가 아니라 생성 시점에 잡아야 한다.
+  **`groups:` 아래 옵션만이 아니라 capability 에 선언된 옵션도 여기 포함된다.** 특히 자격증명 쌍을 조심한다
+  (`protean.worker.db.admin-username` / `admin-password`) — 쌍의 한쪽만 채워진 경우가 여기서 유일하게
+  **에러가 전혀 나지 않는** 사례다. 기능이 아무 말 없이 등록되지 않으므로, CI 가 처음 401 을 받을 때가 아니라
+  생성 시점에 잡아야 한다.
 - **enum 범위** — 모든 enum 값이 그 `allowed` 안에 있는지.
 - **sidecar worker runtime 은 트랙별 아티팩트가 필요하다** — `protean.worker.runtime=sidecar` 는 bootJar 를
   펼치는 embed 런타임을 외부 아티팩트로 대체하며, 필요한 키가 격리 모드에 따라 다르다:
@@ -279,7 +315,7 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   엔트리는 **묻지 말고 강제**한다. `interface_spec_validator` 가 `swagger_annotations` 를 요구하는 이유는 생성기가
   자기가 쓰는 모든 DTO·컨트롤러에 `@Schema`/`@Operation` 을 무조건 넣고, 승진 게이트 ② 규칙이 그것이 없는 필드를
   거부하기 때문이다 — 그 jar 가 없으면 `amoeba.define_interface` 로 배포되는 모든 모듈이 첫 배포에서 컴파일에
-  실패한다. 이 해소는 step 5 가 `module_classpath` 를 묻기 **전에** 끝내고, 해당 엔트리는 선택지가 아니라
+  실패한다. 이 해소는 step 7 이 `module_classpath` 를 묻기 **전에** 끝내고(7 단계 group 순회의 맨 마지막이며 step 5 질문이 아니다), 해당 엔트리는 선택지가 아니라
   강제되었음을 알린다.
 - **애노테이션과 그것을 요구하는 규칙** — **경고** 2건(절대 차단 아님. 규칙이 무엇을 검사할지는 작성자만 안다):
   - `code_rule` 을 선택하고 `swagger_annotations` 를 **선택하지 않은** 경우 — 그 규칙이 결국
@@ -305,23 +341,51 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 `build_deps` 와 `fragment` 를 수집하고, DB 서브플로우를 해소하고, **최종 확정 구성을 echo** 한다(옵션 집합 +
 강제된 동반 옵션 + 의존성 + 쓰일 파일들) — 키·값·경로의 원문 목록을 한국어 서술이 감싸는 형태로.
 
-### 8. 생성 (Generate)
+### 9. 생성 (Generate)
 
-`{{NAME}}`, `{{PKG}}`(step 1 에서 입력받은 패키지), `{{PKG_PATH}}`(=`{{PKG}}` 의 `.`→`/`), `{{COORD}}`,
-`{{VERSION}}`, 그리고 DB 토큰 `{{DB}}`/`{{PW}}` 를 치환한다. 엔진:
+`{{NAME}}`, `{{PKG}}`(step 1 에서 입력받은 패키지), `{{PKG_PATH}}`(=`{{PKG}}` 의 `.`→`/`),
+`{{PORT}}`(step 1 에서 입력받은 포트), `{{COORD}}`, `{{VERSION}}`, 그리고 DB 토큰 `{{DB}}`/`{{PW}}` 를
+치환한다.
+
+**★ `{{COORD}}` 는 버전을 뺀 `group:artifact` 다.** step 2 는 버전이 포함된 *좌표*(`org.htcom:protean:0.0.1`)를
+물으므로 둘은 같은 문자열이 아니고, 치환 전에 쪼개야 한다 — `{{COORD}}` = `org.htcom:protean`,
+`{{VERSION}}` = `0.0.1`. 합치는 것은 템플릿이 직접 한다: `build.gradle.template` 은 `'{{COORD}}:{{VERSION}}'` 을
+쓰고, `setup.sh.template` 은 mavenLocal pom 을 찾기 위해 `${COORD%%:*}` / `${COORD##*:}` 로 다시 쪼갠다. 세 조각
+좌표를 그대로 치환하면 `build.gradle` 에는 `org.htcom:protean:0.0.1:0.0.1` 이, `setup.sh` 에는 깨진 mavenLocal
+경로가 남는다.
+
+**★ 사용자가 입력하지 않지만 생성기가 채워야 하는 플레이스홀더** — 각각 템플릿이 분기하는 값이고, 안 채우면
+조용히 "false" 로 읽힌다: `{{NAME_KEBAB}}`, `{{IS_SNAPSHOT}}`, `{{HAS_DB_DOCKER}}`,
+`{{HAS_DB_EXTERNAL}}`(연결 방식이 `existing`/`other` 인 데이터 접근 — `setup.sh` 의 외부 DB 프리플라이트를
+켜는 값), `{{ISOLATION}}`, `{{WORKER_RUNTIME}}`, `{{SIDECAR_*}}`, `{{OAUTH}}`, `{{REPO_URL}}`.
+
+엔진:
 
 - **`application.yml`** — `templates/application.yml.template`(최소 베이스)에서 시작해, **설정된 모든
   `protean.*` 키**를 `protean:` 아래에 묶어 주입하고, 선택한 벤더의 `spring.datasource` 블록을 더한다.
   `protean.*` 가 **아닌** `requires_when` 의 `needs` 키는 자기 최상위 블록으로 들어가며 절대 `protean:` 아래로
   가지 않는다 — 예: `spring.security.oauth2.resourceserver.jwt.issuer-uri` 는 `spring.security` 아래에 놓인다.
-  **capability 의 `options:` 도 같은 규칙을 따른다**: `embedded_auth` 의 키는 `amoeba.auth.*` 이므로 최상위
-  `amoeba:` 블록을 이룬다. `protean:` 아래에 넣으면 아무것도 바인딩되지 않는다 —
-  `@ConfigurationProperties("amoeba.auth")` 가 조용히 기본값만 보게 되어 embedded auth 는 꺼진 채로 남고, 앱은
-  멀쩡해 보이는 상태로 기동한다.
-  그 키는 `${OAUTH_ISSUER_URI}` 로 **fallback 없이** 쓴다(값이 없으면 기동이 중단돼야 한다). 반면 *광고되는*
-  placeholder 는 모두 fallback 을 유지한다. 광고되는 값에 host 나 port 를 하드코딩하지 말 것:
-  `mcp.authorization.resource` 는 `http://${SERVER_HOST:localhost}:${SERVER_PORT:8080}/platform/mcp` 로 쓰고,
-  템플릿의 `server.port: ${SERVER_PORT:8080}` 를 유지해 바인드 포트와 광고 포트가 어긋나지 않게 한다
+  **capability 의 `options:` 도 같은 규칙을 따른다**: `interface_spec_validator` 의 키는 `amoeba.skeleton.*` /
+  `amoeba.interface.*` 이므로 최상위 `amoeba:` 블록을 이룬다. `protean:` 아래에 넣으면 아무것도 바인딩되지
+  않는다 — `@Value`/`@ConfigurationProperties` 조회가 조용히 기본값만 보게 되고, 앱은 멀쩡해 보이는 상태로
+  기동한다.
+  issuer 는 `${OAUTH_ISSUER_URI}` 로 **fallback 없이** 쓴다(값이 없으면 기동이 중단돼야 한다). 반면 *광고되는*
+  placeholder 는 모두 fallback 을 유지한다.
+  **★ `spring.datasource.password` 는 연결 방식에 따라 달라지며, 틀리면 살아 있는 자격증명을 커밋한다.**
+  docker ⇒ `${DB_PASSWORD:{{PW}}}`(스킬이 생성해 compose 파일에도 쓴 값 — 구조상 일회용이고 둘이 일치해야
+  한다). **existing / other ⇒ fallback 없는 `${DB_PASSWORD}`** — 이 경로에서 `{{PW}}` 는 이미 존재하는 서버에
+  대해 *사용자가 입력한* 비밀번호다. `prototype/nz_trilo` 는 `password: "${DB_PASSWORD:trilo1234!}"` 로
+  생성됐고 `prototype/nz_ammon` 은 — 같은 스킬, 같은 `existing` 갈래인데 — `${DB_PASSWORD}` 를 받았다. 한
+  규정에서 두 결과가 나온 것이고, `db-vendors.yaml` 의 주석이 그 틈을 막는다. (실제로 유출된 것은 없다:
+  nz_trilo 는 git 저장소가 아니고, 추적되는 nz_ammon 은 안전한 형태를 갖고 있다. 문제는 어느 형태가
+  나오는지가 판단에 맡겨져 있었다는 점이다.)
+  ⚠ 그리고 여기서의 fallback 없음을 OAUTH_ISSUER_URI 의 보장처럼 말하지 말 것: `spring.datasource.*` 는
+  `@ConfigurationProperties` Binder 가 바인딩하는데 미해결 `${...}` 를 리터럴 문자열로 남기고 Hikari 는 게으르게
+  접속하므로, `DB_PASSWORD` 가 없으면 앱은 멀쩡히 기동하고 **첫 쿼리에서** 실패한다. 이 키를 쓰는 자리마다
+  그 사실을 함께 적는다.
+  광고되는 값에 host 나 port 를 하드코딩하지 말 것:
+  `mcp.authorization.resource` 는 `http://${SERVER_HOST:localhost}:${SERVER_PORT:{{PORT}}}/platform/mcp` 로 쓰고,
+  템플릿의 `server.port: ${SERVER_PORT:{{PORT}}}` 를 유지해 바인드 포트와 광고 포트가 어긋나지 않게 한다
   (`SERVER_PORT` 는 Spring 이 `server.port` 로 relaxed-binding 하는 정확한 이름이다 — 템플릿 주석 참조).
   설정되지 않은 키는 생략한다(라이브러리 기본값) — 가장 관련 있는 것들은 주석 처리된 편집 지점으로 남겨도 좋다.
 - **`build.gradle`** — 템플릿에서: 항상 `org.htcom:protean:<ver>` + `spring-boot-starter-web`. 여기에 수집된
@@ -353,7 +417,16 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
     말 것. Boot 의 MVC 자동설정을 꺼버린다.
   - `<<fragment-checks>>` 에 `Class.forName("{{PKG}}.support.BaseService")` 한 줄을 추가한다.
 - **fragment** — 선택된 `templates/fragments/*.template` 를 각각 `src/main/java/{{PKG_PATH}}/` 로 복사하고,
-  실제 클래스명으로 이름을 바꾸고, 이름들을 치환한다.
+  실제 클래스명으로 이름을 바꾸고, 이름들을 치환한다. **`test_fragment`** 를 가진 키는 그 파일을
+  `src/test/java/{{PKG_PATH}}/` 로도 내보낸다 — 단 **클래스명은 그대로 둔다**(main fragment 와 반대다).
+  프로젝트별 정책이 아니라 구조적 보증을 단정하는 테스트라 이름을 바꿀 근거가 없다. 현재는
+  `protean.mcp.authorization.resource` → `ResourceServerOnlyTest` 하나이며, 이 앱이 **토큰을 검증만 하고 발급하지
+  않는다**는 것을 못박는다 — 앱이 *갖고 있지 않은 것*에 있는 보증이라 main 소스를 아무리 읽어도 확인할 수 없다.
+- **`emit` 지시** — `emit` 을 가진 키·capability 는 라이브러리 기본값이 비어 있어도 반드시 써야 하는 설정을
+  지정한다. `secured_mcp` 는 `scopes-supported: [mcp.read, mcp.write, mcp.admin]` 과
+  `bearer-methods-supported: [header]` 를 요구한다. `SecurityConfig` 가 정확히 그 세 스코프 이름으로 게이팅하므로,
+  광고하지 않으면 클라이언트가 무엇을 요청해야 할지 알 수 없는 디스커버리 문서를 내보내게 된다.
+  빠뜨리면 `ResourceServerOnlyTest` 가 실패한다.
 - **fragment bundle** — `fragment_bundle` 을 가진 capability 는 `templates/fragments/<dir>/` 전체를 한 번에
   내보낸다. 규칙 4개, 각각 단일 fragment 의 정반대다:
   - 각 멤버는 자기 `to:` 에 따라 `src/<main|test>/java/{{PKG_PATH}}/<sub-package>/` 로 간다.
@@ -367,10 +440,47 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   번들마다 `<<fragment-checks>>` 에 `Class.forName` 한 줄을 추가하고(대표 클래스. 예:
   `{{PKG}}.interfacedef.InterfaceSpecValidator`), 번들의 테스트 멤버가 `ConfigMatchesSelectionTest` 와 함께
   `./gradlew test` 로 돌아간다는 점을 기억한다.
-- **infra** — DB docker 경로: `templates/db/*` 에서 `docker-compose.yml`. 그 `init/*.sql` 은 DataSource 의
+- **DB 인프라** — DB docker 경로: `templates/db/*` 에서 `docker-compose.yml`. 그 `init/*.sql` 은 DataSource 의
   **용도**에 따라 다르다: **데이터 접근**용 DataSource 는 `init/01-schema.sql`(`items` 테이블)을 받고,
   **jdbc module-store** 만 받치는 DataSource 는 받지 않는다(Protean 이 자체 store 테이블을 만든다) — items init 을
   생략한다. H2 데이터 접근: `schema.sql`. existing/other: 없음.
+  ⚠ **6 단계가 `none` 일 때만이다.** `container` 이상에서는 `docker-compose.yml` 이 앱의 파일이므로, DB 는
+  `templates/infra/docker-compose.local-db.<vendor>.yml.template` 로 `docker-compose.local-db.yml` 에 쓴다.
+  그 오버레이는 `init/` 마운트를 갖지 않는다(디렉터리 바인드가 엔트리포인트를 깨뜨리는 이유는 그 파일의
+  주석에 있다) — seed SQL 이 필요하면 파일 하나를 직접 마운트한다.
+- **배포 인프라 (6 단계)** — 고른 수준에 따라 `templates/infra/` 에서 복사하며 파일명을 바꾼다:
+  `Dockerfile.template` → `Dockerfile`, `dockerignore.template` → `.dockerignore`,
+  `gitattributes.template` → `.gitattributes`, `env.example.template` → `.env.example`,
+  `docker-compose.app.yml.template` → `docker-compose.yml`, `workflows/*.template` → `.github/workflows/*`,
+  `runner/docker-compose.yml.template` → `.github/runner/docker-compose.yml`,
+  `runner/env.example.template` → `.github/runner/.env.example`, `docs/*.md.template` → `docs/*.md`.
+  `{{NAME}}`, `{{NAME_KEBAB}}`(= `{{NAME}}` 의 `_`→`-`. 컨테이너·볼륨·compose 프로젝트 이름을 만든다),
+  `{{PKG}}`, `{{PORT}}`, `{{DB}}`, 그리고 `full` 수준에서는 `{{REPO_URL}}` 을 치환한다.
+  틀리기 쉬운 것 넷:
+  - **★ 오버레이를 만들지 않았다면 `[OPTIONAL local-db]` 블록을 모두 지운다.** `docker-compose.local-db.yml` 은
+    인프라 ≥ `container` 이면서 **docker 로 관리하는** DB 일 때만 나간다. 기존 서버·`h2`·`other`·데이터 접근
+    없음이면 그 파일은 존재하지 않는데, 네 템플릿이 그것을 참조하며 찾기 쉽도록 `[OPTIONAL local-db]` 로
+    표시돼 있다: `workflows/deploy.yml.template`, `docker-compose.app.yml.template`, `env.example.template`,
+    `docs/docker.md.template`(각자 자기 주석에 대체 문구를 담고 있다). **`deploy.yml` 만은 미관 문제가
+    아니다**: 그 참조는 `type: choice` 의 **선택지**라서 고를 수 있고, 고른 운영자는 없는 파일을 상대로
+    `docker compose -f docker-compose.yml -f docker-compose.local-db.yml` 를 실행한다 — CI 가 초록이 된 뒤
+    운영 호스트에서 compose 단계가 실패한다. 그 선택지 줄을 지운다.
+  - **★ rename 한 프래그먼트는 자기 파일만이 아니라 모든 곳에서 rename 해야 한다.** 단일 `fragment` 는 실제
+    클래스명으로 바뀌는데(9 단계), 다른 템플릿이 그 클래스를 산문과 `<<fragment-checks>>` 에서 언급한다. 생성
+    후 생성물 트리에서 템플릿의 자리표시 이름(`ExampleTool`, `ExampleAuthorizer`, `ExampleCodeRule`,
+    `ExampleUnloadCallback`, `ExampleToolOverride`)을 grep 해서 실제 사용한 이름으로 바꾼다 — `README.md`,
+    `SecurityConfig.java`, `module_source_tools` 번들의 테스트가 authorizer 나 커스텀 툴을 언급한다. 남은
+    자리표시 이름은 존재하지 않는 클래스를 가리키는 참조다. (`fragment_bundle` 멤버는 반대다: `rename: false`
+    이므로 절대 건드리지 않는다.)
+  - **`{{...}}` 가 항상 플레이스홀더는 아니다.** `ci.yml` 에는 `{{.State.Health.Status}}` 가 있고 이것은
+    docker inspect 의 Go 템플릿이다. 스킬 플레이스홀더는 `{{UPPER_SNAKE_CASE}}` 뿐이며, 그 밖의 것은 그대로 둔다.
+  - **load-bearing 한 부분을 "정리"하지 말 것.** 각각이 조용히 나는 실패를 설명하는 주석이다: `java -jar` 금지,
+    build 스테이지에서의 `jmods` 제거, CI 의 `services:`/`--network host` 금지, 아티팩트 업로드의
+    `overwrite: true`, deploy-host 라벨 + `$RUNNER_NAME` 자기검증, 스모크가 `localhost` 가 아니라
+    `SERVER_HOST` 를 치는 것, `ports` 양쪽 숫자를 같게 하는 것.
+  - **사람만 할 수 있는 일을 알려줄 것**: `git update-index --chmod=+x gradlew setup.sh`(`.gitattributes` 가
+    고칠 수 없는 mode 비트), 그리고 `full` 에서는 `docs/secrets.md` 에 적힌 Actions Secrets/Variables 등록
+    (`DEPLOY_RUNNER_NAME` 포함).
 - **프로비저닝 admin (D5)** — `worker.db.auto-provision=true` 이고 DB 가 docker 로 관리될 때,
   `init/00-provision-admin.sql` 을 생성해 `worker.db.admin-username`/`admin-password` 계정을 만든다. MySQL 은
   CREATE DATABASE/USER + GRANT, Postgres 는 CREATE SCHEMA/ROLE — 그래야 배포 시점에 프로비저닝이 동작한다.
@@ -384,12 +494,20 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   `confirm=<name>` 필요). 패킹도 적는다: 같은 scope 의 모듈은 `modules-per-worker`(128)까지 worker 를 공유하며,
   엄격한 격리를 원하면 1 로 설정한다.
 - **wrapper** — 새 디렉토리에서 `gradle wrapper --gradle-version 8.14.5` 로 준비한다(또는 기존 것을 복사).
+- **`settings.gradle`**(항상) — `templates/settings.gradle.template` 에서. 아무것도 이 파일을 참조하지 않아
+  빠뜨리기 쉬운데, 잃는 것은 `rootProject.name` 만이 아니다: **foojay toolchain resolver** 가 여기 들어 있고
+  그것이 JDK 21 없는 머신에 JDK 21 을 프로비저닝한다. 빠지면 `setup.sh` 의 JDK 21 사전점검이, 하필 그
+  resolver 가 존재하는 이유인 fresh-clone 상황에서 실패한다.
 - **`README.md`**(템플릿에서 — 선택된 capability 를 나열), **`.gitignore`**, **`Application.java`**.
 - **`setup.sh`**(항상 — **마지막** 산출물) — `templates/setup.sh.template` 에서 만들고 `chmod +x`. 이 구성
   그대로를 위한 Linux/Ubuntu 설치·실행 스크립트다: preflight(javac 로 JDK 21 확인, gradlew, SNAPSHOT 이면
   mavenLocal 의 protean jar, docker DB 면 Docker 데몬 + compose, `worker.runtime=sidecar` 면 sidecar 아티팩트,
   포트 사용 가능 여부) → `docker compose up -d --wait`(docker DB 인 경우) → `./gradlew run`.
-  `{{IS_SNAPSHOT}}`(버전이 `-SNAPSHOT` 로 끝나는지), `{{HAS_DB_DOCKER}}`(데이터 접근 또는 jdbc-store DataSource 가
+  `{{IS_SNAPSHOT}}`(버전이 `-SNAPSHOT` 로 끝나는지), **`{{HAS_DB_EXTERNAL}}`**(같은 조건이지만 연결 방식이
+  `existing`/`other` 인 경우 — 외부 DB 프리플라이트를 켠다: `DB_PASSWORD` 존재, `DB_HOST` 가 조용히
+  `localhost` 로 떨어지지 않는지, TCP 프로브, 그리고 DDL 을 실행하는 도구가 없다는 안내.
+  `docker-compose.app.yml.template` 이 "setup.sh 의 검사"라고 말할 때 가리키는 것이 이 블록이므로 둘이
+  어긋나면 안 된다), `{{HAS_DB_DOCKER}}`(데이터 접근 또는 jdbc-store DataSource 가
   선택되고 연결 방식이 docker), `{{ISOLATION}}`(격리 모드 — `container` 일 때 스크립트가 Docker 를 확인한다),
   그리고 sidecar 3종 `{{WORKER_RUNTIME}}`(`embed`|`sidecar`. in-process 면 `embed`), `{{SIDECAR_JAR}}`,
   `{{SIDECAR_IMAGE}}`, `{{SIDECAR_SHARED_API}}`(미설정 시 각각 공백 — 그러면 스크립트가 이 트랙에 필요한
@@ -405,8 +523,9 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   자동 방어선이다 — 없으면 jar 누락이 **첫 배포**에서 모듈 컴파일 에러로만 드러난다. `build.gradle` 은 이미
   `testImplementation spring-boot-starter-test` 를 추가한다. 이 테스트는 `application.yml` 을 로드해 선택과
   일치하는지 단언하며, 서버를 기동하지 않는다.
+  (MCP 표면을 보호하면 `ResourceServerOnlyTest` 도 함께 나간다 — 9 단계의 `test_fragment` 항목 참고.)
 
-### 9. 검증 (출력만, 실행하지 않음)
+### 10. 검증 (출력만, 실행하지 않음)
 
 Linux/Ubuntu 서버용 원커맨드 설치를 앞세우고, 그다음 수동 등가물을 보여준다. **각 단계를 한국어로 설명하고,
 모든 명령은 한 바이트도 바꾸지 말고 출력한다** — 번역하거나 "정돈한" 명령은 사용자가 붙여넣을 수 없는 명령이다.
@@ -416,10 +535,31 @@ Linux/Ubuntu 서버용 원커맨드 설치를 앞세우고, 그다음 수동 등
 - (mavenLocal 경로) `cd <protean repo> && ./gradlew publishToMavenLocal`.
 - (DB docker) `docker compose up -d`.
 - `./gradlew run` (JDK 21).
-- (MCP) `curl -s localhost:8080/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
-- 배포된 모듈 엔드포인트를 호출해 본다. 상태는 `curl localhost:8080/platform/modules`.
-- 서버 없이도 사용자가 돌릴 수 있는 sanity check: `./gradlew compileJava`(protean jar 를 대상으로 컴파일)와
-  `./gradlew test`(`ConfigMatchesSelectionTest` 실행 — 생성된 설정이 선택과 일치하는지 단언).
+- (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
+- 배포된 모듈 엔드포인트를 호출해 본다. 상태는 `curl localhost:{{PORT}}/platform/modules`.
+- 배포 없이 돌릴 수 있는 sanity check: `./gradlew compileJava`(protean jar 를 대상으로 컴파일)와
+  `./gradlew test`(`ConfigMatchesSelectionTest` 실행 — 생성된 설정이 선택과 일치하는지 단언. MCP 표면을
+  보호했다면 `ResourceServerOnlyTest` 도 함께, 그리고 두 프래그먼트 번들의 테스트도).
+  **이것을 "서버 없이"라고 설명하지 말 것.** `ConfigMatchesSelectionTest` 는 아무것도 띄우지 않지만
+  `ResourceServerOnlyTest` 는 `@SpringBootTest(webEnvironment = RANDOM_PORT)` 라서 실제 Tomcat 을 띄운다 —
+  임의 포트라 실행 중인 인스턴스와 충돌하지 않고, `.invalid` issuer 를 쓰므로 인가 서버가 없어도 된다. 사실대로
+  적는다: 이 스위트는 **오프라인**이며 AS 도 닿는 DB 도 필요 없다. 그리고 DB 쪽이 보장이 아닌 이유도 적는다 —
+  DataSource 는 완전히 배선돼 있고 Hikari 가 게으르게 접속할 뿐이라, `./gradlew test` 가 초록이어도 DB 에 대해
+  증명하는 것은 없다. 그것이 `./setup.sh --check` 의 역할이다.
+- **(6 단계 ≥ `container`) 컨테이너 경로**를 별도의 짧은 블록으로 출력한다:
+  ```
+  cp .env.example .env          # 필수값을 채운다 — OAUTH_ISSUER_URI 는 기본값이 없다
+  docker compose up -d --build
+  docker compose ps             # STATUS 가 (healthy) 가 될 때까지
+  ```
+  사이드카 오버레이:
+  `docker compose -f docker-compose.yml -f docker-compose.local-db.yml up -d --build`.
+  `down` 은 모듈 스토어 볼륨을 남기고 `down -v` 는 배포된 모듈을 전부 폐기한다는 것을 말해 준다.
+- **(6 단계 = `full`) CI 가 돌기 전에 사람이 해야 하는 일** — 검증이 아니라 설정이므로, 그대로 붙여넣는 명령이
+  아니라 체크리스트로 출력한다: `git update-index --chmod=+x gradlew setup.sh`; 러너 등록
+  (`cd .github/runner && cp .env.example .env && docker compose up -d`); `docs/secrets.md` 의 Actions
+  Secrets/Variables 등록(`DEPLOY_RUNNER_NAME` 포함); 그리고 **GitHub UI 에서** 러너 딱 1대에 `deploy-host`
+  라벨 붙이기 — 라벨은 등록 시점 값이라 compose 파일을 나중에 고쳐도 바뀌지 않는다.
 
 ## 참고 (Notes)
 

@@ -4,3 +4,12 @@ build/
 
 # Runtime server log (from `./gradlew run`)
 run.log
+
+# [OPTIONAL infra] Local compose environment. Holds DB_PASSWORD, which lives in no committed file.
+# .env.example is the committed template. See docs/secrets.md.
+.env
+.env.local
+
+# [OPTIONAL infra] NOTE: docs/ is COMMITTED on purpose. Keeping infra docs in a gitignored directory means
+# nobody who clones the repository can read the deployment policy, and every "see docs/..." pointer in the
+# workflows dangles. Do not add docs/ here.

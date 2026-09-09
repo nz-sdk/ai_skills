@@ -4,7 +4,7 @@
 // server (no port bind, no DB), so it is safe to run anywhere with `./gradlew test`.
 // The generator fills the <<assertions>> block: one assertEquals per selected key, plus a class-presence
 // check for each selected code fragment. The keys are not only protean.* — a capability owning its own namespace
-// contributes top-level amoeba.* keys (amoeba.auth.*, amoeba.skeleton.*, amoeba.interface.*), and flatten() below
+// contributes top-level amoeba.* keys (amoeba.skeleton.*, amoeba.interface.*), and flatten() below
 // reaches them the same way. amoeba.skeleton.service-interface is asserted EVEN WHEN IT HOLDS THE DEFAULT: it is
 // the project's service-layer standard, so a silent edit has to break a test rather than the next module. Requires testImplementation 'org.springframework.boot:spring-boot-starter-test'.
 package {{PKG}};
@@ -61,8 +61,11 @@ class ConfigMatchesSelectionTest {
 
     @Test
     void selectedFragmentsPresent() {
-        // <<fragment-checks>> — generator writes one line per selected code fragment, e.g.:
-        //   assertDoesNotThrow(() -> Class.forName("{{PKG}}.ExampleTool"));   // custom MCP tool
+        // <<fragment-checks>> — generator writes one line per selected code fragment, using the class name it
+        // ACTUALLY emitted (single fragments are renamed at generation, so the template's placeholder name is
+        // never the right thing to assert), e.g.:
+        //   assertDoesNotThrow(() -> Class.forName("{{PKG}}.<your custom tool class>"));   // custom MCP tool
+        //   assertDoesNotThrow(() -> Class.forName("{{PKG}}.support.BaseService"));        // common-support
         // (no fragments selected → this test is a no-op assertion below)
         assertDoesNotThrow(() -> {});
     }

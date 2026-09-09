@@ -9,6 +9,15 @@ docker compose ps             # wait for STATUS to read (healthy)
 docker compose logs -f
 ```
 
+<!-- [OPTIONAL local-db] GENERATOR: replace this whole block with the "no local database" paragraph below when
+     docker-compose.local-db.yml is not emitted (existing DB server, h2, or other). Leaving it in documents a
+     command that cannot run.
+
+     No local database:
+       **There is no local-database sidecar in this project.** It was generated against an already-running
+       database, so no `docker-compose.local-db.yml` and no `init/*.sql` were emitted, and the schema is applied
+       by a human once (`db/schema.sql`). To gain a throwaway local database, add a service to
+       `docker-compose.yml` and point `DB_HOST` at it. -->
 Standalone, with a local database sidecar instead of an external server:
 
 ```bash
@@ -17,6 +26,9 @@ docker compose -f docker-compose.yml -f docker-compose.local-db.yml up -d --buil
 
 Teardown: `docker compose down` keeps the module-store volume; `docker compose down -v` discards every
 deployed module.
+
+With `protean.module-store.backend: jdbc` the deployed modules live in the database rather than in that volume,
+so `down -v` no longer loses them.
 
 ## Why the image looks like this
 

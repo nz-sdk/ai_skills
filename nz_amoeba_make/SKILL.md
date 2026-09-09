@@ -334,7 +334,22 @@ Korean prose around a verbatim list of keys, values and paths.
 
 ### 9. Generate
 Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (=`{{PKG}}` with `.`→`/`),
-`{{PORT}}` (the port typed in step 1), `{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`. Engine:
+`{{PORT}}` (the port typed in step 1), `{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`.
+
+**★ `{{COORD}}` IS `group:artifact` — WITHOUT THE VERSION.** Step 2 asks the user for a *coordinate* that
+includes it (`org.htcom:protean:0.0.1`), so the two are not the same string and you must split before
+substituting: `{{COORD}}` = `org.htcom:protean`, `{{VERSION}}` = `0.0.1`. Templates combine them themselves —
+`build.gradle.template` writes `'{{COORD}}:{{VERSION}}'`, and `setup.sh.template` re-splits `{{COORD}}` with
+`${COORD%%:*}` / `${COORD##*:}` to locate the mavenLocal pom. Substituting the full three-part coordinate yields
+`org.htcom:protean:0.0.1:0.0.1` in `build.gradle` and a broken mavenLocal path in `setup.sh`.
+
+**★ Placeholders the generator must fill that are NOT typed by the user**, listed here because each is a boolean
+the templates branch on and an unset one silently reads as "false": `{{NAME_KEBAB}}`, `{{IS_SNAPSHOT}}`,
+`{{HAS_DB_DOCKER}}`, `{{HAS_DB_EXTERNAL}}` (data access whose connection mode is `existing` or `other` — this is
+what arms `setup.sh`'s external-DB preflight), `{{ISOLATION}}`, `{{WORKER_RUNTIME}}`, `{{SIDECAR_*}}`,
+`{{OAUTH}}`, `{{REPO_URL}}`.
+
+Engine:
 - **`application.yml`** — start from `templates/application.yml.template` (minimal base) and **inject every set
   `protean.*` key** grouped under `protean:`, plus the `spring.datasource` block for the chosen vendor. A
   `requires_when` `needs` key that is **not** `protean.*` goes into its own top-level block, never under
@@ -344,7 +359,17 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
   the `@Value`/`@ConfigurationProperties` lookups would silently see defaults and the app would start looking
   correct. Write the issuer
   as `${OAUTH_ISSUER_URI}` **with no fallback** (an unset value must abort startup) while every
-  *advertised* placeholder keeps a fallback. Never hardcode a host or port into an advertised value: write
+  *advertised* placeholder keeps a fallback.
+  **★ `spring.datasource.password` FOLLOWS THE CONNECTION MODE, and getting it wrong commits a live credential.**
+  docker ⇒ `${DB_PASSWORD:{{PW}}}` (a value the skill generated and also wrote into the compose file — throwaway,
+  and the two must agree). **existing / other ⇒ `${DB_PASSWORD}` with NO fallback**, because there `{{PW}}` is the
+  password the USER TYPED for a server that already exists. `prototype/nz_trilo` shipped
+  `password: "${DB_PASSWORD:trilo1234!}"` this way while `prototype/nz_ammon` shipped `${DB_PASSWORD}` — one spec,
+  two results, which is what `db-vendors.yaml`'s note now closes.
+  ⚠ And do NOT present no-fallback here as the OAUTH_ISSUER_URI guarantee: `spring.datasource.*` is bound by the
+  `@ConfigurationProperties` Binder, which leaves an unresolved `${...}` as a literal string, and Hikari connects
+  lazily — so an unset `DB_PASSWORD` starts the app cleanly and fails at the FIRST QUERY. Say that wherever you
+  write the key. Never hardcode a host or port into an advertised value: write
   `mcp.authorization.resource` as `http://${SERVER_HOST:localhost}:${SERVER_PORT:{{PORT}}}/platform/mcp`, and keep
   the template's `server.port: ${SERVER_PORT:{{PORT}}}` so the bind port and the advertised port cannot drift
   (`SERVER_PORT` is the exact name Spring relaxed-binds to `server.port` — see the template's comment). Unset
@@ -416,7 +441,24 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
   `runner/env.example.template` → `.github/runner/.env.example`, `docs/*.md.template` → `docs/*.md`.
   Substitute `{{NAME}}`, `{{NAME_KEBAB}}` (= `{{NAME}}` with `_`→`-`; it names containers, volumes and the
   compose project), `{{PKG}}`, `{{PORT}}`, `{{DB}}`, and at the `full` level `{{REPO_URL}}`.
-  Three things to get right:
+  Four things to get right:
+  - **★ PRUNE EVERY `[OPTIONAL local-db]` BLOCK WHEN NO OVERLAY IS EMITTED.** `docker-compose.local-db.yml` is
+    written only for a **docker-managed** database at infra ≥ `container`. For an existing server, `h2`, `other`,
+    or no data access at all, the overlay does not exist — but four templates reference it anyway, and they are
+    marked `[OPTIONAL local-db]` so you can find them: `workflows/deploy.yml.template`,
+    `docker-compose.app.yml.template`, `env.example.template`, `docs/docker.md.template` (each carries the
+    replacement text in its own comment). **`deploy.yml` is the one that is not merely cosmetic**: the reference
+    is a `type: choice` OPTION, so it is selectable, and an operator who picks it runs `docker compose -f
+    docker-compose.yml -f docker-compose.local-db.yml` against a missing file — the deploy fails at the compose
+    step, on the production host, after CI went green. Delete that option line.
+  - **★ RENAMED FRAGMENTS MUST BE RENAMED EVERYWHERE, NOT JUST IN THEIR OWN FILE.** A single `fragment` is
+    renamed to a real class (step 9), but other templates refer to those classes in prose and in
+    `<<fragment-checks>>`. After emitting, grep the generated tree for the template placeholder names
+    (`ExampleTool`, `ExampleAuthorizer`, `ExampleCodeRule`, `ExampleUnloadCallback`, `ExampleToolOverride`) and
+    replace each with the name you actually used — `README.md`, `SecurityConfig.java` and the
+    `module_source_tools` bundle's tests all mention the authorizer or the custom tool. A leftover placeholder
+    name is a reference to a class that does not exist. (`fragment_bundle` members are the opposite: `rename:
+    false`, so never touch those.)
   - **`{{...}}` is not always a placeholder.** `ci.yml` contains `{{.State.Health.Status}}`, which is docker
     inspect's Go template. Skill placeholders are `{{UPPER_SNAKE_CASE}}` only — copy anything else verbatim.
   - **Do not "simplify" the load-bearing parts.** Each is a comment explaining a failure that is otherwise
@@ -444,7 +486,11 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
   mavenLocal when SNAPSHOT, Docker daemon + compose when a docker DB, sidecar artifact when
   `worker.runtime=sidecar`, free port) → `docker compose up -d --wait` (if docker DB) → `./gradlew run`. Fill
   `{{IS_SNAPSHOT}}` (version ends with `-SNAPSHOT`) and `{{HAS_DB_DOCKER}}` (data access OR jdbc-store DataSource
-  selected AND connection = docker), `{{ISOLATION}}` (the isolation mode — the script checks Docker when it is
+  selected AND connection = docker), **`{{HAS_DB_EXTERNAL}}`** (the same but connection = `existing`/`other` —
+  arms the external-DB preflight: `DB_PASSWORD` present, `DB_HOST` not silently falling back to `localhost`, a
+  TCP probe, and the reminder that no tool runs DDL. That block is what
+  `docker-compose.app.yml.template` means when it says "setup.sh's check", so the two must not drift),
+  `{{ISOLATION}}` (the isolation mode — the script checks Docker when it is
   `container`), and the sidecar trio `{{WORKER_RUNTIME}}` (`embed`|`sidecar`, `embed` when isolation is
   in-process), `{{SIDECAR_JAR}}`, `{{SIDECAR_IMAGE}}`, `{{SIDECAR_SHARED_API}}` (each empty when unset — the script
   then checks the artifact required for this track and skips the bootJar build under `runtime=sidecar`). Also fill
@@ -470,9 +516,16 @@ Korean; print every command byte-for-byte** — a translated or "tidied" command
 - `./gradlew run` (JDK 21).
 - (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
 - Hit a deployed module endpoint; `curl localhost:{{PORT}}/platform/modules` for state.
-- Sanity checks the user can run without the server: `./gradlew compileJava` (compiles against the protean jar)
-  and `./gradlew test` (runs `ConfigMatchesSelectionTest` — asserts the generated config matches the selection;
-  plus `ResourceServerOnlyTest` when the MCP surface is secured).
+- Sanity checks that need no running deployment: `./gradlew compileJava` (compiles against the protean jar) and
+  `./gradlew test` (runs `ConfigMatchesSelectionTest` — asserts the generated config matches the selection; plus
+  `ResourceServerOnlyTest` when the MCP surface is secured, and both fragment bundles' tests).
+  **Do not describe this as "without the server".** `ConfigMatchesSelectionTest` starts nothing, but
+  `ResourceServerOnlyTest` is `@SpringBootTest(webEnvironment = RANDOM_PORT)` and brings up a real Tomcat — on a
+  random port, so it cannot clash with a running instance, and against an `.invalid` issuer, so no Authorization
+  Server has to exist. Say what is actually true: the suite is **offline** and needs no AS and no reachable
+  database. And say why the database part is not a guarantee — the DataSource is fully wired and Hikari merely
+  connects lazily, so a green `./gradlew test` proves nothing about the DB. That is what `./setup.sh --check` is
+  for.
 - **(step 6 ≥ `container`) the container path**, printed as its own short block:
   ```
   cp .env.example .env          # fill in the required values — OAUTH_ISSUER_URI has no default

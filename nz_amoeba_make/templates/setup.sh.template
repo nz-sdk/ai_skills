@@ -25,6 +25,8 @@ COORD="{{COORD}}"
 VERSION="{{VERSION}}"
 IS_SNAPSHOT="{{IS_SNAPSHOT}}"       # true | false — SNAPSHOT resolves from mavenLocal
 HAS_DB_DOCKER="{{HAS_DB_DOCKER}}"   # true | false — sample manages a DB via docker compose
+HAS_DB_EXTERNAL="{{HAS_DB_EXTERNAL}}" # true | false — data access against an ALREADY-RUNNING server (existing/other)
+DB_NAME="{{DB}}"                    # the schema hardcoded in application.yml's JDBC URL (empty when no data access)
 ISOLATION="{{ISOLATION}}"          # in-process | worker | container
 WORKER_RUNTIME="{{WORKER_RUNTIME}}"          # embed | sidecar — protean.worker.runtime (embed for in-process)
 SIDECAR_JAR="{{SIDECAR_JAR}}"                # protean.worker.sidecar.jar   (empty when unset)
@@ -83,6 +85,48 @@ if [ "${HAS_DB_DOCKER}" = "true" ] || [ "${ISOLATION}" = "container" ]; then
   echo "  Docker: OK"
 fi
 
+# ---- EXTERNAL DATABASE ---------------------------------------------------------------------------------------
+# Data access against a server this sample does NOT manage (db-vendors.yaml `existing` / `other`): no compose, no
+# init SQL, and the schema is applied by a human.
+#
+# ★ WHY THIS BLOCK EXISTS AT ALL. Unlike OAUTH_ISSUER_URI, a missing DB_PASSWORD does NOT stop the app. It is
+# bound by the @ConfigurationProperties Binder, which leaves an unresolved ${...} in place as a literal string
+# (ignoreUnresolvablePlaceholders=true), and Hikari connects lazily — nothing probes the database at startup. So
+# the app comes up with a banner and a green log, and the first module to touch the DB fails. This check and
+# docker-compose.yml's `:?` guard are the only early warnings that exist; docker-compose.app.yml.template's
+# comment names this check, so do not delete one without the other.
+if [ "${HAS_DB_EXTERNAL}" = "true" ]; then
+  db_host="${DB_HOST:-localhost}"
+  db_port="${DB_PORT:-3306}"
+
+  if [ -z "${DB_PASSWORD:-}" ]; then
+    err "DB_PASSWORD is not set, and application.yml has no fallback for it on an existing-server deployment (the
+  real credential lives in no committed file).
+  ⚠ This one does NOT stop the app on its own: it starts normally and fails at the FIRST query instead. Set it:
+    export DB_PASSWORD=<password>"
+  fi
+  echo "  DB target:  ${DB_USER:-<application.yml default>}@${db_host}:${db_port}/${DB_NAME}"
+
+  # The application.yml fallback for DB_HOST is `localhost` because it has to be safe to publish, not because it
+  # is right. Say so while it is still in effect rather than letting a connection-refused explain it later.
+  if [ -z "${DB_HOST:-}" ]; then
+    warn "DB_HOST is unset, so the application.yml fallback 'localhost' applies. That is correct only if the
+  database runs on this machine. Inside a container it means the container itself."
+  fi
+
+  # Reachability probe. A WARNING, not an error: a VPN or firewall rule may legitimately come up after this
+  # script, and refusing to start the server for that would be wrong. bash's /dev/tcp needs no extra tooling.
+  if have timeout && timeout 5 bash -c "cat < /dev/null > /dev/tcp/${db_host}/${db_port}" 2>/dev/null; then
+    echo "  DB reachable: ${db_host}:${db_port} OK"
+  else
+    warn "cannot confirm a TCP connection to ${db_host}:${db_port} (or 'timeout' is unavailable). The app will
+  still start — Hikari connects lazily — and the failure will surface at the first query."
+  fi
+
+  # ★ NO TOOL RUNS DDL. Say it here, because the deploy-time failure is far from this point.
+  echo "  Reminder: apply the schema to '${DB_NAME}' before the first module deploy (no tool runs DDL)."
+fi
+
 # Sidecar worker runtime — an EXTERNAL worker artifact replaces the embed runtime's bootJar explode. Protean
 # resolves it at the first worker spawn (first deploy), not at startup, and throws IllegalStateException when the
 # key for this track is blank: the process track needs worker.sidecar.jar, the container track needs
@@ -136,10 +180,33 @@ if [ "${OAUTH}" = "true" ]; then
 fi
 
 # HTTP port free — this is the real bind port (server.port derives from SERVER_PORT), so the check is meaningful.
-if have ss && ss -ltn 2>/dev/null | grep -q ":${SERVER_PORT} "; then
-  err "Port ${SERVER_PORT} is already in use. Re-run with a different port: SERVER_PORT=<n> ./setup.sh"
+#
+# ★ A CHECK THAT CANNOT RUN MUST SAY SO. This used to read `if have ss && ss -ltn | grep -q ...` followed by an
+# unconditional `echo "Port free"`, which meant that on any host without iproute2 the check silently evaporated
+# while still printing "free" — a missing check that looked like a passing one. (Observed on Windows/Git Bash,
+# where `ss` does not exist.) Try the three usual tools, and when none is present print `skipped` rather than a
+# reassurance nobody earned.
+port_listeners() {
+  if   have ss;      then ss -ltn 2>/dev/null
+  elif have lsof;    then lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null
+  elif have netstat; then netstat -ltn 2>/dev/null
+  else return 127
+  fi
+}
+# Run it ONCE and keep the output: calling the function twice (once to test, once to grep) lets the guard and the
+# check disagree. An empty result counts as "could not check" rather than "nothing is listening" — every one of
+# these tools prints a header on success, and biasing the unknown case towards a warning is the safe direction.
+# (A present-but-unusable tool lands here too: Windows' netstat.exe rejects `-ltn`, so Git Bash takes this path.)
+listeners="$(port_listeners)" || listeners=""
+if [ -n "${listeners}" ]; then
+  if printf '%s\n' "${listeners}" | grep -q "[:.]${SERVER_PORT}[[:space:]]"; then
+    err "Port ${SERVER_PORT} is already in use. Re-run with a different port: SERVER_PORT=<n> ./setup.sh"
+  fi
+  echo "  Port ${SERVER_PORT}: free"
+else
+  warn "port check SKIPPED — no usable listener tool (ss/lsof/netstat) on this host, so nothing verified that
+  ${SERVER_PORT} is free. A clash will surface as a BindException when the server starts."
 fi
-echo "  Port ${SERVER_PORT}: free"
 
 log "Preflight OK"
 if [ "${CHECK_ONLY}" = "true" ]; then

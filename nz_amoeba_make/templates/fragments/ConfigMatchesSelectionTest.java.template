@@ -61,8 +61,11 @@ class ConfigMatchesSelectionTest {
 
     @Test
     void selectedFragmentsPresent() {
-        // <<fragment-checks>> — generator writes one line per selected code fragment, e.g.:
-        //   assertDoesNotThrow(() -> Class.forName("{{PKG}}.ExampleTool"));   // custom MCP tool
+        // <<fragment-checks>> — generator writes one line per selected code fragment, using the class name it
+        // ACTUALLY emitted (single fragments are renamed at generation, so the template's placeholder name is
+        // never the right thing to assert), e.g.:
+        //   assertDoesNotThrow(() -> Class.forName("{{PKG}}.<your custom tool class>"));   // custom MCP tool
+        //   assertDoesNotThrow(() -> Class.forName("{{PKG}}.support.BaseService"));        // common-support
         // (no fragments selected → this test is a no-op assertion below)
         assertDoesNotThrow(() -> {});
     }

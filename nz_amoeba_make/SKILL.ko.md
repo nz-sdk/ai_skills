@@ -345,7 +345,21 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 
 `{{NAME}}`, `{{PKG}}`(step 1 에서 입력받은 패키지), `{{PKG_PATH}}`(=`{{PKG}}` 의 `.`→`/`),
 `{{PORT}}`(step 1 에서 입력받은 포트), `{{COORD}}`, `{{VERSION}}`, 그리고 DB 토큰 `{{DB}}`/`{{PW}}` 를
-치환한다. 엔진:
+치환한다.
+
+**★ `{{COORD}}` 는 버전을 뺀 `group:artifact` 다.** step 2 는 버전이 포함된 *좌표*(`org.htcom:protean:0.0.1`)를
+물으므로 둘은 같은 문자열이 아니고, 치환 전에 쪼개야 한다 — `{{COORD}}` = `org.htcom:protean`,
+`{{VERSION}}` = `0.0.1`. 합치는 것은 템플릿이 직접 한다: `build.gradle.template` 은 `'{{COORD}}:{{VERSION}}'` 을
+쓰고, `setup.sh.template` 은 mavenLocal pom 을 찾기 위해 `${COORD%%:*}` / `${COORD##*:}` 로 다시 쪼갠다. 세 조각
+좌표를 그대로 치환하면 `build.gradle` 에는 `org.htcom:protean:0.0.1:0.0.1` 이, `setup.sh` 에는 깨진 mavenLocal
+경로가 남는다.
+
+**★ 사용자가 입력하지 않지만 생성기가 채워야 하는 플레이스홀더** — 각각 템플릿이 분기하는 값이고, 안 채우면
+조용히 "false" 로 읽힌다: `{{NAME_KEBAB}}`, `{{IS_SNAPSHOT}}`, `{{HAS_DB_DOCKER}}`,
+`{{HAS_DB_EXTERNAL}}`(연결 방식이 `existing`/`other` 인 데이터 접근 — `setup.sh` 의 외부 DB 프리플라이트를
+켜는 값), `{{ISOLATION}}`, `{{WORKER_RUNTIME}}`, `{{SIDECAR_*}}`, `{{OAUTH}}`, `{{REPO_URL}}`.
+
+엔진:
 
 - **`application.yml`** — `templates/application.yml.template`(최소 베이스)에서 시작해, **설정된 모든
   `protean.*` 키**를 `protean:` 아래에 묶어 주입하고, 선택한 벤더의 `spring.datasource` 블록을 더한다.
@@ -356,7 +370,18 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   않는다 — `@Value`/`@ConfigurationProperties` 조회가 조용히 기본값만 보게 되고, 앱은 멀쩡해 보이는 상태로
   기동한다.
   issuer 는 `${OAUTH_ISSUER_URI}` 로 **fallback 없이** 쓴다(값이 없으면 기동이 중단돼야 한다). 반면 *광고되는*
-  placeholder 는 모두 fallback 을 유지한다. 광고되는 값에 host 나 port 를 하드코딩하지 말 것:
+  placeholder 는 모두 fallback 을 유지한다.
+  **★ `spring.datasource.password` 는 연결 방식에 따라 달라지며, 틀리면 살아 있는 자격증명을 커밋한다.**
+  docker ⇒ `${DB_PASSWORD:{{PW}}}`(스킬이 생성해 compose 파일에도 쓴 값 — 구조상 일회용이고 둘이 일치해야
+  한다). **existing / other ⇒ fallback 없는 `${DB_PASSWORD}`** — 이 경로에서 `{{PW}}` 는 이미 존재하는 서버에
+  대해 *사용자가 입력한* 비밀번호다. `prototype/nz_trilo` 는 이렇게 `password: "${DB_PASSWORD:trilo1234!}"` 를
+  실어 보냈고 `prototype/nz_ammon` 은 `${DB_PASSWORD}` 를 썼다 — 한 규정에서 두 결과가 나온 것이고,
+  `db-vendors.yaml` 의 주석이 그 틈을 막는다.
+  ⚠ 그리고 여기서의 fallback 없음을 OAUTH_ISSUER_URI 의 보장처럼 말하지 말 것: `spring.datasource.*` 는
+  `@ConfigurationProperties` Binder 가 바인딩하는데 미해결 `${...}` 를 리터럴 문자열로 남기고 Hikari 는 게으르게
+  접속하므로, `DB_PASSWORD` 가 없으면 앱은 멀쩡히 기동하고 **첫 쿼리에서** 실패한다. 이 키를 쓰는 자리마다
+  그 사실을 함께 적는다.
+  광고되는 값에 host 나 port 를 하드코딩하지 말 것:
   `mcp.authorization.resource` 는 `http://${SERVER_HOST:localhost}:${SERVER_PORT:{{PORT}}}/platform/mcp` 로 쓰고,
   템플릿의 `server.port: ${SERVER_PORT:{{PORT}}}` 를 유지해 바인드 포트와 광고 포트가 어긋나지 않게 한다
   (`SERVER_PORT` 는 Spring 이 `server.port` 로 relaxed-binding 하는 정확한 이름이다 — 템플릿 주석 참조).
@@ -429,7 +454,22 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   `runner/env.example.template` → `.github/runner/.env.example`, `docs/*.md.template` → `docs/*.md`.
   `{{NAME}}`, `{{NAME_KEBAB}}`(= `{{NAME}}` 의 `_`→`-`. 컨테이너·볼륨·compose 프로젝트 이름을 만든다),
   `{{PKG}}`, `{{PORT}}`, `{{DB}}`, 그리고 `full` 수준에서는 `{{REPO_URL}}` 을 치환한다.
-  틀리기 쉬운 것 셋:
+  틀리기 쉬운 것 넷:
+  - **★ 오버레이를 만들지 않았다면 `[OPTIONAL local-db]` 블록을 모두 지운다.** `docker-compose.local-db.yml` 은
+    인프라 ≥ `container` 이면서 **docker 로 관리하는** DB 일 때만 나간다. 기존 서버·`h2`·`other`·데이터 접근
+    없음이면 그 파일은 존재하지 않는데, 네 템플릿이 그것을 참조하며 찾기 쉽도록 `[OPTIONAL local-db]` 로
+    표시돼 있다: `workflows/deploy.yml.template`, `docker-compose.app.yml.template`, `env.example.template`,
+    `docs/docker.md.template`(각자 자기 주석에 대체 문구를 담고 있다). **`deploy.yml` 만은 미관 문제가
+    아니다**: 그 참조는 `type: choice` 의 **선택지**라서 고를 수 있고, 고른 운영자는 없는 파일을 상대로
+    `docker compose -f docker-compose.yml -f docker-compose.local-db.yml` 를 실행한다 — CI 가 초록이 된 뒤
+    운영 호스트에서 compose 단계가 실패한다. 그 선택지 줄을 지운다.
+  - **★ rename 한 프래그먼트는 자기 파일만이 아니라 모든 곳에서 rename 해야 한다.** 단일 `fragment` 는 실제
+    클래스명으로 바뀌는데(9 단계), 다른 템플릿이 그 클래스를 산문과 `<<fragment-checks>>` 에서 언급한다. 생성
+    후 생성물 트리에서 템플릿의 자리표시 이름(`ExampleTool`, `ExampleAuthorizer`, `ExampleCodeRule`,
+    `ExampleUnloadCallback`, `ExampleToolOverride`)을 grep 해서 실제 사용한 이름으로 바꾼다 — `README.md`,
+    `SecurityConfig.java`, `module_source_tools` 번들의 테스트가 authorizer 나 커스텀 툴을 언급한다. 남은
+    자리표시 이름은 존재하지 않는 클래스를 가리키는 참조다. (`fragment_bundle` 멤버는 반대다: `rename: false`
+    이므로 절대 건드리지 않는다.)
   - **`{{...}}` 가 항상 플레이스홀더는 아니다.** `ci.yml` 에는 `{{.State.Health.Status}}` 가 있고 이것은
     docker inspect 의 Go 템플릿이다. 스킬 플레이스홀더는 `{{UPPER_SNAKE_CASE}}` 뿐이며, 그 밖의 것은 그대로 둔다.
   - **load-bearing 한 부분을 "정리"하지 말 것.** 각각이 조용히 나는 실패를 설명하는 주석이다: `java -jar` 금지,
@@ -457,7 +497,11 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   그대로를 위한 Linux/Ubuntu 설치·실행 스크립트다: preflight(javac 로 JDK 21 확인, gradlew, SNAPSHOT 이면
   mavenLocal 의 protean jar, docker DB 면 Docker 데몬 + compose, `worker.runtime=sidecar` 면 sidecar 아티팩트,
   포트 사용 가능 여부) → `docker compose up -d --wait`(docker DB 인 경우) → `./gradlew run`.
-  `{{IS_SNAPSHOT}}`(버전이 `-SNAPSHOT` 로 끝나는지), `{{HAS_DB_DOCKER}}`(데이터 접근 또는 jdbc-store DataSource 가
+  `{{IS_SNAPSHOT}}`(버전이 `-SNAPSHOT` 로 끝나는지), **`{{HAS_DB_EXTERNAL}}`**(같은 조건이지만 연결 방식이
+  `existing`/`other` 인 경우 — 외부 DB 프리플라이트를 켠다: `DB_PASSWORD` 존재, `DB_HOST` 가 조용히
+  `localhost` 로 떨어지지 않는지, TCP 프로브, 그리고 DDL 을 실행하는 도구가 없다는 안내.
+  `docker-compose.app.yml.template` 이 "setup.sh 의 검사"라고 말할 때 가리키는 것이 이 블록이므로 둘이
+  어긋나면 안 된다), `{{HAS_DB_DOCKER}}`(데이터 접근 또는 jdbc-store DataSource 가
   선택되고 연결 방식이 docker), `{{ISOLATION}}`(격리 모드 — `container` 일 때 스크립트가 Docker 를 확인한다),
   그리고 sidecar 3종 `{{WORKER_RUNTIME}}`(`embed`|`sidecar`. in-process 면 `embed`), `{{SIDECAR_JAR}}`,
   `{{SIDECAR_IMAGE}}`, `{{SIDECAR_SHARED_API}}`(미설정 시 각각 공백 — 그러면 스크립트가 이 트랙에 필요한
@@ -487,9 +531,15 @@ Linux/Ubuntu 서버용 원커맨드 설치를 앞세우고, 그다음 수동 등
 - `./gradlew run` (JDK 21).
 - (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
 - 배포된 모듈 엔드포인트를 호출해 본다. 상태는 `curl localhost:{{PORT}}/platform/modules`.
-- 서버 없이도 사용자가 돌릴 수 있는 sanity check: `./gradlew compileJava`(protean jar 를 대상으로 컴파일)와
+- 배포 없이 돌릴 수 있는 sanity check: `./gradlew compileJava`(protean jar 를 대상으로 컴파일)와
   `./gradlew test`(`ConfigMatchesSelectionTest` 실행 — 생성된 설정이 선택과 일치하는지 단언. MCP 표면을
-  보호했다면 `ResourceServerOnlyTest` 도 함께).
+  보호했다면 `ResourceServerOnlyTest` 도 함께, 그리고 두 프래그먼트 번들의 테스트도).
+  **이것을 "서버 없이"라고 설명하지 말 것.** `ConfigMatchesSelectionTest` 는 아무것도 띄우지 않지만
+  `ResourceServerOnlyTest` 는 `@SpringBootTest(webEnvironment = RANDOM_PORT)` 라서 실제 Tomcat 을 띄운다 —
+  임의 포트라 실행 중인 인스턴스와 충돌하지 않고, `.invalid` issuer 를 쓰므로 인가 서버가 없어도 된다. 사실대로
+  적는다: 이 스위트는 **오프라인**이며 AS 도 닿는 DB 도 필요 없다. 그리고 DB 쪽이 보장이 아닌 이유도 적는다 —
+  DataSource 는 완전히 배선돼 있고 Hikari 가 게으르게 접속할 뿐이라, `./gradlew test` 가 초록이어도 DB 에 대해
+  증명하는 것은 없다. 그것이 `./setup.sh --check` 의 역할이다.
 - **(6 단계 ≥ `container`) 컨테이너 경로**를 별도의 짧은 블록으로 출력한다:
   ```
   cp .env.example .env          # 필수값을 채운다 — OAUTH_ISSUER_URI 는 기본값이 없다

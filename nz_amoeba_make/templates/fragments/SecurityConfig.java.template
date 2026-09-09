@@ -35,8 +35,9 @@ import org.springframework.security.web.SecurityFilterChain;
 public class SecurityConfig {
 
     // Authorities as Spring renders bearer scopes: scope "mcp.read" -> authority "SCOPE_mcp.read".
-    // Advertise the same names in protean.mcp.authorization.scopes-supported, and map them to actions in
-    // ExampleAuthorizer. NOTE: these are OAUTH scopes — nothing to do with protean.worker.db.scopes (DB tenants).
+    // Advertise the same names in protean.mcp.authorization.scopes-supported, and map them to actions in the
+    // ModuleActionAuthorizer bean (the `authorizer` capability's fragment, whatever the generator named it).
+    // NOTE: these are OAUTH scopes — nothing to do with protean.worker.db.scopes (DB tenants).
     private static final String READ = "SCOPE_mcp.read";
     private static final String WRITE = "SCOPE_mcp.write";
     private static final String ADMIN = "SCOPE_mcp.admin";
@@ -82,7 +83,7 @@ public class SecurityConfig {
             .csrf(csrf -> csrf.disable())
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                // (1) MCP transport — coarse gate only; ExampleAuthorizer decides per action.
+                // (1) MCP transport — coarse gate only; the ModuleActionAuthorizer bean decides per action.
                 .requestMatchers("/platform/mcp", "/platform/mcp/**").hasAnyAuthority(READ, WRITE, ADMIN)
                 // (2) admin REST reads — /platform/modules, /platform/trace/*, /platform/runtimes, ...
                 .requestMatchers(HttpMethod.GET, "/platform/**").hasAnyAuthority(READ, WRITE)

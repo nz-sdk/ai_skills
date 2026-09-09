@@ -73,5 +73,25 @@ vendors:
 #       url: <vendor.url or typed>
 #       driver-class-name: <vendor.driver_class or typed>
 #       username: ${DB_USER:{{DB}}}
-#       password: ${DB_PASSWORD:{{PW}}}
+#       password: <SEE BELOW — depends on the connection mode>
 # For H2: url from modes.<mem|file>, driver-class-name org.h2.Driver, username sa, password "".
+#
+# ★ THE PASSWORD FALLBACK IS DECIDED BY THE CONNECTION MODE. This is the ONE key whose shape is not the same for
+# every vendor, and getting it wrong COMMITS A REAL CREDENTIAL to the repository.
+#
+#   docker            password: ${DB_PASSWORD:{{PW}}}
+#                     {{PW}} is a value the SKILL generated (<DB>1234) and also wrote into docker-compose.yml, so
+#                     the two must agree and the fallback is throwaway by construction. Safe to publish.
+#
+#   existing / other  password: ${DB_PASSWORD}          ← NO FALLBACK. Never {{PW}} here.
+#                     On these paths {{PW}} is the password the USER TYPED for a server that already exists, i.e.
+#                     a live secret. Writing it as a fallback puts it in application.yml, which is committed.
+#                     Observed: prototype/nz_trilo shipped `password: "${DB_PASSWORD:trilo1234!}"` this way, while
+#                     prototype/nz_ammon (same skill) shipped `password: "${DB_PASSWORD}"` — two results from one
+#                     spec is what this note removes.
+#
+# ⚠ AND SAY WHAT NO-FALLBACK DOES *NOT* BUY, because it reads like the OAUTH_ISSUER_URI guarantee and is not:
+# an unset DB_PASSWORD does NOT abort startup. spring.datasource.* is bound by the @ConfigurationProperties
+# Binder, which leaves an unresolved ${...} in place as a LITERAL STRING (ignoreUnresolvablePlaceholders=true),
+# and Hikari connects lazily — so the app starts with a banner and fails at the FIRST QUERY. The early warnings
+# are docker-compose.yml's `:?` guard and setup.sh's external-DB check; keep both.

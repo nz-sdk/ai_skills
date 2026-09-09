@@ -12,7 +12,7 @@ server:
   # server.port, and OS environment variables outrank application.yml. Under any other name (MCP_PORT, …) a caller
   # setting SERVER_PORT would still change the bind port WITHOUT updating the advertised URL, so the two could
   # drift. Sharing the name collapses both paths onto one variable. setup.sh uses the same name.
-  port: ${SERVER_PORT:8080}
+  port: ${SERVER_PORT:{{PORT}}}
 
 spring:
   application:
@@ -58,4 +58,4 @@ protean:
   #     # LIMITATION: the scheme is fixed to http. Behind TLS termination this advertises http:// and a client that
   #     # string-compares the resource identifier will reject it — switch to https (or add a SERVER_SCHEME
   #     # variable) at that point. A standard-port deployment also still gets an explicit :443/:80 in the URL.
-  #     resource: http://${SERVER_HOST:localhost}:${SERVER_PORT:8080}/platform/mcp
+  #     resource: http://${SERVER_HOST:localhost}:${SERVER_PORT:{{PORT}}}/platform/mcp

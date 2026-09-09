@@ -1,0 +1,123 @@
+# =====================================================================
+# protean-{{NAME}}-sample — Docker image (Spring Boot 3.5.16 / JDK 21)
+#
+# TWO CONSTRAINTS FORCE THE SHAPE OF THIS IMAGE. Neither is a matter of taste.
+#
+#  1. The runtime image must be a JDK, not a JRE. Protean compiles submitted module sources at RUNTIME with
+#     javac — without getSystemJavaCompiler() the first deploy dies.
+#
+#  2. `java -jar` cannot be used. Protean's RuntimeCompiler assembles the module compile classpath from
+#     System.getProperty("java.class.path"). Run a Spring Boot fat jar with `java -jar` and the libraries are
+#     nested at BOOT-INF/lib/*.jar, so java.class.path holds only the fat jar itself and every type a module
+#     imports (mybatis, swagger-annotations, …) fails to resolve.
+#     → explode the fat jar and run a flat classpath:
+#         java -cp "BOOT-INF/classes:BOOT-INF/lib/*" {{PKG}}.Application
+#       (the same flat classpath `./gradlew run` produces — see the matching note in build.gradle)
+#
+# Design rationale in full: docs/docker.md.
+# =====================================================================
+
+# ─────────────────────────────────────────────────────────────────────
+# 1. build — compile, then explode the fat jar
+# ─────────────────────────────────────────────────────────────────────
+FROM eclipse-temurin:21-jdk AS build
+WORKDIR /src
+
+# Copy the build scripts FIRST so the dependency-resolution layer stays cached when only src/ changes.
+COPY gradle/ gradle/
+COPY gradlew build.gradle settings.gradle ./
+
+# gradlew is committed with LF and the exec bit (.gitattributes + `git update-index --chmod=+x`), but a Windows
+# checkout or a zip download can lose both. Re-assert them here: with CRLF this dies on Linux as
+# `bad interpreter: /bin/sh^M`.
+RUN sed -i 's/\r$//' gradlew \
+ && chmod +x gradlew \
+ && ./gradlew --no-daemon --console=plain dependencies --configuration runtimeClasspath > /dev/null
+
+# NOTE: `--offline` is not usable even though the protean coordinate resolves from Maven Central — the
+# foojay-resolver plugin in settings.gradle reaches the network at CONFIGURATION time.
+
+COPY src/ src/
+
+# bootJar only. Tests deliberately do NOT run here: `docker compose up --build` would re-run the whole suite on
+# every start, and a failure unrelated to the image would block it. The test gate is .github/workflows/ci.yml.
+RUN ./gradlew --no-daemon --console=plain bootJar
+
+# fat jar → flat classpath layout. Result: /layout/{BOOT-INF/classes,BOOT-INF/lib,META-INF,org}
+RUN mkdir -p /layout && cd /layout \
+ && jar -xf /src/build/libs/protean-{{NAME}}-sample.jar \
+ && rm -rf "$JAVA_HOME/jmods" "$JAVA_HOME/lib/src.zip"
+# ★ REMOVING jmods MUST HAPPEN IN THIS STAGE. The runtime stage COPYs this JDK, so deleting here actually
+#   shrinks the final image (~83MB). A `RUN rm` placed AFTER the COPY only stacks a whiteout layer while the
+#   originals stay in the lower layer, reclaiming nothing.
+#   jmods is input for jlink/jpackage only; Protean compiles in-process via getSystemJavaCompiler, so it is
+#   unused. lib/modules survives, so javac keeps working.
+
+# ─────────────────────────────────────────────────────────────────────
+# 2. runtime — bare ubuntu + the builder's Temurin JDK
+# ─────────────────────────────────────────────────────────────────────
+# ubuntu:24.04 LTS (92 packages) instead of eclipse-temurin (149), copying just the JDK. The FULL JDK, not a
+# JRE, because of constraint 1. Java uses its own cacerts ($JAVA_HOME/lib/security), so HTTPS works without the
+# OS ca-certificates package.
+FROM ubuntu:24.04 AS runtime
+
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH=$JAVA_HOME/bin:$PATH
+COPY --from=build /opt/java/openjdk /opt/java/openjdk
+# Zero apt installs. The HEALTHCHECK uses bash's /dev/tcp, already present in the ubuntu base.
+
+# Non-root: this process compiles and loads arbitrary submitted code, so there is no reason to run it as root.
+#
+# ★ The module-store directory is created and chowned IN THE IMAGE. A named volume inherits the ownership of
+#   its mount point as it exists in the image — without this the volume is created root-owned and the non-root
+#   process cannot write modules, which fails at the first deploy rather than at startup.
+RUN useradd -r -u 1001 -m -d /home/app app \
+ && mkdir -p /app /var/lib/protean/modules \
+ && chown -R app:app /app /var/lib/protean
+
+# Not load-bearing — ENTRYPOINT uses absolute classpath entries — but it keeps `docker exec` landing somewhere
+# useful and any relative path a module resolves at runtime anchored to a directory the app owns.
+WORKDIR /app
+
+# Rarely-changing lib first, frequently-changing app classes after → better layer caching.
+COPY --from=build --chown=app:app /layout/BOOT-INF/lib     /app/BOOT-INF/lib
+COPY --from=build --chown=app:app /layout/BOOT-INF/classes /app/BOOT-INF/classes
+COPY --from=build --chown=app:app /layout/META-INF         /app/META-INF
+# /layout/org (Spring Boot's JarLauncher) is deliberately NOT copied — flat-classpath execution bypasses the
+# loader, so it is dead weight, and leaving it implies `java -jar` would work here. It would not (constraint 2).
+
+USER app
+
+ENV SERVER_PORT={{PORT}} \
+    SERVER_HOST=localhost \
+    PROTEAN_MODULESTORE_DIR=/var/lib/protean/modules \
+    JAVA_OPTS="-XX:MaxRAMPercentage=75.0"
+# ★ PROTEAN_MODULESTORE_DIR — this exact spelling. Relaxed binding maps it to protean.modulestore.dir, whose
+#   uniform form equals protean.module-store.dir. PROTEAN_MODULE_STORE_DIR does NOT match (the extra underscore
+#   makes it a different key).
+#
+# ★ OAUTH_ISSUER_URI gets no default ON PURPOSE. This app is a Resource Server: the value is the EXTERNAL
+#   Authorization Server's issuer identifier, which only the operator knows. Unset → SecurityConfig refuses to
+#   start, which is the correct behaviour for an RCE surface. A WRONG value starts perfectly and 401s every
+#   request — see docs/docker.md.
+
+EXPOSE {{PORT}}
+VOLUME ["/var/lib/protean/modules"]
+
+# /platform/modules cannot be used as the probe: SecurityConfig chain @Order(1) locks GET /platform/** behind
+# SCOPE_mcp.read|write, so an unauthenticated request is 401.
+#
+# ★ Probe the PROTECTED-RESOURCE metadata, never /.well-known/oauth-authorization-server — that endpoint exists
+#   only on an Authorization Server, and this app is not one, so it answers 404 and the container would sit
+#   permanently unhealthy. protean publishes protected-resource metadata whenever
+#   protean.mcp.authorization.resource is set, and it falls to chain #2 (permitAll) → unauthenticated 200.
+#   It also happens to test the thing that matters: whether an MCP client can discover where to get a token.
+#   (There is no actuator in this app.) ResourceServerOnlyTest pins both states — this one 200, that one 404.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+  CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/${SERVER_PORT:-{{PORT}}} && \
+      printf "GET /.well-known/oauth-protected-resource HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3 && \
+      head -n 1 <&3 | grep -q " 200"' || exit 1
+
+# The classpath is quoted so the shell does not glob it and the JVM expands lib/* itself → a flat
+# java.class.path. exec form → java becomes PID 1 and receives docker stop's SIGTERM directly (graceful shutdown).
+ENTRYPOINT ["sh","-c","exec java $JAVA_OPTS -cp \"/app/BOOT-INF/classes:/app/BOOT-INF/lib/*\" {{PKG}}.Application"]

@@ -1,0 +1,164 @@
+# Docker
+
+## Quick start
+
+```bash
+cp .env.example .env          # fill in OAUTH_ISSUER_URI, DB_HOST, DB_USER, DB_PASSWORD
+docker compose up -d --build
+docker compose ps             # wait for STATUS to read (healthy)
+docker compose logs -f
+```
+
+<!-- [OPTIONAL local-db] GENERATOR: replace this whole block with the "no local database" paragraph below when
+     docker-compose.local-db.yml is not emitted (existing DB server, h2, or other). Leaving it in documents a
+     command that cannot run.
+
+     No local database:
+       **There is no local-database sidecar in this project.** It was generated against an already-running
+       database, so no `docker-compose.local-db.yml` and no `init/*.sql` were emitted, and the schema is applied
+       by a human once (`db/schema.sql`). To gain a throwaway local database, add a service to
+       `docker-compose.yml` and point `DB_HOST` at it. -->
+Standalone, with a local database sidecar instead of an external server:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local-db.yml up -d --build
+```
+
+Teardown: `docker compose down` keeps the module-store volume; `docker compose down -v` discards every
+deployed module.
+
+With `protean.module-store.backend: jdbc` the deployed modules live in the database rather than in that volume,
+so `down -v` no longer loses them.
+
+## Why the image looks like this
+
+Two constraints force the shape. Neither is a matter of taste.
+
+1. **The runtime image must be a JDK, not a JRE.** Protean compiles submitted module sources at runtime with
+   `javac`. Without `getSystemJavaCompiler()` the first deploy dies.
+2. **`java -jar` cannot be used.** Protean's `RuntimeCompiler` builds the module compile classpath from
+   `System.getProperty("java.class.path")`. Under `java -jar`, a Spring Boot fat jar nests its libraries at
+   `BOOT-INF/lib/*.jar`, so `java.class.path` contains only the fat jar and every type a module imports fails
+   to resolve. The image therefore explodes the jar and runs a flat classpath — the same classpath
+   `./gradlew run` produces.
+
+```
+  stage 1: build            eclipse-temurin:21-jdk
+    gradle scripts → deps  (cached separately from src/)
+    src/ → bootJar → jar -xf → /layout
+    rm -rf $JAVA_HOME/jmods $JAVA_HOME/lib/src.zip
+
+  stage 2: runtime          ubuntu:24.04 + the builder's JDK
+    COPY /opt/java/openjdk
+    COPY /layout/BOOT-INF/{lib,classes} + META-INF   (org/ deliberately omitted)
+    USER app · flat-classpath ENTRYPOINT
+```
+
+### Removing jmods must happen in the BUILD stage
+
+Deleting it after the `COPY` only stacks a whiteout layer while the originals remain in the lower layer,
+reclaiming nothing. Done in the build stage, the final image really is ~83MB smaller. `jmods` is input for
+`jlink`/`jpackage` only; `lib/modules` survives, so `javac` keeps working.
+
+### The named-volume ownership trap
+
+A named volume inherits the ownership of its mount point **as it exists in the image**. If the path is absent
+from the image, Docker creates it root-owned and the non-root process cannot write to it. That is why the
+Dockerfile does `mkdir -p /var/lib/protean/modules && chown` before declaring the volume.
+
+## Environment variables
+
+| Variable | Binds to | Default | Required |
+|---|---|---|---|
+| `OAUTH_ISSUER_URI` | `spring.security.oauth2.resourceserver.jwt.issuer-uri` **and** `protean.mcp.authorization.authorization-servers[0]` | none | **Yes** |
+| `SERVER_PORT` | `server.port` + the port inside `protean.mcp.authorization.resource` | `{{PORT}}` | No |
+| `SERVER_HOST` | the host inside `protean.mcp.authorization.resource` (advertised, **not** a bind address) | `localhost` | No |
+| `DB_HOST` | `spring.datasource.url` host | none | **Yes** |
+| `DB_PORT` | `spring.datasource.url` port | `3306` | No |
+| `DB_USER` | `spring.datasource.username` | none | **Yes** |
+| `DB_PASSWORD` | `spring.datasource.password` | none | **Yes** |
+| `PROTEAN_MODULESTORE_DIR` | `protean.module-store.dir` | `/var/lib/protean/modules` | No |
+| `JAVA_OPTS` | JVM flags | `-XX:MaxRAMPercentage=75.0` | No |
+| `IMAGE_TAG` | image tag compose builds/runs | `local` | No |
+
+`PROTEAN_MODULESTORE_DIR` is spelled exactly like that. Relaxed binding maps it to `protean.modulestore.dir`,
+whose uniform form equals `protean.module-store.dir`. `PROTEAN_MODULE_STORE_DIR` does **not** match.
+
+### OAUTH_ISSUER_URI is not this app's address
+
+This app **verifies** tokens; it never issues them. The value is the external Authorization Server's issuer
+identifier — the exact `iss` string its tokens carry, not a token endpoint, JWKS URL, or login page. Confirm
+it with:
+
+```bash
+curl -s <candidate>/.well-known/openid-configuration | jq -r .issuer
+```
+
+The same string has to appear in three places, byte for byte:
+
+| # | Where | Meaning |
+|---|---|---|
+| ① | the Authorization Server's own issuer setting | what it stamps as `iss` |
+| ② | this app's `jwt.issuer-uri` | what we verify |
+| ③ | `protean.mcp.authorization.authorization-servers[0]` | what we ADVERTISE to MCP clients |
+
+Get one wrong and **the app starts perfectly while every request 401s**. ② and ③ are both filled from this one
+variable, so only ① can drift.
+
+⚠ Do not use `localhost` — inside a container that is the container itself.
+
+### Both sides of `ports` are the same number
+
+`protean.mcp.authorization.resource` is assembled from `SERVER_HOST`/`SERVER_PORT`, and inside the container
+`SERVER_PORT` is the **bind** port. Publishing `"9300:{{PORT}}"` would advertise port `{{PORT}}` to MCP clients
+while the host listens on `9300`, where nothing answers. To change the external port, change `SERVER_PORT`
+alone.
+
+## Volumes
+
+| Volume | Holds | Losing it means |
+|---|---|---|
+| `{{NAME_KEBAB}}-modules` | the deployed-module store | every deployed module is gone |
+| `{{NAME_KEBAB}}-mysql-data` | sidecar database data (overlay only) | database contents are gone |
+
+## Healthcheck
+
+Probes `/.well-known/oauth-protected-resource`, expecting an unauthenticated 200.
+
+- `/platform/modules` cannot be used: `SecurityConfig` chain `@Order(1)` locks `GET /platform/**` behind
+  `SCOPE_mcp.read|write`, so an unauthenticated probe is 401.
+- `/.well-known/oauth-authorization-server` **must not** be used: that endpoint exists only on an
+  Authorization Server, so it answers 404 here and the container would sit permanently `unhealthy`.
+- It is defined in the Dockerfile, not in compose — compose's `CMD-SHELL` is `/bin/sh` (dash), where the
+  bash-only `/dev/tcp` trick fails silently.
+
+`restart: unless-stopped` only revives an **exited** container. One that keeps running while unhealthy is not
+restarted — check `docker compose ps` yourself.
+
+## The sidecar overlay
+
+A separate file rather than `profiles:`, because Compose v2.20+ auto-activates the profile of any service an
+active service `depends_on` — so a profile would activate itself in the default configuration, and older
+versions fail outright with `depends on undefined service`.
+
+⚠ `.env` still needs `DB_HOST` (set it to the sidecar's service name) even with the overlay: compose
+interpolates each `-f` file **separately** before merging, so the base file's `${DB_HOST:?...}` guard fires
+regardless of the overlay's override.
+
+⚠ Never leave a bind mount pointing at a path that does not exist. Docker creates an empty **directory** on the
+host, and a database entrypoint then tries to execute it — surfacing as a container that will not start rather
+than as a missing schema.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `bad interpreter: /bin/sh^M` during build | `gradlew` checked out CRLF. `.gitattributes` pins LF; the Dockerfile also strips CR |
+| `./gradlew: Permission denied` | `gradlew` committed 100644. Run `git update-index --chmod=+x gradlew setup.sh` |
+| App refuses to start, complains about the issuer | `OAUTH_ISSUER_URI` unset, empty, or missing a scheme |
+| Starts fine, **every** request 401s | `OAUTH_ISSUER_URI` does not match the AS's `iss` byte for byte (a trailing slash is enough) |
+| Container permanently `unhealthy` | healthcheck path points at an Authorization Server endpoint (404) |
+| Modules vanish after `down -v` | that is what `-v` does — the module-store volume was removed |
+| `Permission denied` writing modules | the volume was created root-owned; the image must `mkdir`+`chown` the mount point |
+| First module deploy fails on the database | the app starts without the DB (Hikari is lazy) — the credentials were wrong all along |
+| MCP client cannot find the Authorization Server | `authorization-servers` unset, or `scopes-supported` left empty |

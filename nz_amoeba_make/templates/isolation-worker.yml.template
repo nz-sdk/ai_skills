@@ -33,6 +33,6 @@
     #   mode: hmac
 # [OPTIONAL rpc-bridge] main bridge URL injected into workers (+ auth)
 #  bridge:
-#    url: http://host.docker.internal:8080
+#    url: http://host.docker.internal:{{PORT}}
 #    auth-enabled: true
 #    auth-mode: hmac

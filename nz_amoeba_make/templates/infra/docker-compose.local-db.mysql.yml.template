@@ -1,0 +1,108 @@
+# MySQL 8.4 sidecar overlay — lets the project start straight from a clone with no external database.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local-db.yml up -d --build
+#
+# To avoid passing both -f every time, put this in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.local-db.yml
+#
+# Reset (the only way to re-apply the schema — see the initdb caveat at the bottom):
+#   docker compose -f docker-compose.yml -f docker-compose.local-db.yml down -v
+#
+# ─────────────────────────────────────────────────────────────────────
+# ★ WHY A SEPARATE FILE RATHER THAN `profiles: [local-db]`
+#
+# Compose v2.20+ AUTO-ACTIVATES the profile of any service that an active service depends_on. So attaching
+# depends_on: mysql to the profile-less app service brings the sidecar up even in the default configuration
+# (`docker compose up`) — which defeats the point of the profile. Older versions do the opposite and fail with
+# `service "app" depends on undefined service "mysql"`. Neither is wanted. An overlay file adds the service AND
+# the depends_on together, and does nothing at all when not passed.
+# ─────────────────────────────────────────────────────────────────────
+
+services:
+  app:
+    depends_on:
+      # Long form, so it merges cleanly into a base file that has no depends_on.
+      #
+      # The app itself would survive starting first — Hikari is lazy and nothing probes the database at startup.
+      # service_healthy is kept anyway: the point of the sidecar is a set that works straight from a clone, and
+      # if the app wins the race the FIRST module deploy hits a still-initialising database. That failure
+      # surfaces in module compile/run output rather than the app log, which obscures the cause.
+      mysql:
+        condition: service_healthy
+    environment:
+      # Override with the container-network name, so the app talks to the sidecar even when .env names an
+      # external host.
+      #
+      # ⚠ This does NOT exempt DB_HOST from .env. The base file's ${DB_HOST:?...} guard fires while compose
+      #   interpolates each file, before the merge, so it is unaffected by this override. For the sidecar path,
+      #   write DB_HOST=mysql in .env (see .env.example).
+      DB_HOST: mysql
+      DB_PORT: "3306"
+
+  mysql:
+    image: mysql:8.4
+    container_name: {{NAME_KEBAB}}-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-pw}
+      # ★ NOT configurable. The schema name is hardcoded in application.yml's JDBC URL. Change it here and the
+      #   app connects to a schema that does not exist.
+      MYSQL_DATABASE: {{DB}}
+      # The base file already guards this with ${DB_USER:?...} — giving a fallback here would let the two files
+      # disagree (the sidecar creates account A while the app connects as B).
+      MYSQL_USER: ${DB_USER}
+      # The SAME password the app uses in the base file — one variable covers both creating the sidecar account
+      # and connecting to it, so they cannot drift apart.
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env (it is both the sidecar account password and the app's connection password)}
+
+    # The offset form (+00:00) needs no timezone tables loaded. This is defence in depth: the JDBC URL already
+    # pins the SESSION to UTC with connectionTimeZone=UTC & forceConnectionTimeZoneToSession=true, and any
+    # module storing a java.time instant in a `timestamp` column depends on that. Without both, the value comes
+    # back shifted by the server's offset.
+    command: ["--default-time-zone=+00:00"]
+
+    ports:
+      # Host side only. The app connects over the container network to mysql:3306 and is unaffected.
+      # If the host already runs MySQL on 3306, step aside with MYSQL_HOST_PORT=13306.
+      - "${MYSQL_HOST_PORT:-3306}:3306"
+
+    volumes:
+      - {{NAME_KEBAB}}-mysql-data:/var/lib/mysql
+
+      # ★ NO initdb MOUNT HERE BY DEFAULT — and if you add one, mount a SINGLE FILE, never a directory.
+      #   ⚠ Never leave a bind pointing at a path that does not exist: Docker creates an empty DIRECTORY on the
+      #   host, and the MySQL entrypoint then tries `mysql < <directory>` and breaks. That shows up as the
+      #   container failing to start, not as "the schema is missing".
+      #   Mounting a directory (./init) :ro and layering files inside it does NOT work either — Docker cannot
+      #   create a mountpoint inside a read-only mount and the container refuses to start with
+      #     create mountpoint for /docker-entrypoint-initdb.d/01-... : read-only file system
+      #   Dropping :ro starts, but litters the host's ./init with empty files. The numeric prefix is the
+      #   execution order (alphabetical):
+      #   - ./sql/items.sql:/docker-entrypoint-initdb.d/01-items.sql:ro
+
+    healthcheck:
+      # mysqladmin ping over TCP (-h 127.0.0.1), not the socket — and that matters: the temporary server during
+      # the initdb phase starts with networking DISABLED, so this check keeps failing until the init scripts
+      # finish and the REAL server comes up. That is exactly the condition service_healthy above wants.
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  {{NAME_KEBAB}}-mysql-data:
+
+# ⚠ Scripts in /docker-entrypoint-initdb.d run ONLY when the data directory is empty. Editing DDL after the
+#   first `up` does nothing — you must clear the volume with `down -v` for it to run again.
+#
+# ⚠ MySQL 8.4 removed mysql_native_password. Connector/J negotiates caching_sha2_password, and over a plaintext
+#   connection it has to fetch the server's public key — so allowPublicKeyRetrieval=true in the JDBC URL is
+#   REQUIRED, not decoration. Fine for a loopback sidecar; for an external database it carries MITM risk, so
+#   use TLS there.

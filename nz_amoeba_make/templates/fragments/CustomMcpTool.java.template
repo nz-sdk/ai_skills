@@ -1,7 +1,19 @@
 // [CAPABILITY: custom MCP tool] Requires protean.mcp.enabled=true.
 // A @Component implementing McpTool is auto-collected by McpDispatcher and listed in tools/list alongside the
-// built-in protean.* tools — no server change. This example benchmarks a SQL statement (needs data-access);
-// adapt name/schema/call to your own tool. See reference/protean-capabilities.md (Axis B).
+// built-in protean.* tools — no server change. This example echoes and uppercases its input: it has NO
+// dependencies, so it compiles whatever else was selected. Adapt name/schema/call to your own tool.
+// See reference/protean-capabilities.md (Axis B).
+//
+// ★ CHECK action() BEFORE YOU SHIP A READ-ONLY TOOL. It returns CUSTOM below because that is the SPI default and
+// the honest choice for a tool whose effects are unknown — but CUSTOM is what the `authorizer` capability's
+// policy puts behind mcp.admin, the same bucket as config.set and deploy_shared_lib. So a tool that only READS
+// left at this default silently demands admin rights to do it.
+//   read-only  → override action() to return ModuleActionAuthorizer.ModuleAction.READ, and annotations() to
+//                return McpToolAnnotations.readOnly(). The three amoeba.*_module_source tools in the
+//                module_source_tools bundle do exactly this, and two of their tests pin it.
+//   mutating   → leave CUSTOM.
+// GENERATOR: when data_access is selected and the tool being generated reads the database, emit the READ
+// override rather than this default.
 package {{PKG}};
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -59,6 +71,7 @@ public class ExampleTool implements McpTool {
         return "Example Echo Tool";
     }
 
+    /** CUSTOM = the SPI default → mcp.admin under the `authorizer` policy. Read-only tools: return READ instead. */
     @Override
     public ModuleActionAuthorizer.ModuleAction action() {
         return ModuleActionAuthorizer.ModuleAction.CUSTOM;

@@ -1,0 +1,237 @@
+# =====================================================================
+# Deploy — protean-{{NAME}}-sample
+#
+# The deploy TARGET is the host Docker of the self-hosted runner this job lands on. No dind, no privileged.
+#
+# ★ WHEN IT RUNS — automatically after CI succeeds on main, plus manually.
+#   Using `workflow_run` means it deploys AFTER CI FINISHES GREEN, not the moment a merge lands. A `push`
+#   trigger is deliberately not used: this job only bakes the image and runs no tests (bootJar does not run
+#   them), so on push it would race CI and deploy commits whose tests are broken. Waiting for CI success is the
+#   only gate available in this setup.
+#
+# ⚠️ THERE IS NO APPROVAL GATE. On a free-plan private repository, branch protection, rulesets and Environment
+#   protection rules are all unavailable (the API answers 403 Upgrade to GitHub Pro). So a green CI deploys to
+#   production with no human confirmation, and the only way back is another deploy. If that is not acceptable
+#   for this project, either keep `workflow_dispatch` as the ONLY trigger (delete the workflow_run block) or
+#   upgrade the plan and enable required reviewers — procedure in docs/ci-cd.md.
+#
+# ★ NEVER ADD A pull_request TRIGGER — it would execute arbitrary PR code on the self-hosted runner, which
+#   holds docker.sock and is therefore equivalent to host root. Do not reach for
+#   `pull_request: types: [closed]` to mean "merged PRs only" either: the moment someone widens `types` it
+#   becomes that hole. main is only reachable by PR, so workflow_run is sufficient.
+# =====================================================================
+name: Deploy
+
+on:
+  # The manual path stays — for deploying a specific commit by hand, or picking a compose combination.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit/branch/tag to deploy (default main). Pick one CI has marked green.'
+        required: false
+        default: main
+      compose_files:
+        description: 'compose file combination. Leave as-is for an external database; add local-db for the sidecar.'
+        required: false
+        default: 'docker-compose.yml'
+        type: choice
+        options:
+          - 'docker-compose.yml'
+          # ★ GENERATOR: [OPTIONAL local-db] DELETE THE NEXT LINE when docker-compose.local-db.yml is not
+          #   emitted (existing DB server, h2, or other). This is the one local-db reference that is not merely
+          #   misleading: a `type: choice` option is SELECTABLE, so an operator picking it runs
+          #   `docker compose -f docker-compose.yml -f docker-compose.local-db.yml` against a file that does not
+          #   exist and the deploy fails at the compose step — on the production host, after CI went green.
+          - 'docker-compose.yml:docker-compose.local-db.yml'
+
+  # `workflows:` must match ci.yml's `name:` CHARACTER FOR CHARACTER — otherwise the trigger silently never
+  # fires.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false     # Never interrupt a half-finished `compose up`
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # ★ `types: [completed]` fires on FAILED CI too. Without this condition, a red CI would still deploy.
+    #   A workflow_dispatch run has no workflow_run context, so it is allowed through separately.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    # Register the runner with the label `docker` (self-hosted / Linux / X64 are added automatically).
+    # Registration procedure: docs/ci-cd.md, "Registering a self-hosted runner".
+    #
+    # ★ `deploy-host` is required ON TOP — ci.yml only asks for `docker`.
+    #   Deployment happens on the runner's OWN host Docker, but the target configuration (SERVER_HOST,
+    #   OAUTH_ISSUER_URI, DB_HOST) is a single set of repo variables. With several developer-machine runners
+    #   carrying identical labels, GitHub hands the job to whichever is idle — then machine B runs compose up
+    #   while the smoke test hits SERVER_HOST (= machine A) and GOES GREEN: B gets a second stack and A keeps
+    #   serving the old build. concurrency only prevents simultaneous runs; it does not pin a machine. The
+    #   label does.
+    #
+    # ⚠️ Labels are fixed AT REGISTRATION TIME — editing the runner's compose file does not change them.
+    #   Procedure: docs/ci-cd.md, "Pinning the deploy host".
+    runs-on: [self-hosted, linux, docker, deploy-host]
+    timeout-minutes: 30
+
+    environment:
+      # NOT relied on as an approval gate (see above — protection rules are unavailable on this plan). It is
+      # here for two other reasons: deployment history appears under the repo's Environments, and secrets can
+      # be scoped to this environment so the CI job cannot read them.
+      name: production
+      # ★ Deliberately NOT built from OAUTH_ISSUER_URI. That value names the EXTERNAL Authorization Server, so
+      #   using it here would point the Environments deployment link at the wrong service. The deployed app's
+      #   own address comes from SERVER_HOST/SERVER_PORT — the same axis compose publishes.
+      url: ${{ format('http://{0}:{1}', vars.SERVER_HOST || 'localhost', vars.SERVER_PORT || '{{PORT}}') }}
+
+    env:
+      # ★ Pin the project name. The runner's checkout directory differs from a developer machine's, and without
+      #   this compose treats it as a DIFFERENT project — creating fresh networks, volumes and containers while
+      #   the existing stack keeps running (two stacks fighting for one port, or a split module-store volume).
+      COMPOSE_PROJECT_NAME: {{NAME_KEBAB}}
+      # ⚠️ Under workflow_run every inputs.* is EMPTY. Without the fallback, COMPOSE_FILE becomes an empty
+      #   string and compose behaviour diverges rather than defaulting to the base file.
+      COMPOSE_FILE: ${{ inputs.compose_files || 'docker-compose.yml' }}
+
+    steps:
+      # ★ The label alone is not enough — anyone can attach a label to any runner in the GitHub UI, and a new
+      #   machine that copies the runner .env inherits RUNNER_LABELS with it. So the job re-checks its own
+      #   identity.
+      #
+      #   Placing this BEFORE checkout matters: failing here creates no workspace and no .env. It cuts off the
+      #   hardest failure in this workflow (deploying to the wrong machine while the smoke test hits
+      #   SERVER_HOST and passes) before deployment even begins.
+      #
+      #   RUNNER_NAME is a built-in Actions variable — no wiring needed.
+      - name: Verify this is the deploy host
+        run: |
+          want='${{ vars.DEPLOY_RUNNER_NAME }}'
+          if [ -z "$want" ]; then
+            echo "::error::DEPLOY_RUNNER_NAME variable is missing. Register the deploy host's runner name under Settings ▸ Secrets and variables ▸ Actions ▸ Variables (see docs/ci-cd.md, 'Pinning the deploy host')"
+            exit 1
+          fi
+          if [ "$RUNNER_NAME" != "$want" ]; then
+            echo "::error::ran on a runner that is not the deploy host — runner='$RUNNER_NAME', expected='$want'. Remove the deploy-host label from that runner, or fix DEPLOY_RUNNER_NAME"
+            exit 1
+          fi
+          echo "deploy host ok ($RUNNER_NAME)"
+
+      - uses: actions/checkout@v4
+        with:
+          # ★ On an automatic run this is head_sha, NOT `main` — deploy exactly the commit CI verified. If main
+          #   moved on in the meantime, main is a commit nothing has verified yet.
+          ref: ${{ inputs.ref || github.event.workflow_run.head_sha }}
+
+      - name: Show docker / compose version
+        run: |
+          docker version
+          docker compose version
+
+      # .env is gitignored and exists only in the runner workspace. umask 077 creates it 0600.
+      - name: Materialise .env from secrets/variables
+        run: |
+          umask 077
+          cat > .env <<EOF
+          SERVER_PORT=${{ vars.SERVER_PORT || '{{PORT}}' }}
+          SERVER_HOST=${{ vars.SERVER_HOST || 'localhost' }}
+          OAUTH_ISSUER_URI=${{ vars.OAUTH_ISSUER_URI }}
+          DB_HOST=${{ vars.DB_HOST }}
+          DB_PORT=${{ vars.DB_PORT || '3306' }}
+          DB_USER=${{ vars.DB_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          IMAGE_TAG=${{ github.sha }}
+          EOF
+          # Values are never echoed — only WHICH key is empty. compose's :? guards would catch this too, but
+          # their message appears at container-creation time, so seeing it here reads better.
+          for k in OAUTH_ISSUER_URI DB_HOST DB_USER DB_PASSWORD; do
+            grep -q "^${k}=.\+$" .env || { echo "::error::${k} is empty. Check Settings ▸ Secrets and variables ▸ Actions (docs/ci-cd.md)"; exit 1; }
+          done
+
+      - name: Deploy
+        run: docker compose up -d --build
+
+      - name: Status
+        run: docker compose ps
+
+      # Smoke: separately from the container flipping to healthy, check that the port published on the HOST
+      # actually answers (a failed port publish or a firewall is invisible to the healthcheck).
+      #
+      # ⚠️ DO NOT CURL localhost. The runner runs as a container with docker.sock mounted, so the containers
+      #    compose starts are its SIBLINGS. Their ports open on the Docker host, which is not the runner
+      #    container's localhost — curling localhost yields "deployed fine, only the smoke failed". Same reason
+      #    ci.yml's image job uses a job-scoped network.
+      #
+      #    Use SERVER_HOST. Because that is the address the app advertises, a 200 there proves two things at
+      #    once: the published port is alive, AND the advertised address actually resolves. localhost can never
+      #    show the second.
+      - name: Smoke
+        run: |
+          set -e
+          host="${{ vars.SERVER_HOST || 'localhost' }}"
+          port="${{ vars.SERVER_PORT || '{{PORT}}' }}"
+          base="http://${host}:${port}"
+          echo "smoke target: ${base}"
+          # ★ Probe protected-resource, never /.well-known/oauth-authorization-server — that exists only on an
+          #   Authorization Server and is 404 here, so this loop would spin to timeout.
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+                   "${base}/.well-known/oauth-protected-resource" || true)
+            if [ "$code" = "200" ]; then echo "smoke ok after $((i*2))s"; break; fi
+            if [ "$i" = "60" ]; then echo "smoke failed: no response within 120s"; exit 1; fi
+            sleep 2
+          done
+
+          # ★ TWO AXES, checked separately (this document has no `issuer` field):
+          #     resource              = the deployed app        (${base}/platform/mcp)
+          #     authorization_servers = the external AS         (vars.OAUTH_ISSUER_URI)
+          #   Either one diverging makes the app start perfectly while every request 401s — the project's
+          #   hardest failure, so the deploy gate catches it.
+          meta=$(curl -s "${base}/.well-known/oauth-protected-resource")
+          echo "$meta"
+
+          got_res=$(echo "$meta" | sed -n 's/.*"resource":"\([^"]*\)".*/\1/p')
+          if [ "$got_res" != "${base}/platform/mcp" ]; then
+            echo "::error::resource mismatch — advertised '${got_res}' != '${base}/platform/mcp'"
+            exit 1
+          fi
+
+          # Only the first element — this app configures a single authorization server.
+          got_as=$(echo "$meta" | sed -n 's/.*"authorization_servers":\["\([^"]*\)".*/\1/p')
+          # ★ NO FALLBACK to "$base" here, deliberately. A fallback would let a deploy that forgot the variable
+          #   pass green. An empty value is already rejected by the "Materialise .env" step above, so it never
+          #   reaches this point.
+          want_as="${{ vars.OAUTH_ISSUER_URI }}"
+          if [ "$got_as" != "$want_as" ]; then
+            echo "::error::authorization_servers mismatch — advertised '${got_as}' != OAUTH_ISSUER_URI '${want_as}'"
+            exit 1
+          fi
+          echo "discovery ok (resource=${got_res}, as=${got_as})"
+
+          # ★ The deploy gate also pins that this app is NOT an Authorization Server. A 200 means someone
+          #   restored the AS starter, which silently splits token issuance across two places.
+          for p in oauth-authorization-server openid-configuration; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "${base}/.well-known/${p}" || true)
+            if [ "$code" != "404" ]; then
+              echo "::error::${p} returned ${code} (expected 404) — the authorization server is back"
+              exit 1
+            fi
+          done
+          echo "not an authorization server ok"
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
+      # Do not leave .env in the workspace. The next run overwrites it anyway, but this shrinks the window in
+      # which a plaintext password sits on the runner's disk.
+      - name: Scrub .env
+        if: always()
+        run: rm -f .env

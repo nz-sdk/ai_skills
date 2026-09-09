@@ -11,6 +11,11 @@
 #   security    note surfaced when enabling            requires other keys forced on (dependency rules)
 #   build_deps  gradle deps added when enabled         fragment code fragment triggered (templates/fragments/*)
 #   advanced    true → only ask in Advanced tier
+#   test_fragment  a fragment emitted to src/TEST/java alongside `fragment`, same file naming, no rename.
+#                  For a guarantee that lives in what the generated app does NOT contain, which no amount of
+#                  reading the main source can confirm.
+#   emit        generation-time instruction attached to a capability — keys that MUST be written even though
+#                  their library default is empty. Read it in step 9; it is not a user-facing question.
 #   fragment_bundle  a MULTI-FILE fragment: a whole templates/fragments/<dir>/ emitted into a SUB-PACKAGE.
 #                  {dir, package, rename: false, files: [{src, to: main|test, when: <k=v, optional>}]}
 #                  `src` MAY CARRY A RELATIVE PATH (e.g. `deploy/SpecResource.java.template`). The template
@@ -34,14 +39,15 @@
 #                  `protean:`.
 #   options      A CAPABILITY MAY CARRY ITS OWN `options:` LIST, in exactly the record shape a group's options use
 #                  (key / type / default / desc / advanced / note / requires_when). It is for a capability that owns
-#                  a configuration namespace of its own rather than a single flag — `embedded_auth` owns
-#                  `amoeba.auth.*`, nine keys that belong to the fragment bundle it emits, not to protean.
+#                  a configuration namespace of its own rather than a single flag — `interface_spec_validator`
+#                  owns `amoeba.skeleton.*` / `amoeba.interface.*`, keys that belong to the fragment bundle it
+#                  emits, not to protean.
 #                  Two consequences, both load-bearing:
 #                    - THE KEYS ARE NOT `protean.*`, so they are injected into their OWN top-level block of
 #                      application.yml (`amoeba:`), never under `protean:` — the same rule `requires_when.needs`
 #                      already follows for another namespace.
-#                    - THEY ARE ASKED IN STEP 5, with the capability that owns them, NOT in step 6's group walk.
-#                      Step 6 walks `groups:`, and these are not in a group.
+#                    - THEY ARE ASKED IN STEP 5, with the capability that owns them, NOT in step 7's group walk.
+#                      Step 7 walks `groups:`, and these are not in a group.
 #                  Written this way so the walker needs no special case: same record, same "show the full property
 #                  key + default", same 4-per-question split.
 #
@@ -130,6 +136,10 @@ groups:
         default: ""
         requires: [protean.mcp.enabled=true]
         fragment: SecurityConfig
+        # Emitted with it, to src/test/java/{{PKG_PATH}}/. SecurityConfig's guarantee is "this app verifies tokens
+        # and never issues them", which is invisible in the file itself — it lives in what the app does NOT carry.
+        # The test states it as an executable claim so the boundary cannot be crossed silently later.
+        test_fragment: ResourceServerOnlyTest
         build_deps:
           - "implementation 'org.springframework.boot:spring-boot-starter-security'"
           - "implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'"
@@ -149,7 +159,7 @@ groups:
         note: >-
           protean emits this string VERBATIM in the discovery response, so it must be the EXTERNALLY visible
           address, not a hardcoded localhost — write it as
-          http://${SERVER_HOST:localhost}:${SERVER_PORT:8080}/platform/mcp. And the metadata endpoint is registered
+          http://${SERVER_HOST:localhost}:${SERVER_PORT:{{PORT}}}/platform/mcp. And the metadata endpoint is registered
           under @ConditionalOnProperty on this key, so an EMPTY value makes discovery SILENTLY DISAPPEAR instead of
           failing loudly — keep a fallback on every placeholder here.
       - key: protean.mcp.authorization.authorization-servers
@@ -665,216 +675,19 @@ capabilities:
     requires: [protean.mcp.enabled=true, protean.mcp.authorization.resource]
     desc: >-
       The user-facing GATE for "protect the MCP surface" — without it the only way in is stumbling onto the
-      advanced protean.mcp.authorization.resource key in step 6. Offer it in step 5 right after mcp.enabled=true.
+      advanced protean.mcp.authorization.resource key in step 7. Offer it in step 5 right after mcp.enabled=true.
       It declares NO fragment on purpose: the wiring all hangs off that option key (fragment SecurityConfig +
       the two security starters in its build_deps + the issuer-uri requires_when). Re-declaring the fragment here
       would emit SecurityConfig.java twice. Selecting this asks for the resource identifier, which in turn forces
       the JWT issuer prompt. Pair it with the `authorizer` capability for per-action policy on top.
-  - id: embedded_auth
-    title: Embedded Authorization Server — this app issues its own mcp.* tokens (DEV / standalone)
-    requires: [protean.mcp.enabled=true, protean.mcp.authorization.resource, secured_mcp]
-    subflow: authstore        # see auth-stores.yaml (memory | jdbc)
-    default: false            # ★ OFF unless explicitly chosen — see `security` below
-    build_deps:
-      - "implementation 'org.springframework.boot:spring-boot-starter-oauth2-authorization-server'"
-      # spring-jdbc is needed even for store=memory. UserStoreConfig deliberately carries BOTH stores in one file
-      # so an operator can switch with one property, and the jdbc half references JdbcUserDetailsManager ->
-      # JdbcDaoSupport. Without this a memory-store project does not compile at all (verified on a generated
-      # sample: "cannot access JdbcDaoSupport"). data_access brings the same starter, so this is a no-op then.
-      - "implementation 'org.springframework.boot:spring-boot-starter-jdbc'"
-    # The amoeba.auth.* surface this capability owns. `enabled` is implied by selecting the capability and `store`
-    # + `users` come from the authstore sub-flow, so the six here are the rest — ASK THEM IN STEP 5, right after the
-    # store, and inject them into the TOP-LEVEL `amoeba:` block (they are not protean.* keys).
-    options:
-      - key: amoeba.auth.access-token-ttl
-        type: duration
-        default: 1h
-        desc: How long an issued mcp.* token stays valid.
-        note: >-
-          KEEP THIS SHORT — its lifetime IS its blast radius. An access token here is a self-contained JWT checked
-          by a local JwtDecoder that never consults the authorization store, so /oauth2/revoke (which DOES exist —
-          it is a default AuthorizationServerSettings endpoint) cannot stop one. Deleting the jwks file is the only
-          revoke-all.
-          WHETHER THIS IS ALSO THE RE-LOGIN INTERVAL depends on refresh-token-enabled below. With refresh OFF
-          (the default) it is: the MCP client is public + PKCE, and Spring refuses refresh tokens to public clients
-          on the authorization_code grant, so when this expires a human logs in through the browser again. With
-          refresh ON, refresh-token-ttl becomes the re-login interval and the client renews silently — which is the
-          case for shortening this rather than raising it.
-          The service client uses client_credentials, which has no refresh token by specification.
-          Unrelated to protean.mcp.session.timeout and protean.mcp.debug.session-idle-timeout, which time out MCP
-          STREAMING SESSIONS, not tokens.
-      - key: amoeba.auth.refresh-token-enabled
-        type: boolean
-        default: false
-        desc: Issue refresh tokens, so a browser login is needed once per refresh-token-ttl instead of once per access-token-ttl.
-        security: >-
-          THIS CREATES THE ONLY LONG-LIVED CREDENTIAL IN THE SYSTEM. Off by default for that reason: without it
-          nothing survives an hour, so there is nothing durable to steal. Three properties bound the risk and all
-          three are generated together — rotation (reuseRefreshTokens(false), so a captured token is single-use and
-          replay is refused), opacity (the token is stored, so POST /oauth2/revoke genuinely kills it, unlike an
-          access token), and a short access-token-ttl. Do not turn this on and then lengthen access-token-ttl too:
-          that reintroduces the unrevocable window this is supposed to remove.
-        note: >-
-          ★ SPRING REFUSES THIS FOR A PUBLIC CLIENT IN TWO PLACES, AND THE GENERATED CODE OPENS BOTH. Verified
-          against the 1.5.8 bytecode, because the failure modes are far apart:
-            1. OAuth2RefreshTokenGenerator.generate() returns null when isPublicClientForAuthorizationCodeGrant()
-               holds — grant is authorization_code AND the client authenticated with NONE. Symptom: no
-               refresh_token in the token response, no error.
-            2. PublicClientAuthenticationConverter.convert() returns null unless the request is a PKCE code
-               exchange, so a public client sending grant_type=refresh_token is never authenticated at all.
-               Symptom: {"error":"invalid_client"} at /oauth2/token.
-          OAuth2RefreshTokenAuthenticationProvider ALSO has a ClientAuthenticationMethod.NONE check, but it is DPoP
-          key binding, NOT a refusal — do not "fix" that one. EmbeddedAuthServerConfig adds a token generator for
-          (1) and a converter/provider pair for (2), and nothing else.
-          OAuth 2.1 permits refresh tokens for a public client PROVIDED they rotate; Spring is being conservative
-          rather than enforcing a protocol rule.
-          ★ A CUSTOM OAuth2TokenGenerator TAKES OVER JwtCustomizer WIRING. Spring attaches the tokenCustomizer bean
-          to its default JwtGenerator for you; supplying your own means attaching it by hand. Miss that line and the
-          audience lock disappears AND per-user scope narrowing stops — a read-only user silently receives
-          mcp.write. The generated EmbeddedAuthRefreshTest pins exactly that, on the REFRESH path where it regresses
-          (initial issuance keeps working).
-      - key: amoeba.auth.refresh-token-ttl
-        type: duration
-        default: 7d
-        requires: [amoeba.auth.refresh-token-enabled=true]
-        desc: Refresh token lifetime — the real re-login interval once refresh is on.
-        note: >-
-          Rotation means a token that is USED often never reaches this age; the value is really "how long may a
-          client be idle before a human logs in again". Bounded by authorization-store: with `memory` a restart
-          invalidates every one of them regardless of what is set here.
-      - key: amoeba.auth.authorization-store
-        type: enum
-        allowed: [memory, jdbc]
-        default: memory
-        requires_when:
-          - when: [amoeba.auth.authorization-store=jdbc]
-            needs: data_access
-            why: >-
-              JdbcOAuth2AuthorizationService needs a DataSource, and data_access is what puts one in the app. Block
-              the combination rather than generating a config that cannot start.
-        desc: Where OAuth authorizations (issued tokens, auth codes) are kept. NOT the user store — that is amoeba.auth.store.
-        warn: >-
-          ★ TWO DIFFERENT KEYS HERE ARE CALLED A STORE AND CROSSING THEM IS EASY. amoeba.auth.store decides where
-          USERNAMES come from (see auth-stores.yaml); this one decides where ISSUED STATE is kept. They are
-          independent — memory users with a jdbc authorization store is a perfectly normal combination.
-          `memory` (Spring's InMemoryOAuth2AuthorizationService) LOSES EVERYTHING ON RESTART, which makes a 7-day
-          refresh-token-ttl read as "7 days" while meaning "until the next restart". On a dev server restarted
-          routinely that is close to worthless — WARN when refresh-token-enabled=true is paired with `memory`,
-          rather than blocking it (it is still the right choice for a project with no database).
-        note: >-
-          ★ THE TABLE ALSO BACKS THE authorization_code EXCHANGE, so with jdbc selected and oauth2_authorization
-          absent, LOGIN fails — not just refresh. The generated config probes for the table at startup and refuses
-          to start with the mysql command to run, because the alternative is a 500 at the token endpoint that reads
-          like a broken filter chain. DDL is emitted to src/main/resources/db/oauth2-authorization-schema.sql (the
-          script Spring ships, unmodified) and a human applies it; it is generated for every embedded_auth project
-          regardless of this setting, so switching later is one property and not a regeneration.
-          ★ TWO THINGS SILENTLY BREAK JDBC PERSISTENCE AND BOTH ARE PRE-FIXED IN THE TEMPLATE — do not undo them.
-          (a) RegisteredClient.withId() must be a STABLE literal: a per-boot UUID makes every stored authorization
-          unreadable after a restart ("The RegisteredClient with id ... was not found"). (b) Claims set with
-          List.of() cannot be read back: the row mapper uses Spring Security's ALLOWLISTED ObjectMapper and
-          java.util.ImmutableCollections$List12 is not on it, so the audience lock itself turns every refresh into a
-          500. Use ArrayList.
-          ★ MYSQL TIME INSTANTS: expiry is a `timestamp` column, so the JDBC URL needs preserveInstants=true,
-          connectionTimeZone=UTC and forceConnectionTimeZoneToSession=true (db-vendors.yaml sets them). Without
-          them Connector/J shifts every instant by the server's offset — 9 hours in KST.
-      - key: amoeba.auth.jwks-path
-        type: string
-        default: data/amoeba-auth-jwks.json
-        desc: File holding the RSA key pair this app signs its tokens with. Created on first start if absent.
-        security: >-
-          CONTAINS THE PRIVATE KEY. Anyone who can read this file can mint an mcp.admin token for this app — which
-          is precisely why embedded auth is dev/standalone only: a deployed module runs in the same JVM with no
-          sandbox and can read it. The generated .gitignore covers `data/`; keep whatever path you choose inside a
-          gitignored directory, and never bake it into an image.
-        note: >-
-          Persisted rather than generated per boot on purpose: a fresh key invalidates every token already issued,
-          so a restart would log everyone out. Deleting the file is therefore the closest thing to a revoke-all.
-      - key: amoeba.auth.mcp-client-id
-        type: string
-        default: nz-mcp-agent
-        desc: client_id of the public client MCP clients (Claude Code, mcp-remote) authenticate as.
-        note: >-
-          A fixed literal, NOT interpolated from the sample name — the client is registered in this app's own
-          RegisteredClientRepository, so the id only has to match what the MCP client is configured to send.
-      - key: amoeba.auth.mcp-redirect-uris
-        type: string-list
-        default: "[http://127.0.0.1:3334/oauth/callback]"
-        desc: Callback URLs the authorization_code flow is allowed to return to.
-        note: >-
-          COMPARED BYTE FOR BYTE. Spring Authorization Server does not implement RFC 8252 loopback port
-          wildcarding, so the client's callback port has to be pinned to a value listed here — a mismatch fails at
-          /oauth2/authorize, before any login form appears, which reads like a broken server rather than a
-          misconfigured client. Change this and the client's configured port together, or not at all.
-      - key: amoeba.auth.service-client-id
-        type: string
-        default: ""
-        advanced: true
-        desc: client_id of an optional confidential client for scripts/CI (client_credentials). Empty = not registered.
-        note: >-
-          Machine callers only. Give it mcp.write and CI can deploy modules, which is worth deciding deliberately
-          rather than by default — hence empty.
-        requires_when:
-          - when: [amoeba.auth.service-client-id]
-            needs: amoeba.auth.service-client-secret
-            why: >-
-              EmbeddedAuthServerConfig registers this client only when BOTH id and secret are non-blank
-              (`if (!serviceClientId.isBlank() && !serviceClientSecret.isBlank())`). Half-configured, it registers
-              NOTHING and says nothing — deliberate, since credentials nobody can authenticate as would be worse,
-              but from the outside it looks like the client vanished. So the pair is completed at generation time
-              instead of discovered when CI first gets a 401.
-      - key: amoeba.auth.service-client-secret
-        type: string
-        default: ""
-        advanced: true
-        desc: Secret for the service client. Stored as {noop} in application.yml, so treat the file as a credential.
-    fragment_bundle:
-      dir: auth
-      package: "{{PKG}}.auth"
-      rename: false
-      files:
-        - { src: EmbeddedAuthProperties.java.template,   to: main }
-        - { src: EmbeddedAuthServerConfig.java.template, to: main }
-        # Carries BOTH user stores, each behind @ConditionalOnProperty(amoeba.auth.store). Emitted whichever
-        # store the authstore sub-flow picks, so an operator can switch with one property instead of
-        # regenerating. See auth-stores.yaml.
-        - { src: UserStoreConfig.java.template,          to: main }
-        - { src: LoginSuccessHandler.java.template,      to: main }
-        - { src: EmbeddedAuthFlowTest.java.template,     to: test }
-        - { src: EmbeddedAuthDisabledTest.java.template, to: test }
-        # Refresh is a PROPERTY, so the code ships either way behind @ConditionalOnProperty — but a test cannot be
-        # property-gated, it would simply fail. Hence a whole file with `when:`, which is what fragment_bundle
-        # gating is for. Exercises the jdbc authorization store against in-memory H2 so `./gradlew test` stays
-        # offline while still hitting the row mapper, where the sharp edges are.
-        - { src: EmbeddedAuthRefreshTest.java.template,  to: test, when: amoeba.auth.refresh-token-enabled=true }
-    security: >-
-      ★ THE SIGNING KEY MOVES INSIDE THE MCP RCE SURFACE. protean provides no sandbox and documents that as an
-      explicit non-goal (docs/guide/12-security: module code holds every permission the host JVM has —
-      filesystem, network, other beans; ForbiddenApiRule only blocks accidental APIs like System.exit). So a
-      module deployed with mcp.write can read the key and mint itself mcp.admin, bypassing the scope separation
-      SecurityConfig and ModuleActionAuthorizer enforce. Two things bound the damage and both are generated
-      deliberately: only mcp.* scopes are ever registered, and every token is audience-locked to this app's
-      resource identifier. It stops being bounded the moment another service trusts this issuer. Surface this
-      verbatim when offering the capability — do not summarise it away.
-    desc: >-
-      Makes the app its own Authorization Server as well as a Resource Server: browser login + authorization_code
-      /PKCE, so it runs STANDALONE before a shared IdP exists. Answers "we cannot stand up a group auth server
-      yet". Generates a chain at @Order(0) matching only the AS endpoints, leaving secured_mcp's @Order(1)/@Order(2)
-      numbering untouched (renumbering them would also reorder the load-bearing /platform/** rules), and adds the
-      login form to the @Order(2) chain, which already matches /login.
-    note: >-
-      Two interactions the generator must handle. (1) OAUTH_ISSUER_URI becomes THIS app's own base URL — fill it
-      in rather than asking again, and pin it: the AS must not derive the issuer per-request or the 'iss' varies
-      by the URL a caller used while the Resource Server half checks one fixed string. (2) The generated config
-      declares a local JwtDecoder bean, which backs off Boot's issuer-uri auto-configuration wholesale (its
-      JwtDecoderConfiguration is @ConditionalOnMissingBean(JwtDecoder) at class level) — that is what avoids the
-      app HTTP-fetching its own discovery document. Attach JwtValidators.createDefaultWithIssuer explicitly,
-      because OAuth2AuthorizationServerConfiguration.jwtDecoder validates the signature only.
-    verify: >-
-      The generated EmbeddedAuthFlowTest logs in, completes PKCE, and then calls /platform/mcp with the resulting
-      token. That last hop is the point: issuing and validating are separate halves here, and a test that stopped
-      at the token endpoint would still pass if the Resource Server rejected every token. EmbeddedAuthDisabledTest
-      is its counterpart — it asserts the OFF default really is off (no beans, no endpoints, no login form, and
-      the control plane still 401s), because an untested default is a default that drifts.
+    emit: >-
+      ★ ALWAYS WRITE THESE TWO ALONGSIDE THE RESOURCE, even though both default to empty:
+        protean.mcp.authorization.scopes-supported: [mcp.read, mcp.write, mcp.admin]
+        protean.mcp.authorization.bearer-methods-supported: [header]
+      SecurityConfig hardcodes SCOPE_mcp.read / mcp.write / mcp.admin, so leaving scopes-supported at its []
+      default publishes a discovery document that gates on three scopes it never names. A client then cannot
+      know what to request, and the failure looks like a permissions bug rather than a missing advertisement.
+      ResourceServerOnlyTest asserts all three appear in the metadata, so an unset value fails the build.
   - id: authorizer
     title: MCP authorization policy (ModuleActionAuthorizer SPI)
     requires: [protean.mcp.enabled=true]
@@ -887,7 +700,7 @@ capabilities:
       the permissive default lets through. Decides on OAuth SCOPES read off the Authentication (SCOPE_mcp.*), so it
       needs spring-security-core on the classpath — hence the build_dep. It does NOT require
       oauth2-resource-server: bring `secured_mcp` for the supported chain, or wire your own authenticating filter
-      chain. With no chain at all every caller is scope-less and the policy denies everything (see the step 7
+      chain. With no chain at all every caller is scope-less and the policy denies everything (see the step 8
       "authorizer needs authentication" check).
     note: >-
       Guards the MCP surface ONLY. protean calls authorize() from exactly one place (McpDispatcher), so the

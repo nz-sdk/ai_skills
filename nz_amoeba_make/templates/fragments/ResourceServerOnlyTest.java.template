@@ -1,0 +1,156 @@
+// [CAPABILITY: secured MCP] Written to src/test/java/{{PKG_PATH}}/ResourceServerOnlyTest.java whenever
+// protean.mcp.authorization.resource is set (i.e. alongside SecurityConfig).
+//
+// This app is a Resource Server ONLY — it VERIFIES tokens, it does not ISSUE them. That is an architectural
+// boundary, not a configuration choice, so it is pinned by tests rather than left as an assumption. Five things
+// could silently cross it:
+//   (1) the Authorization Server library returning to the classpath,
+//   (2) a local JwtDecoder bean appearing, which switches verification to an in-process key,
+//   (3) a form login reappearing, which makes the service chain stateful again,
+//   (4) /platform/** falling open,
+//   (5) the discovery document breaking — this is how an MCP client FINDS the Authorization Server, and it is
+//       the contract most easily broken without anything else failing.
+//
+// The whole test runs OFFLINE: no database, and the issuer need not be reachable (see props() below).
+package {{PKG}};
+
+import java.nio.file.Path;
+
+import org.junit.jupiter.api.Test;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.ApplicationContext;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class ResourceServerOnlyTest {
+
+    static final String ISSUER = "https://example-idp.invalid/realms/x";
+
+    static final Path storeDir = Path.of("build", "test-rs-store-" + System.nanoTime());
+
+    @DynamicPropertySource
+    static void props(DynamicPropertyRegistry r) {
+        // An ordinary external-issuer deployment. NOTE: this address does not have to resolve — Boot wraps the
+        // decoder in a SupplierJwtDecoder that defers discovery until the first token, which is what lets this
+        // test run offline. (A CLIENT behaves the opposite way: it discovers at startup and dies without the AS.)
+        r.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> ISSUER);
+        r.add("protean.mcp.authorization.resource", () -> "http://localhost:{{PORT}}/platform/mcp");
+        r.add("protean.mcp.authorization.authorization-servers[0]", () -> ISSUER);
+        r.add("protean.module-store.dir", storeDir::toString);
+        // If application.yml selects backend=jdbc, the store's startup reconcile hits the DataSource and drags a
+        // live database into this test. Pinning filesystem keeps `./gradlew test` offline.
+        r.add("protean.module-store.backend", () -> "filesystem");
+    }
+
+    @LocalServerPort
+    int port;
+
+    @Autowired
+    TestRestTemplate rest;
+
+    @Autowired
+    ApplicationContext context;
+
+    @Test
+    void authorizationServerLibraryIsNotOnTheClasspath() {
+        // Deliberately stronger than asserting the beans are absent: absent beans can be switched back on, while
+        // an absent library cannot. Re-adding spring-boot-starter-oauth2-authorization-server breaks this test.
+        assertThrows(ClassNotFoundException.class,
+                () -> Class.forName(
+                        "org.springframework.security.oauth2.server.authorization.client.RegisteredClient"),
+                "the Authorization Server library is back on the classpath — this app must verify only");
+    }
+
+    @Test
+    void bootUsesTheExternalIssuerDecoder() {
+        // With no local JwtDecoder bean, Boot's @ConditionalOnMissingBean configuration builds the issuer-uri
+        // decoder. A local decoder reappearing would silently move verification to an in-process key — the app
+        // would then accept only tokens it minted itself.
+        JwtDecoder decoder = this.context.getBean(JwtDecoder.class);
+        assertTrue(decoder.getClass().getSimpleName().contains("Supplier"),
+                "expected Boot's lazy issuer-uri decoder (SupplierJwtDecoder) but got: "
+                        + decoder.getClass().getName());
+    }
+
+    @Test
+    void authorizationServerEndpointsAreAbsent() {
+        ResponseEntity<String> res = this.rest.postForEntity(
+                "http://localhost:" + this.port + "/oauth2/token",
+                new HttpEntity<>(new HttpHeaders()), String.class);
+        // Exactly 404. A 401 would mean "exists but locked", which is not the same claim and must not pass.
+        assertEquals(404, res.getStatusCode().value(),
+                "the token endpoint must not exist (expected 404), got: "
+                        + res.getStatusCode().value() + " / " + res.getBody());
+    }
+
+    @Test
+    void authorizationServerMetadataIsAbsent() {
+        // Both paths are checked: an embedded Authorization Server publishes oauth-authorization-server AND
+        // openid-configuration, so checking one would pass a half-removed state.
+        for (String path : new String[] { "/.well-known/oauth-authorization-server",
+                "/.well-known/openid-configuration" }) {
+            ResponseEntity<String> res = this.rest.getForEntity(
+                    "http://localhost:" + this.port + path, String.class);
+            assertEquals(404, res.getStatusCode().value(),
+                    path + " must be 404 (no AS metadata here), got: "
+                            + res.getStatusCode().value() + " / " + res.getBody());
+        }
+    }
+
+    @Test
+    void protectedResourceMetadataAdvertisesTheAuthorizationServer() {
+        // How an MCP client finds the Authorization Server: it calls THIS app and is redirected outward by this
+        // document. That is why a client config keeps pointing here even though tokens come from elsewhere.
+        // It MUST answer 200 unauthenticated — requiring a token to learn where tokens come from is a deadlock.
+        ResponseEntity<String> res = this.rest.getForEntity(
+                "http://localhost:" + this.port + "/.well-known/oauth-protected-resource", String.class);
+
+        assertEquals(200, res.getStatusCode().value(),
+                "protected-resource metadata must be 200 unauthenticated: " + res.getBody());
+        String body = res.getBody() == null ? "" : res.getBody();
+        assertTrue(body.contains("\"" + ISSUER + "\""),
+                "the advertised authorization_servers must match the configured issuer, got: " + body);
+        // Fails when protean.mcp.authorization.scopes-supported was left at its [] default: SecurityConfig gates
+        // on these three names, so a document that does not advertise them cannot be acted on by a client.
+        assertTrue(body.contains("mcp.read") && body.contains("mcp.write") && body.contains("mcp.admin"),
+                "the scope contract (mcp.read/write/admin) must be advertised, got: " + body);
+    }
+
+    @Test
+    void thereIsNoLoginForm() {
+        ResponseEntity<String> res = this.rest.getForEntity(
+                "http://localhost:" + this.port + "/login", String.class);
+        // Chain #2 is permitAll with nothing mapped at /login. A form appearing means the service plane became
+        // stateful again (STATELESS broken).
+        assertTrue(res.getBody() == null || !res.getBody().contains("name=\"password\""),
+                "a login form appeared: " + res.getBody());
+    }
+
+    @Test
+    void controlPlaneIsStillProtected() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        ResponseEntity<String> res = this.rest.exchange(
+                "http://localhost:" + this.port + "/platform/mcp", HttpMethod.POST,
+                new HttpEntity<>("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", headers),
+                String.class);
+
+        assertEquals(401, res.getStatusCode().value(),
+                "the control plane must still require a Bearer token: " + res.getBody());
+    }
+}

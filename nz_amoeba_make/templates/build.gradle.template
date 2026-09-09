@@ -43,6 +43,12 @@ dependencies {
     // lines below are only the manual fallback. Do not emit both (duplicate dependency lines).
     // implementation 'org.springframework.boot:spring-boot-starter-security'
     // implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
+    //
+    // ★ NEVER add spring-boot-starter-oauth2-authorization-server here. This app is a Resource Server: it
+    // VERIFIES tokens issued elsewhere. Making it issue its own would put the signing key inside /platform/mcp,
+    // which is a remote code execution surface protean explicitly does not sandbox — any module deployed with
+    // mcp.write could then read the key and mint itself mcp.admin, collapsing the scope separation SecurityConfig
+    // enforces. ResourceServerOnlyTest asserts the library is absent, so adding it back fails the build.
 
     // ===== [module-facing host classpath] =========================================================
     // Everything below is here for the DEPLOYED MODULES, not for this app. A module deploys as SOURCE and

@@ -12,6 +12,8 @@
 |---|---|
 | `name` | `nz_amoeba_make` |
 | 표시 이름 | Amoeba Maker |
+| `metadata.version` | `0.2.0` |
+| `license` | `AGPL-3.0-only` |
 | `description` | `prototype/<name>` 아래에 실행 가능한 Protean 소비 샘플 서버를 처음부터 스캐폴딩한다. **Protean 옵션 표면 전체**(모든 `protean.*` 설정 + 모든 소비자 확장 지점 + 데이터베이스 서브플로우)를 사용자와 함께 훑고, 그에 맞는 build·config·code·infra·README 를 생성한다. Protean 을 모르는 사용자를 위해 만들어졌다 — 어떤 설정이든 기본값과 평이한 설명을 곁들여 스킬을 통해 구성할 수 있다. 새 Protean 샘플/예제 서버를 만들거나, capability 를 시험해 보거나, 다운스트림 Protean 통합을 부트스트랩할 때 사용한다. 트리거: "make a protean sample", "scaffold a protean server", "new protean example", "protean sample 만들어" |
 
 # Amoeba Maker

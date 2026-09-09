@@ -14,6 +14,7 @@ selected capabilities. The option surface itself lives in `../reference/protean-
 | `{{NAME}}` | prototype folder / app name (`[a-z0-9_-]+`) | `orders` |
 | `{{PKG}}` | Java package — **typed by the user** (default `prototype.<name>`, `-`→`_`) | `prototype.orders` |
 | `{{PKG_PATH}}` | `{{PKG}}` as a path (`.`→`/`) | `prototype/orders` |
+| `{{PORT}}` | HTTP port — **typed by the user** (default `8080`). Only ever the default in `${SERVER_PORT:{{PORT}}}` | `9200` |
 | `{{COORD}}` | Protean group:artifact | `org.htcom:protean` |
 | `{{VERSION}}` | Protean version | `0.0.1` |
 | `{{DB}}` | database/schema name (default = `<name>`) | `orders` |
@@ -49,6 +50,8 @@ fills from the option/vendor specs.
   cross-cutting concern later is a one-file edit.
 - `fragments/*.java.template` — one per code-capability; include only the selected ones, renamed to a real class.
   Each fragment's header states its dependency (e.g. requires `mcp.enabled`).
+  A key's `test_fragment` is the exception: `ResourceServerOnlyTest.java.template` goes to `src/test/java/` **with
+  its class name kept**, because it asserts a structural guarantee rather than a project-specific policy.
 - `fragments/<dir>/` — a **fragment bundle**: several files emitted together into a sub-package, class names kept
   (they reference each other) and a member may target the test source set. `fragments/interfacedef/` is one, driven
   by the `interface_spec_validator` capability. See `fragment_bundle` in `../reference/protean-options.yaml`.

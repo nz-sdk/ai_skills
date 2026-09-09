@@ -73,14 +73,22 @@ own text and is taken verbatim; never translate or normalise an entered name, pa
 
 ## Flow
 
-### 1. Target folder + Java package (typed)
-Two typed inputs — ask **both** here (the user types each; a default suggestion is allowed, but never offer a
-name list).
+### 1. Target folder + Java package + HTTP port (typed)
+Three typed inputs — ask **all three** here (the user types each; a default suggestion is allowed, but never offer
+a name list).
 
 1. **Folder name** — validate `[a-z0-9_-]+`; generate under `prototype/<name>/`; refuse if it exists.
 2. **Java package** — default `prototype.<name>` (replace `-`→`_`). The user may type any package
    (e.g. `kr.newzen.amoeba.api`). Validate: dot-separated segments, each matching `[a-z_][a-z0-9_]*`, and no
    segment may be a Java reserved word. This becomes `{{PKG}}`; `{{PKG_PATH}}` = `{{PKG}}` with `.`→`/`.
+3. **HTTP port** — default `8080`; validate 1024–65535. This becomes `{{PORT}}`.
+   **Ask it rather than assuming**, because samples are generated into the same `prototype/` tree and run on the
+   same machine: a fixed default means the second one cannot start next to the first, and the collision surfaces
+   as a `BindException` at run time rather than a question at generation time. Tell the user which ports their
+   other samples already use if you can see them.
+   It only ever appears as the DEFAULT in `${SERVER_PORT:{{PORT}}}` — never as a bare literal — so an operator can
+   still override it per deployment without touching the generated files. That is the ONE port concept: the same
+   variable drives the bind port and the advertised discovery address, so the two cannot drift.
 
 ### 2. Coordinate / version (typed) + maven-central check
 Ask them to **type** the coordinate/version (default `org.htcom:protean:0.0.1` — the released version, live on
@@ -288,7 +296,7 @@ Korean prose around a verbatim list of keys, values and paths.
 
 ### 8. Generate
 Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (=`{{PKG}}` with `.`→`/`),
-`{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`. Engine:
+`{{PORT}}` (the port typed in step 1), `{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`. Engine:
 - **`application.yml`** — start from `templates/application.yml.template` (minimal base) and **inject every set
   `protean.*` key** grouped under `protean:`, plus the `spring.datasource` block for the chosen vendor. A
   `requires_when` `needs` key that is **not** `protean.*` goes into its own top-level block, never under
@@ -299,8 +307,8 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
   correct. Write the issuer
   as `${OAUTH_ISSUER_URI}` **with no fallback** (an unset value must abort startup) while every
   *advertised* placeholder keeps a fallback. Never hardcode a host or port into an advertised value: write
-  `mcp.authorization.resource` as `http://${SERVER_HOST:localhost}:${SERVER_PORT:8080}/platform/mcp`, and keep
-  the template's `server.port: ${SERVER_PORT:8080}` so the bind port and the advertised port cannot drift
+  `mcp.authorization.resource` as `http://${SERVER_HOST:localhost}:${SERVER_PORT:{{PORT}}}/platform/mcp`, and keep
+  the template's `server.port: ${SERVER_PORT:{{PORT}}}` so the bind port and the advertised port cannot drift
   (`SERVER_PORT` is the exact name Spring relaxed-binds to `server.port` — see the template's comment). Unset
   keys are omitted (library default) — optionally leave the most relevant as commented edit-points.
 - **`build.gradle`** — from the template: always `org.htcom:protean:<ver>` + `spring-boot-starter-web`; add each
@@ -400,8 +408,8 @@ Korean; print every command byte-for-byte** — a translated or "tidied" command
 - (mavenLocal path) `cd <protean repo> && ./gradlew publishToMavenLocal`.
 - (DB docker) `docker compose up -d`.
 - `./gradlew run` (JDK 21).
-- (MCP) `curl -s localhost:8080/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
-- Hit a deployed module endpoint; `curl localhost:8080/platform/modules` for state.
+- (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
+- Hit a deployed module endpoint; `curl localhost:{{PORT}}/platform/modules` for state.
 - Sanity checks the user can run without the server: `./gradlew compileJava` (compiles against the protean jar)
   and `./gradlew test` (runs `ConfigMatchesSelectionTest` — asserts the generated config matches the selection).
 

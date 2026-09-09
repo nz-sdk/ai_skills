@@ -5,11 +5,11 @@
 #
 #   ./setup.sh           preflight checks, then start the DB (if any) and run the server
 #   ./setup.sh --check           run preflight checks only, then exit (nothing started)
-#   SERVER_PORT=9090 ./setup.sh  override the HTTP port (default 8080)
+#   SERVER_PORT=9090 ./setup.sh  override the HTTP port (default {{PORT}})
 #   SERVER_HOST=mcp.example.com ...  externally visible host advertised via MCP discovery (default localhost)
 #
 # SERVER_PORT is deliberately that exact name: it is the env var Spring Boot already relaxed-binds to server.port,
-# and application.yml derives `server.port: ${SERVER_PORT:8080}` from it. So the caller's value reaches the app
+# and application.yml derives `server.port: ${SERVER_PORT:{{PORT}}}` from it. So the caller's value reaches the app
 # through the EXPORTED ENVIRONMENT — `./gradlew run` needs no extra argument — and the port this script checks is
 # the port the app actually binds. Any other name (PORT, MCP_PORT, …) would be a knob that changes nothing.
 #
@@ -32,7 +32,7 @@ SIDECAR_IMAGE="{{SIDECAR_IMAGE}}"            # protean.worker.sidecar.image (emp
 SIDECAR_SHARED_API="{{SIDECAR_SHARED_API}}"  # protean.worker.sidecar.shared-api (empty when unset)
 OAUTH="{{OAUTH}}"                    # true | false — protean.mcp.authorization.resource is set
 SERVER_HOST="${SERVER_HOST:-localhost}"  # ADVERTISED hostname (not a bind address — that would be server.address)
-SERVER_PORT="${SERVER_PORT:-8080}"   # see the header: this name is what carries through to server.port
+SERVER_PORT="${SERVER_PORT:-{{PORT}}}"   # see the header: this name is what carries through to server.port
 export SERVER_HOST SERVER_PORT       # the app reads both from the environment; no command-line argument needed
 RESOURCE_URL="http://${SERVER_HOST}:${SERVER_PORT}/platform/mcp"
 

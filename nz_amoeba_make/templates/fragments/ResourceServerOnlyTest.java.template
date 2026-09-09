@@ -49,7 +49,7 @@ class ResourceServerOnlyTest {
         // decoder in a SupplierJwtDecoder that defers discovery until the first token, which is what lets this
         // test run offline. (A CLIENT behaves the opposite way: it discovers at startup and dies without the AS.)
         r.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> ISSUER);
-        r.add("protean.mcp.authorization.resource", () -> "http://localhost:8080/platform/mcp");
+        r.add("protean.mcp.authorization.resource", () -> "http://localhost:{{PORT}}/platform/mcp");
         r.add("protean.mcp.authorization.authorization-servers[0]", () -> ISSUER);
         r.add("protean.module-store.dir", storeDir::toString);
         // If application.yml selects backend=jdbc, the store's startup reconcile hits the DataSource and drags a

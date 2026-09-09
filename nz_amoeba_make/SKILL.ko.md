@@ -71,15 +71,22 @@
 
 ## 흐름 (Flow)
 
-### 1. 대상 폴더 + Java 패키지 (타이핑)
+### 1. 대상 폴더 + Java 패키지 + HTTP 포트 (타이핑)
 
-타이핑 입력 2개 — 여기서 **둘 다** 묻는다(각각 사용자가 입력한다. 기본값 제시는 허용하되, 이름 목록을 제시하지는
+타이핑 입력 3개 — 여기서 **셋 다** 묻는다(각각 사용자가 입력한다. 기본값 제시는 허용하되, 이름 목록을 제시하지는
 말 것).
 
 1. **폴더명** — `[a-z0-9_-]+` 검증. `prototype/<name>/` 아래에 생성하고, 이미 존재하면 거부한다.
 2. **Java 패키지** — 기본값 `prototype.<name>`(`-`→`_` 치환). 사용자는 어떤 패키지든 입력할 수 있다
    (예: `kr.newzen.amoeba.api`). 검증: 점으로 구분된 각 세그먼트가 `[a-z_][a-z0-9_]*` 를 만족하고, 어떤
    세그먼트도 Java 예약어가 아닐 것. 이 값이 `{{PKG}}` 가 되고, `{{PKG_PATH}}` 는 `{{PKG}}` 의 `.`→`/` 다.
+3. **HTTP 포트** — 기본값 `8080`, 1024–65535 검증. 이 값이 `{{PORT}}` 가 된다.
+   **가정하지 말고 묻는다.** 샘플들은 같은 `prototype/` 트리에 생성돼 같은 머신에서 돌기 때문에, 기본값을
+   고정하면 두 번째 샘플이 첫 번째 옆에서 기동하지 못하고, 그 충돌이 생성 시점의 질문이 아니라 실행 시점의
+   `BindException` 으로 드러난다. 다른 샘플이 쓰는 포트를 알 수 있으면 사용자에게 알려 준다.
+   이 값은 `${SERVER_PORT:{{PORT}}}` 의 **기본값 자리에만** 들어가고 맨 리터럴로는 절대 쓰이지 않는다 —
+   그래서 운영자는 생성된 파일을 고치지 않고 배포마다 덮어쓸 수 있다. 그것이 ONE port concept 이다:
+   같은 변수가 바인드 포트와 광고되는 디스커버리 주소를 함께 몰기 때문에 둘이 어긋날 수 없다.
 
 ### 2. 좌표 / 버전 (타이핑) + maven-central 확인
 
@@ -296,8 +303,9 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 
 ### 8. 생성 (Generate)
 
-`{{NAME}}`, `{{PKG}}`(step 1 에서 입력받은 패키지), `{{PKG_PATH}}`(=`{{PKG}}` 의 `.`→`/`), `{{COORD}}`,
-`{{VERSION}}`, 그리고 DB 토큰 `{{DB}}`/`{{PW}}` 를 치환한다. 엔진:
+`{{NAME}}`, `{{PKG}}`(step 1 에서 입력받은 패키지), `{{PKG_PATH}}`(=`{{PKG}}` 의 `.`→`/`),
+`{{PORT}}`(step 1 에서 입력받은 포트), `{{COORD}}`, `{{VERSION}}`, 그리고 DB 토큰 `{{DB}}`/`{{PW}}` 를
+치환한다. 엔진:
 
 - **`application.yml`** — `templates/application.yml.template`(최소 베이스)에서 시작해, **설정된 모든
   `protean.*` 키**를 `protean:` 아래에 묶어 주입하고, 선택한 벤더의 `spring.datasource` 블록을 더한다.
@@ -309,8 +317,8 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   기동한다.
   issuer 는 `${OAUTH_ISSUER_URI}` 로 **fallback 없이** 쓴다(값이 없으면 기동이 중단돼야 한다). 반면 *광고되는*
   placeholder 는 모두 fallback 을 유지한다. 광고되는 값에 host 나 port 를 하드코딩하지 말 것:
-  `mcp.authorization.resource` 는 `http://${SERVER_HOST:localhost}:${SERVER_PORT:8080}/platform/mcp` 로 쓰고,
-  템플릿의 `server.port: ${SERVER_PORT:8080}` 를 유지해 바인드 포트와 광고 포트가 어긋나지 않게 한다
+  `mcp.authorization.resource` 는 `http://${SERVER_HOST:localhost}:${SERVER_PORT:{{PORT}}}/platform/mcp` 로 쓰고,
+  템플릿의 `server.port: ${SERVER_PORT:{{PORT}}}` 를 유지해 바인드 포트와 광고 포트가 어긋나지 않게 한다
   (`SERVER_PORT` 는 Spring 이 `server.port` 로 relaxed-binding 하는 정확한 이름이다 — 템플릿 주석 참조).
   설정되지 않은 키는 생략한다(라이브러리 기본값) — 가장 관련 있는 것들은 주석 처리된 편집 지점으로 남겨도 좋다.
 - **`build.gradle`** — 템플릿에서: 항상 `org.htcom:protean:<ver>` + `spring-boot-starter-web`. 여기에 수집된
@@ -414,8 +422,8 @@ Linux/Ubuntu 서버용 원커맨드 설치를 앞세우고, 그다음 수동 등
 - (mavenLocal 경로) `cd <protean repo> && ./gradlew publishToMavenLocal`.
 - (DB docker) `docker compose up -d`.
 - `./gradlew run` (JDK 21).
-- (MCP) `curl -s localhost:8080/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
-- 배포된 모듈 엔드포인트를 호출해 본다. 상태는 `curl localhost:8080/platform/modules`.
+- (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
+- 배포된 모듈 엔드포인트를 호출해 본다. 상태는 `curl localhost:{{PORT}}/platform/modules`.
 - 서버 없이도 사용자가 돌릴 수 있는 sanity check: `./gradlew compileJava`(protean jar 를 대상으로 컴파일)와
   `./gradlew test`(`ConfigMatchesSelectionTest` 실행 — 생성된 설정이 선택과 일치하는지 단언).
 

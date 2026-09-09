@@ -17,6 +17,7 @@
 | `{{NAME}}` | prototype 폴더명 / 앱 이름 (`[a-z0-9_-]+`) | `orders` |
 | `{{PKG}}` | Java 패키지 — **사용자가 직접 입력** (기본값 `prototype.<name>`, `-`→`_`) | `prototype.orders` |
 | `{{PKG_PATH}}` | `{{PKG}}` 를 경로로 (`.`→`/`) | `prototype/orders` |
+| `{{PORT}}` | HTTP 포트 — **사용자가 직접 입력** (기본값 `8080`). `${SERVER_PORT:{{PORT}}}` 의 기본값 자리에만 들어간다 | `9200` |
 | `{{COORD}}` | Protean group:artifact | `org.htcom:protean` |
 | `{{VERSION}}` | Protean 버전 | `0.0.1` |
 | `{{DB}}` | 데이터베이스/스키마 이름 (기본값 = `<name>`) | `orders` |
@@ -52,6 +53,8 @@
   한 파일만 고치면 되게 하는 것이 목적입니다.
 - `fragments/*.java.template` — 코드 capability 하나당 하나. 선택된 것만 포함하며, 실제 클래스명으로 이름을
   바꿉니다. 각 프래그먼트 헤더에 의존 조건이 적혀 있습니다(예: `mcp.enabled` 필요).
+  키의 `test_fragment` 는 예외입니다: `ResourceServerOnlyTest.java.template` 은 **클래스명을 유지한 채**
+  `src/test/java/` 로 갑니다 — 프로젝트별 정책이 아니라 구조적 보증을 단정하기 때문입니다.
 - `fragments/<dir>/` — **프래그먼트 번들**. 여러 파일을 서브패키지로 한꺼번에 내보내며, 클래스명을 유지하고
   (멤버끼리 서로를 참조하므로) 일부 멤버는 테스트 소스셋을 대상으로 할 수 있습니다. `fragments/interfacedef/`
   가 그 예이며 `interface_spec_validator` capability 가 이를 구동합니다. `../reference/protean-options.yaml` 의

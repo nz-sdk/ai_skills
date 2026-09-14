@@ -787,6 +787,79 @@ capabilities:
           Leave it UNSET (library default true) and offer it as a commented edit-point in application.yml with that
           sentence attached, so a reader learns the switch exists without being invited to flip it. Only reason to
           set false: debugging the rule itself.
+      - key: amoeba.deploy-callback.enabled
+        type: boolean
+        default: false
+        requires: [protean.mcp.enabled=true]
+        desc: Whether a finished deploy is reported to an HTTP endpoint (issue tracker, chat, anything).
+        note: >-
+          ASK THIS ONE, then ask the rest of amoeba.deploy-callback.* ONLY if the answer is yes — the other keys are
+          meaningless while it is off, and a generated app that posts nowhere needs none of them.
+
+          WHY IT IS CODE AND NOT A verification PROBE, which is where everyone looks first: the probe channel
+          cannot reach off-box. VerificationGate joins a probe as URI.create("http://localhost:" + port + path),
+          ProbeGenerator forces a leading '/' so the authority stays localhost, and VerificationGate.send attaches
+          no headers and no body — an authenticated API call was never possible through it. ProbeGenerator's own
+          javadoc points at SpecBearingDeployTool.call instead, and that is where DeployWebhookNotifier runs.
+
+          ★ FAIL-OPEN, and that is the point. A probe that gets a non-2xx tears the deployment down (gate 3 throws
+          -> undeploy + store.remove). This does the OPPOSITE: the endpoint being down is no reason to cancel a
+          deploy that passed every gate. The outcome comes back in the MCP result as `callbackStatus`, because a
+          callback that silently never fires is the one failure mode fail-open cannot cover by itself.
+      - key: amoeba.deploy-callback.url
+        type: string
+        default: ""
+        requires: [amoeba.deploy-callback.enabled=true]
+        desc: Full URL the deploy report is POSTed to.
+        note: >-
+          Vendor-neutral by design. A GitLab issue is
+          http://<host>/api/v4/projects/<group>%2F<project>/issues — note the %2F, the path must be URL-encoded.
+          Jira, Slack incoming webhooks and a home-grown endpoint all work the same way: only this key, `headers`
+          and `body-template` change.
+      - key: amoeba.deploy-callback.headers
+        type: map
+        default: {}
+        requires: [amoeba.deploy-callback.enabled=true]
+        desc: Request headers, e.g. the auth header and Content-Type.
+        note: >-
+          ★ NEVER WRITE A SECRET INTO application.yml. Reference the environment instead —
+          `PRIVATE-TOKEN: ${GITLAB_TOKEN:}` — and pass it through docker-compose WITHOUT a `:?` guard: a missing
+          token must not stop the container, it must show up as `callbackStatus`. Guarding it would trade a
+          reported non-event for a container that refuses to start, which contradicts fail-open.
+      - key: amoeba.deploy-callback.body-template
+        type: string
+        default: ""
+        requires: [amoeba.deploy-callback.enabled=true]
+        desc: Request body with {{outcome}} {{moduleId}} {{version}} {{target}} {{timestamp}} {{summary}} substituted.
+        note: >-
+          ★ EVERY SUBSTITUTED VALUE IS JSON-STRING-ESCAPED, so each token must sit INSIDE quotes:
+          {"title": "{{outcome}}", "description": "{{summary}}"}. The summary carries newlines, quotes and
+          markdown; pasted in raw it produces a body that is not parseable JSON, and the endpoint answers 400 with
+          a message that says nothing about the real cause. Write it as a SINGLE-QUOTED YAML scalar so the double
+          quotes and the \n sequences stay literal — which is exactly what JSON wants.
+      - key: amoeba.deploy-callback.notify-on
+        type: string
+        default: always
+        choices: [always, success]
+        requires: [amoeba.deploy-callback.enabled=true]
+        desc: Whether a rolled-back or failed deploy also reports, or only a successful one.
+        note: >-
+          ★ THE KEY IS `notify-on`, NEVER `on`. YAML 1.1 (SnakeYAML, which Spring Boot uses) parses a bare `on` key
+          as the BOOLEAN true, so the key stops being a String: Spring never binds it, and any config test that
+          flattens the tree to Map<String,Object> throws ClassCastException. Quoting would work; a word that is
+          never a keyword is safer.
+      - key: amoeba.deploy-callback.id-field
+        type: string
+        default: ""
+        advanced: true
+        requires: [amoeba.deploy-callback.enabled=true]
+        desc: Field pulled out of the response JSON and shown in callbackStatus, e.g. `iid` for a GitLab issue.
+      - key: amoeba.deploy-callback.timeout-ms
+        type: integer
+        default: 5000
+        advanced: true
+        requires: [amoeba.deploy-callback.enabled=true]
+        desc: Connect and request timeout. Keep it short — this runs inside the deploy call.
     fragment_bundle:
       dir: interfacedef
       package: "{{PKG}}.interfacedef"
@@ -837,7 +910,13 @@ capabilities:
         - { src: deploy/SpecBearingDeployTool.java.template,        to: main, when: protean.mcp.enabled=true }
         - { src: deploy/SpecGuardTool.java.template,                to: main, when: protean.mcp.enabled=true }
         - { src: deploy/InterfaceToolRegistrar.java.template,       to: main, when: protean.mcp.enabled=true }
+        # Deploy-time outbound webhook. Emitted UNCONDITIONALLY with the rest of the wrapper (subject to the same
+        # mcp.enabled gate) and DISABLED BY DEFAULT, because SpecBearingDeployTool takes it as a constructor
+        # argument — making the class conditional would fork that template into two variants for no gain. An
+        # unconfigured notifier costs one bean and answers `disabled`.
+        - { src: deploy/DeployWebhookNotifier.java.template,        to: main, when: protean.mcp.enabled=true }
         - { src: deploy/ProbeGeneratorTest.java.template,           to: test, when: protean.mcp.enabled=true }
+        - { src: deploy/DeployWebhookNotifierTest.java.template,    to: test, when: protean.mcp.enabled=true }
         - { src: deploy/MapperConsistencyCheckerTest.java.template, to: test, when: protean.mcp.enabled=true }
         - { src: deploy/InterfaceVerifierTest.java.template,        to: test, when: protean.mcp.enabled=true }
         - { src: deploy/InterfaceDeployPreparerTest.java.template,  to: test, when: protean.mcp.enabled=true }

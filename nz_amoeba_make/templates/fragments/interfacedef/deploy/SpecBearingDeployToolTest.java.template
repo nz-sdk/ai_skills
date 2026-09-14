@@ -64,8 +64,11 @@ class SpecBearingDeployToolTest {
         when(delegate.name()).thenReturn("protean.deploy_module");
         when(delegate.description()).thenReturn("Deploys a module.");
         when(delegate.action()).thenReturn(ModuleActionAuthorizer.ModuleAction.DEPLOY);
+        // Callback left at its default (disabled): these tests are about the deploy wrapper's own decisions, and a
+        // notifier that could reach the network would make them depend on an endpoint being up.
         tool = new SpecBearingDeployTool(delegate, mapper, preparer, verifier, platform, draftStore,
-                new SkeletonDefaults("none", true, true));
+                new SkeletonDefaults("none", true, true),
+                new DeployWebhookNotifier(mapper, "test-server"));
         specId = draftStore.put("orders", "1.0.0", "module.orders", SPEC, SKELETON);
     }
 

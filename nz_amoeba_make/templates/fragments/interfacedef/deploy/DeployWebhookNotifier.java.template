@@ -1,0 +1,242 @@
+// [DEPLOY-TIME INTEGRATION] Posts a deploy summary to an arbitrary HTTP endpoint when a deploy finishes.
+//
+// WHY HERE AND NOT IN A verification PROBE. The obvious-looking place is verification.integration, but that channel
+// cannot do this and was deliberately closed: VerificationGate joins the probe by raw concatenation
+// (`URI.create("http://localhost:" + port + path)`), ProbeGenerator.violationsOf forces a leading '/' so the
+// authority stays localhost, and VerificationGate.send sets no headers and sends noBody(). An authenticated API call
+// was never possible through it. ProbeGenerator's own javadoc names this class's home instead:
+// "Deploy-time integration belongs in SpecBearingDeployTool.call, which wraps the whole deploy and can use its own
+// client, auth and failure policy."
+//
+// ★ FAIL-OPEN, AND THAT IS THE WHOLE POINT. A probe that gets a non-2xx takes the deployment down (gate 3 throws ->
+// undeploy + store.remove). This must do the OPPOSITE: the endpoint being down, slow, or holding an expired token is
+// not a reason to cancel a deployment that already passed every gate. Every failure here is swallowed to a log line.
+//
+// The one real failure mode left is silence — a callback that never fires and nobody notices. That is why the
+// outcome is reported back through the MCP result as `callbackStatus` instead of only reaching the server log.
+package {{PKG}}.interfacedef.deploy;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
+
+/**
+ * Vendor-neutral. The endpoint, headers and request body all come from configuration, so the same class posts a
+ * GitLab issue, a Jira ticket or a Slack message without a code change.
+ *
+ * <p>Stateless. One HttpClient for the app's lifetime.
+ */
+@Component
+@ConfigurationProperties(prefix = "amoeba.deploy-callback")
+public class DeployWebhookNotifier {
+
+    private static final Logger log = LoggerFactory.getLogger(DeployWebhookNotifier.class);
+
+    /** Which terminal path of SpecBearingDeployTool.call produced this notification. */
+    public enum Outcome {
+        SUCCESS,
+        ROLLED_BACK,
+        INSTALL_FAILED
+    }
+
+    private final ObjectMapper mapper;
+
+    /** Which server this notification is about. Reuses the identifier MCP discovery already advertises. */
+    private final String self;
+
+    private boolean enabled = false;
+    private String url = "";
+    private String method = "POST";
+    private Map<String, String> headers = new LinkedHashMap<>();
+    private String bodyTemplate = "";
+    /**
+     * {@code always} | {@code success}.
+     *
+     * <p>★ NOT named {@code on}. YAML 1.1 (SnakeYAML) parses a bare {@code on} key as the BOOLEAN true, so the key
+     * would not be a String: Spring never binds it, and a config test that flattens the tree throws
+     * ClassCastException on it. Quoting would work; a name that is never a keyword is safer.
+     */
+    private String notifyOn = "always";
+    private long timeoutMs = 5000;
+    /** Optional JSON field to pull out of the response and show in the status, e.g. {@code iid} for GitLab. */
+    private String idField = "";
+
+    public DeployWebhookNotifier(ObjectMapper mapper,
+                                 @Value("${protean.mcp.authorization.resource:${spring.application.name:unknown}}")
+                                 String self) {
+        this.mapper = mapper;
+        this.self = self == null || self.isBlank() ? "unknown" : self;
+    }
+
+    /**
+     * Posts the summary and reports what happened, in one short string meant for {@code callbackStatus}.
+     *
+     * <p>Never throws. A caller that sees anything other than a {@code sent …} status still has a deployed module —
+     * only the notification is missing.
+     */
+    public String notifyDeploy(Outcome outcome, String moduleId, String version, String summaryMarkdown) {
+        if (!enabled) {
+            return "disabled";
+        }
+        if ("success".equals(notifyOn.trim().toLowerCase(Locale.ROOT)) && outcome != Outcome.SUCCESS) {
+            return "skipped (notify-on=success, outcome=" + outcome + ")";
+        }
+        if (url == null || url.isBlank()) {
+            return "not configured (url)";
+        }
+        if (bodyTemplate == null || bodyTemplate.isBlank()) {
+            return "not configured (body-template)";
+        }
+
+        try {
+            return send(outcome, moduleId, version, summaryMarkdown);
+        } catch (Exception e) {
+            // Deliberately broad: nothing this method can hit is worth failing a completed deploy over.
+            log.warn("deploy callback failed for module {} {} ({})", moduleId, version, outcome, e);
+            return "failed: " + describe(e);
+        }
+    }
+
+    private String send(Outcome outcome, String moduleId, String version, String summaryMarkdown) throws Exception {
+        String body = render(outcome, moduleId, version, summaryMarkdown);
+        Duration timeout = Duration.ofMillis(timeoutMs);
+
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url.trim()))
+                .timeout(timeout)
+                .method(method == null || method.isBlank() ? "POST" : method.trim().toUpperCase(Locale.ROOT),
+                        HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
+        headers.forEach(builder::header);
+
+        HttpClient http = HttpClient.newBuilder().connectTimeout(timeout).build();
+        HttpResponse<String> response =
+                http.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+
+        int status = response.statusCode();
+        if (status / 100 != 2) {
+            // Body, not just the code: the endpoint puts the actual reason there, and 401/403/404 are otherwise
+            // indistinguishable causes (bad token / missing scope / wrong path).
+            log.warn("deploy callback rejected: HTTP {} {}", status, response.body());
+            return "failed: HTTP " + status;
+        }
+
+        String id = extractId(response.body());
+        log.info("deploy callback sent for module {} {} -> HTTP {}{}", moduleId, version, status,
+                id == null ? "" : " id=" + id);
+        return id == null ? "sent (HTTP " + status + ")" : "sent (HTTP " + status + ", id=" + id + ")";
+    }
+
+    /**
+     * Fills the body template.
+     *
+     * <p>★ EVERY SUBSTITUTED VALUE IS JSON-STRING-ESCAPED. The summary carries newlines, quotes and markdown, so
+     * pasting it in raw produces a body that is not parseable JSON — and the endpoint answers 400 with a message
+     * that says nothing about the real cause. Escaping here means the template writes the token INSIDE quotes:
+     * {@code {"title": "{{outcome}}", "description": "{{summary}}"}}.
+     *
+     * <p>A non-JSON endpoint (form-encoded, plain text) is the caller's business: it simply gets escaped text.
+     */
+    String render(Outcome outcome, String moduleId, String version, String summaryMarkdown) {
+        Map<String, String> tokens = new LinkedHashMap<>();
+        tokens.put("outcome", String.valueOf(outcome));
+        tokens.put("moduleId", moduleId == null ? "" : moduleId);
+        tokens.put("version", version == null ? "" : version);
+        tokens.put("target", self);
+        tokens.put("timestamp", Instant.now().toString());
+        tokens.put("summary", summaryMarkdown == null ? "" : summaryMarkdown);
+
+        String out = bodyTemplate;
+        for (Map.Entry<String, String> e : tokens.entrySet()) {
+            out = out.replace("{{" + e.getKey() + "}}", jsonEscape(e.getValue()));
+        }
+        return out;
+    }
+
+    /** Jackson writes the value as a JSON string literal; strip the surrounding quotes so it drops into a template. */
+    private String jsonEscape(String raw) {
+        try {
+            String quoted = mapper.writeValueAsString(raw);
+            return quoted.substring(1, quoted.length() - 1);
+        } catch (Exception e) {
+            // Unreachable for a String, but a silently wrong body would be worse than a visibly empty one.
+            log.warn("could not escape a callback token", e);
+            return "";
+        }
+    }
+
+    /**
+     * A one-line cause for {@code callbackStatus}.
+     *
+     * <p>{@code getMessage()} is null on several of the exceptions that matter here — {@code ConnectException} is
+     * the common one — and "ConnectException: null" tells a reader nothing. Since this string is the entire
+     * diagnostic a fail-open callback leaves behind, fall back to the cause chain, then to the bare type.
+     */
+    private static String describe(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t.getMessage() != null && !t.getMessage().isBlank()) {
+                return e.getClass().getSimpleName() + ": " + t.getMessage();
+            }
+        }
+        return e.getClass().getSimpleName();
+    }
+
+    private String extractId(String responseBody) {
+        if (idField == null || idField.isBlank() || responseBody == null || responseBody.isBlank()) {
+            return null;
+        }
+        try {
+            var node = mapper.readTree(responseBody).path(idField.trim());
+            return node.isMissingNode() || node.isNull() ? null : node.asText();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // --- ConfigurationProperties setters -------------------------------------------------------------------
+
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
+    }
+
+    public void setUrl(String url) {
+        this.url = url;
+    }
+
+    public void setMethod(String method) {
+        this.method = method;
+    }
+
+    public void setHeaders(Map<String, String> headers) {
+        this.headers = headers == null ? new LinkedHashMap<>() : headers;
+    }
+
+    public void setBodyTemplate(String bodyTemplate) {
+        this.bodyTemplate = bodyTemplate;
+    }
+
+    public void setNotifyOn(String notifyOn) {
+        this.notifyOn = notifyOn == null || notifyOn.isBlank() ? "always" : notifyOn;
+    }
+
+    public void setTimeoutMs(long timeoutMs) {
+        this.timeoutMs = timeoutMs;
+    }
+
+    public void setIdField(String idField) {
+        this.idField = idField;
+    }
+}

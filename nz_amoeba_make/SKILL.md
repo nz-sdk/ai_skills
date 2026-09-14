@@ -149,10 +149,14 @@ never asked at all. Same rules as step 7: show each option's **full property key
 `subflow:` the capability also declares, so the sub-flow's answer is already known.
 **One capability carries `options:` today.** Recount in the yaml rather than trusting this list — it goes
 stale the moment a second is added, which is the same failure mode rule 4 below exists to prevent.
-- `interface_spec_validator` — four `options:` under `amoeba.skeleton.*` and `amoeba.interface.*`: the
-  service-layer shape, the skeleton's data access, whether a spec may override either, and the L3 rule's kill
-  switch. `amoeba.skeleton.service-interface` is the project's service-layer standard, and its note says to write
-  it out **even when the answer is the default** — so it is not one you may quietly leave unset.
+- `interface_spec_validator` — ten `options:` under `amoeba.skeleton.*`, `amoeba.interface.*` and
+  `amoeba.deploy-callback.*`. Four decide the generated shape: the service-layer shape, the skeleton's data
+  access, whether a spec may override either, and the L3 rule's kill switch.
+  `amoeba.skeleton.service-interface` is the project's service-layer standard, and its note says to write it out
+  **even when the answer is the default** — so it is not one you may quietly leave unset.
+  The other six are the **deploy-time webhook**: ask `amoeba.deploy-callback.enabled` first and ask the remaining
+  five ONLY on a yes — they are meaningless while it is off, and its default is off. The class ships either way
+  (SpecBearingDeployTool takes it as a constructor argument), so "no" costs one disabled bean, not a code branch.
 
 AskUserQuestion caps 4 options per question, so make the offering **deterministic** rather than improvising a
 split — that is what keeps an entry from silently vanishing:

@@ -53,9 +53,15 @@ public final class SpecBearingDeployTool implements McpTool {
      */
     private final SkeletonDefaults defaults;
 
+    /**
+     * Deploy-time outbound integration. It lives here rather than in a verification probe because a probe cannot
+     * reach off-box, carries no headers or body, and fails the deploy on a non-2xx — see DeployWebhookNotifier.
+     */
+    private final DeployWebhookNotifier notifier;
+
     public SpecBearingDeployTool(McpTool delegate, ObjectMapper mapper, InterfaceDeployPreparer preparer,
                                  InterfaceVerifier verifier, ModulePlatform platform, DraftStore draftStore,
-                                 SkeletonDefaults defaults) {
+                                 SkeletonDefaults defaults, DeployWebhookNotifier notifier) {
         this.delegate = delegate;
         this.mapper = mapper;
         this.preparer = preparer;
@@ -63,6 +69,7 @@ public final class SpecBearingDeployTool implements McpTool {
         this.platform = platform;
         this.draftStore = draftStore;
         this.defaults = defaults;
+        this.notifier = notifier;
     }
 
     @Override
@@ -157,6 +164,10 @@ public final class SpecBearingDeployTool implements McpTool {
                 "Routes the module serves that the spec does not declare. Reported, not blocking.");
         p.putObject("document").put("type", "string")
                 .put("description", "The interface definition document, rendered as markdown.");
+        // Declared, not optional-by-omission: strict-schema validates structured results, and a silent callback is
+        // the one failure mode the fail-open policy cannot cover on its own.
+        p.putObject("callbackStatus").put("type", "string")
+                .put("description", "GitLab deploy callback result, e.g. 'created #12' | 'disabled' | 'failed: ...'.");
         return schema;
     }
 
@@ -172,25 +183,58 @@ public final class SpecBearingDeployTool implements McpTool {
         try {
             prepared = preparer.prepare(arguments);
         } catch (InterfaceDeployPreparer.PreparationException e) {
+            // Nothing was installed and there is not even a settled module id yet, so there is nothing to report
+            // outward — the caller's own arguments were rejected.
             return McpToolResult.error(e.getMessage());
         }
 
         // Gates, compilation, store persistence and protean's own rollback all happen in here.
-        McpToolResult result = delegate.call(prepared.args(), ctx);
+        //
+        // ★ protean reports some install failures by THROWING rather than returning an error result —
+        // [COMPILATION_FAILED] is the common one, and it is by far the most frequent way a deploy fails. Without
+        // this catch the exception flies past to the dispatcher and the callback never fires on exactly the path
+        // that most needs reporting. The result is rebuilt here (rather than rethrowing) so the caller still sees
+        // the callback outcome; the original message is carried through verbatim.
+        McpToolResult result;
+        try {
+            result = delegate.call(prepared.args(), ctx);
+        } catch (RuntimeException e) {
+            log.warn("module {} {} failed to install", prepared.moduleId(), prepared.version(), e);
+            String status = notifier.notifyDeploy(DeployWebhookNotifier.Outcome.INSTALL_FAILED,
+                    prepared.moduleId(), prepared.version(),
+                    "배포가 예외로 실패했습니다.\n\n```\n" + e.getMessage() + "\n```");
+            return McpToolResult.error(e.getMessage() + "\n\nDeploy callback: " + status);
+        }
         if (result.isError()) {
             // ModulePlatform.install already ran undeploy + store.remove on failure, so there is nothing to undo.
-            return installFailureHint(result);
+            return notified(installFailureHint(result), prepared, DeployWebhookNotifier.Outcome.INSTALL_FAILED,
+                    "배포가 게이트/설치 단계에서 실패해 롤백됐습니다.");
         }
 
         InterfaceVerifier.Verification verification = verifier.verify(prepared.moduleId(), prepared.spec());
         if (!verification.missing().isEmpty()) {
-            return rollback(prepared, verification);
+            return notified(rollback(prepared, verification), prepared,
+                    DeployWebhookNotifier.Outcome.ROLLED_BACK,
+                    "선언한 라우트를 실제로 서비스하지 않아 롤백됐습니다:\n\n  - "
+                            + String.join("\n  - ", verification.missing()));
         }
 
         if (prepared.specId() != null) {
             draftStore.remove(prepared.specId());
         }
         return success(prepared, result, verification);
+    }
+
+    /**
+     * Reports a failed deploy to GitLab and folds the callback outcome into the error text.
+     *
+     * <p>The notifier never throws, so this cannot turn a reported failure into a different one.
+     */
+    private McpToolResult notified(McpToolResult failure, InterfaceDeployPreparer.Prepared prepared,
+                                   DeployWebhookNotifier.Outcome outcome, String summary) {
+        String status = notifier.notifyDeploy(outcome, prepared.moduleId(), prepared.version(), summary);
+        String text = failure.text() == null ? "" : failure.text();
+        return McpToolResult.error(text + "\n\nDeploy callback: " + status);
     }
 
     /**
@@ -268,8 +312,13 @@ public final class SpecBearingDeployTool implements McpTool {
         putStrings(structured, "undeclaredRoutes", verification.extra());
         structured.put("document", document);
 
+        String callbackStatus = notifier.notifyDeploy(DeployWebhookNotifier.Outcome.SUCCESS,
+                prepared.moduleId(), prepared.version(), successSummary(prepared, verification));
+        structured.put("callbackStatus", callbackStatus);
+
         StringBuilder text = new StringBuilder(delegated.text() == null ? "" : delegated.text());
         text.append("\n\nInterface verification: ").append(verification.status()).append('\n');
+        text.append("Deploy callback: ").append(callbackStatus).append('\n');
         appendList(text, "Regenerated from the spec (your edits to these were discarded)", prepared.replaced());
         appendList(text, "Filled in from the skeleton because you omitted them", prepared.seeded());
         appendList(text, "Routes served but not declared — add them to the spec or remove them",
@@ -283,6 +332,28 @@ public final class SpecBearingDeployTool implements McpTool {
         // requiring a second round trip.
         text.append("\n--- interface definition document ---\n\n").append(document);
         return McpToolResult.ok(text.toString(), structured);
+    }
+
+    /** The issue body for a successful deploy — the same facts the MCP result carries, in markdown. */
+    private String successSummary(InterfaceDeployPreparer.Prepared prepared,
+                                  InterfaceVerifier.Verification verification) {
+        StringBuilder out = new StringBuilder();
+        out.append("| 검증 | ").append(verification.status()).append(" |\n");
+        appendBullets(out, "생성된 probe", prepared.probes().stream()
+                .map(p -> p.method() + " " + p.path() + " -> " + p.expectedStatus())
+                .toList());
+        appendBullets(out, "스펙에서 재생성된 파일", prepared.replaced());
+        appendBullets(out, "스켈레톤이 채운 파일", prepared.seeded());
+        appendBullets(out, "선언되지 않은 라우트", verification.extra());
+        return out.toString();
+    }
+
+    private static void appendBullets(StringBuilder out, String heading, List<String> values) {
+        if (values.isEmpty()) {
+            return;
+        }
+        out.append("\n**").append(heading).append("**\n\n  - ")
+                .append(String.join("\n  - ", values)).append('\n');
     }
 
     private static void putStrings(ObjectNode node, String field, List<String> values) {

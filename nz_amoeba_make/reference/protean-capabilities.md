@@ -186,6 +186,28 @@ app**, which is ordinary Spring and outside what a module can hot-deploy.
 Support injectables (not SPIs): `ProteanTaskExecutor` (sanctioned background-work executor; raw shutdown hooks are
 banned by `ForbiddenApiRule`), `ModuleDescriptor.bridgedInterfaces` (RPC bridge, needs `worker.rpc-bridge=true`).
 
+### Deploy-time outbound notification — there is no protean hook for it
+
+Protean exposes **no** post-deploy callback. The config surface is `isolation` / `module-store` / `mcp` / `gate` /
+`trace` and nothing there calls out. Two things get mistaken for one:
+
+| Looks like a callback | What it actually is |
+|---|---|
+| `verification.integration` probes | Gate-3 HTTP probes. `VerificationGate` builds them as `URI.create("http://localhost:" + port + path)`, so they **only ever hit the app itself**; `send` attaches no headers and no body; a non-2xx **fails the gate and tears the deployment down**. An authenticated API call was never possible through it, and it must not become one — a reporting endpoint returning 4xx would cancel a good deploy |
+| `ModuleUnloadCallback` | Fires on **unload**, not on deploy, and is in-process only |
+
+So reporting a finished deploy is consumer code, and the only place that sees every terminal outcome is the L2
+deploy wrapper — `SpecBearingDeployTool.call`, which owns its own client, auth and failure policy.
+`DeployWebhookNotifier` lives there (`amoeba.deploy-callback.*`, off by default).
+
+Two rules that class exists to hold, both learned the hard way:
+
+- **Fail-open.** The opposite of a probe. An unreachable endpoint must never fail a deploy that passed every gate.
+- **Catch what the delegate THROWS, not just what it returns.** Protean reports some install failures — most
+  commonly `[COMPILATION_FAILED]` — by throwing rather than returning an error result. Wrapping only
+  `if (result.isError())` leaves the most frequent failure path silent. Since fail-open makes silence the one
+  remaining failure mode, the outcome is also returned in the MCP result as `callbackStatus`.
+
 ---
 
 ## Dependency rules (skill must enforce)

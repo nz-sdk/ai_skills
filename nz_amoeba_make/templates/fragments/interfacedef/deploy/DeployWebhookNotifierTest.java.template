@@ -1,0 +1,93 @@
+// The two things that actually break this class: a body template that stops being valid JSON once a real summary
+// is pasted into it, and a callback failure that takes a good deployment down with it.
+package {{PKG}}.interfacedef.deploy;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class DeployWebhookNotifierTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private static DeployWebhookNotifier notifier() {
+        return new DeployWebhookNotifier(MAPPER, "http://localhost:9400/platform/mcp");
+    }
+
+    @Test
+    @DisplayName("a summary full of quotes and newlines still renders parseable JSON")
+    void escapesSubstitutedValues() throws Exception {
+        DeployWebhookNotifier n = notifier();
+        n.setBodyTemplate("{\"title\": \"{{outcome}} {{moduleId}}\", \"description\": \"{{summary}}\"}");
+
+        // Exactly the shape that broke a hand-built body: markdown tables, newlines, quotes, a backslash.
+        String summary = "## 배포 결과\n\n| \"모듈\" | `comp` |\nC:\\path\\here\ttab";
+        String body = n.render(DeployWebhookNotifier.Outcome.SUCCESS, "comp", "1.1.0", summary);
+
+        var parsed = assertDoesNotThrow(() -> MAPPER.readTree(body),
+                () -> "rendered body is not valid JSON:\n" + body);
+        assertEquals("SUCCESS comp", parsed.get("title").asText());
+        // Round-trips byte for byte — escaping must not mangle the content it protects.
+        assertEquals(summary, parsed.get("description").asText());
+    }
+
+    @Test
+    @DisplayName("disabled by default, so a generated app posts nowhere until it is configured")
+    void disabledByDefault() {
+        assertEquals("disabled",
+                notifier().notifyDeploy(DeployWebhookNotifier.Outcome.SUCCESS, "comp", "1.0.0", "x"));
+    }
+
+    @Test
+    @DisplayName("enabled but unconfigured reports which key is missing rather than failing silently")
+    void reportsMissingConfiguration() {
+        DeployWebhookNotifier n = notifier();
+        n.setEnabled(true);
+        assertEquals("not configured (url)",
+                n.notifyDeploy(DeployWebhookNotifier.Outcome.SUCCESS, "comp", "1.0.0", "x"));
+
+        n.setUrl("http://127.0.0.1:1/hook");
+        assertEquals("not configured (body-template)",
+                n.notifyDeploy(DeployWebhookNotifier.Outcome.SUCCESS, "comp", "1.0.0", "x"));
+    }
+
+    @Test
+    @DisplayName("notify-on=success skips the failure outcomes")
+    void notifyOnSuccessSkipsFailures() {
+        DeployWebhookNotifier n = notifier();
+        n.setEnabled(true);
+        n.setUrl("http://127.0.0.1:1/hook");
+        n.setBodyTemplate("{}");
+        n.setNotifyOn("success");
+
+        assertTrue(n.notifyDeploy(DeployWebhookNotifier.Outcome.INSTALL_FAILED, "comp", "1.0.0", "x")
+                .startsWith("skipped"));
+    }
+
+    @Test
+    @DisplayName("★ fail-open: an unreachable endpoint returns a status, never an exception")
+    void failOpenOnUnreachableEndpoint() {
+        DeployWebhookNotifier n = notifier();
+        n.setEnabled(true);
+        // Port 1 refuses immediately, so this stays fast and deterministic.
+        n.setUrl("http://127.0.0.1:1/hook");
+        n.setBodyTemplate("{\"t\":\"{{outcome}}\"}");
+        n.setHeaders(Map.of("Content-Type", "application/json"));
+        n.setTimeoutMs(500);
+
+        String status = assertDoesNotThrow(
+                () -> n.notifyDeploy(DeployWebhookNotifier.Outcome.SUCCESS, "comp", "1.0.0", "x"));
+        assertTrue(status.startsWith("failed:"), () -> "expected a reported failure, got: " + status);
+        // The status IS the diagnostic a fail-open callback leaves behind, so it must never trail a bare "null" —
+        // ConnectException carries no message and that is exactly the case seen in practice.
+        assertFalse(status.endsWith("null"), () -> "cause must be described, got: " + status);
+    }
+}

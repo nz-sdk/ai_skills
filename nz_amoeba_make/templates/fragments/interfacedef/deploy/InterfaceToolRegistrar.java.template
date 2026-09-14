@@ -51,10 +51,13 @@ public class InterfaceToolRegistrar implements ApplicationRunner {
     /** Passed straight through to the deploy wrapper — see SpecBearingDeployTool#defaults. */
     private final SkeletonDefaults defaults;
 
+    /** Deploy-time outbound webhook, also passed straight through. */
+    private final DeployWebhookNotifier notifier;
+
     public InterfaceToolRegistrar(ObjectProvider<McpDispatcher> dispatcher, List<McpTool> tools,
                                   ObjectMapper mapper, InterfaceDeployPreparer preparer,
                                   InterfaceVerifier verifier, ModulePlatform platform, DraftStore draftStore,
-                                  SkeletonDefaults defaults) {
+                                  SkeletonDefaults defaults, DeployWebhookNotifier notifier) {
         this.dispatcher = dispatcher;
         this.tools = tools;
         this.mapper = mapper;
@@ -63,6 +66,7 @@ public class InterfaceToolRegistrar implements ApplicationRunner {
         this.platform = platform;
         this.draftStore = draftStore;
         this.defaults = defaults;
+        this.notifier = notifier;
     }
 
     @Override
@@ -79,7 +83,8 @@ public class InterfaceToolRegistrar implements ApplicationRunner {
     }
 
     private McpTool specBearing(McpTool delegate) {
-        return new SpecBearingDeployTool(delegate, mapper, preparer, verifier, platform, draftStore, defaults);
+        return new SpecBearingDeployTool(delegate, mapper, preparer, verifier, platform, draftStore, defaults,
+                notifier);
     }
 
     /**

@@ -154,6 +154,21 @@ groups:
               it must be a real issuer identifier — the exact `iss` claim string the Authorization Server mints.
               jwk-set-uri is the equivalent alternative. It is environment-specific, so ASK for it (typed) and
               block generation if still empty; offer dropping the whole authorization block as the other way out.
+          - when: [protean.mcp.authorization.resource]
+            needs: spring.security.oauth2.resourceserver.jwt.audiences
+            value: ${protean.mcp.authorization.resource:}
+            why: >-
+              The issuer is SHARED — one Authorization Server mints for every resource server it fronts — so `iss`
+              proves only that the AS signed the token, never that the token was meant for THIS app. A token
+              obtained for any other resource of the same issuer would open /platform/**, which compiles and
+              hot-loads submitted source. Audience is what makes a token ours.
+              Emit it as the placeholder above, NOT as a repeated literal: the two must be the same string, and
+              two literals means someone edits one, the app still boots, and every request 401s — a symptom that
+              does not look like a config typo. Boot applies the check on the auto-configured decoder, so the
+              lazy SupplierJwtDecoder (and its offline startup) is preserved; do NOT build a JwtDecoder bean.
+              ⚠ An EMPTY value does not fail — Boot reads it as "no audience to check" and validation silently
+              disappears, so SecurityConfig's constructor rejects blank. Nothing to ask the user: the value is
+              derived from the resource identifier they already gave.
         advanced: true
         desc: RFC 9728 protected-resource identifier (usually the MCP URL). When set, the metadata endpoint activates; the consumer's Security must permitAll it.
         note: >-

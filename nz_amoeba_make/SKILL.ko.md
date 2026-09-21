@@ -334,7 +334,8 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   둘 다 켰을 때도 그 조합이 사주는 것을 과장하지 말 것: 바이트코드 규칙은 애노테이션의 **존재**를 요구할 수
   있지만, 그 설명 텍스트가 다른 데 게시된 문서와 일치하는지는 대조하지 않는다.
 - **authorizer 는 인증을 필요로 한다** — `authorizer` capability 를 선택했는데 호출자를 인증하는 것이 아무것도
-  없으면(`mcp.authorization.resource` 없음 ⇒ `SecurityConfig` 없음, security starter 없음, `issuer-uri` 없음)
+  없으면(`mcp.authorization.resource` 없음 ⇒ `SecurityConfig` 없음, security starter 없음, `issuer-uri` 없음,
+  `aud` 검증 없음)
   **경고**한다: 모든 호출자가 `caller == null` 로 도착하므로 프래그먼트의 `DEPLOY`/`UPDATE`/`DELETE`/`APPROVE`
   분기가 전부 거부하고, 모듈 배포가 조용히 멈춘다. 두 가지 탈출구를 제시한다 — 인증을 붙이거나
   (`mcp.authorization.resource` 를 설정하면 issuer 프롬프트가 강제된다), 로컬 데모라면 `authorize()` 를

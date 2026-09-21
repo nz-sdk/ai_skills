@@ -19,6 +19,13 @@
 // issuer-uri through the Environment during condition evaluation and rejects the unresolvable ${...} placeholder.
 // An EMPTY value and a MALFORMED one (no scheme) both get past Spring, leaving an RCE surface with a decoder that
 // can never verify anything. So those two are rejected here, loudly, with the fix in the message.
+//
+// WHY AUDIENCE IS CHECKED TOO: the issuer is SHARED. One Authorization Server mints tokens for every resource
+// server it fronts, so `iss` proves only "that AS signed it" — not "this token was meant for us". Audience is what
+// makes a token ours. Validation itself is Boot's (spring...jwt.audiences, bound to
+// protean.mcp.authorization.resource in application.yml) so the decoder stays the lazy SupplierJwtDecoder; what
+// Boot will NOT do is complain when the list is empty — it just stops checking. That silence is the whole risk,
+// so a blank value is rejected here.
 package {{PKG}};
 
 import org.springframework.beans.factory.annotation.Value;
@@ -53,7 +60,8 @@ public class SecurityConfig {
      * Authorization Server need not be reachable at startup. Checking it here would impose a startup ordering
      * constraint that Spring intentionally avoids — such a value starts fine and 401s on every request instead.
      */
-    SecurityConfig(@Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri:}") String issuerUri) {
+    SecurityConfig(@Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri:}") String issuerUri,
+            @Value("${spring.security.oauth2.resourceserver.jwt.audiences:}") String audiences) {
         if (issuerUri.isBlank() || issuerUri.contains("${") || !issuerUri.startsWith("http")) {
             throw new IllegalStateException("""
                     No usable OAuth2 issuer is configured, so the MCP control plane (/platform/**) cannot be \
@@ -66,6 +74,18 @@ public class SecurityConfig {
                       curl -s <candidate>/.well-known/openid-configuration | jq -r .issuer
 
                     See README section 'Security'. Resolved value was: '""" + issuerUri + "'");
+        }
+        if (audiences.isBlank() || audiences.contains("${")) {
+            throw new IllegalStateException("""
+                    No audience is configured, so this Resource Server would accept ANY token the issuer signed                     — including one obtained for a different resource entirely. /platform/mcp is a remote code                     execution surface, so this app refuses to start.
+
+                    application.yml binds the audience to the resource identifier:
+                      spring.security.oauth2.resourceserver.jwt.audiences: ${protean.mcp.authorization.resource:}
+
+                    So this is blank because protean.mcp.authorization.resource is blank. Set it — and set the                     Authorization Server's audience claim to the SAME string. A mismatch is not silent: every                     request 401s with 'invalid_token'. Check what this app advertises with:
+                      curl -s http://<this-host>:<port>/.well-known/oauth-protected-resource | jq -r .resource
+
+                    Resolved value was: '""" + audiences + "'");
         }
     }
 

@@ -153,4 +153,37 @@ class ResourceServerOnlyTest {
         assertEquals(401, res.getStatusCode().value(),
                 "the control plane must still require a Bearer token: " + res.getBody());
     }
+
+    @Test
+    void audienceIsBoundToTheResourceIdentifier() {
+        // The issuer is SHARED — one Authorization Server signs for every resource server it fronts — so `iss`
+        // alone never proves a token was meant for THIS app. A token obtained for some other resource would
+        // otherwise open /platform/**, which compiles and hot-loads submitted source.
+        //
+        // This also pins that the two settings are ONE expression. Written as two literals, editing one leaves
+        // the app booting happily while every request 401s, and that symptom does not look like a config typo.
+        String resource = this.context.getEnvironment()
+                .getProperty("protean.mcp.authorization.resource", "");
+        String audience = this.context.getEnvironment()
+                .getProperty("spring.security.oauth2.resourceserver.jwt.audiences", "");
+
+        assertTrue(!audience.isBlank(),
+                "audience validation is off — Boot reads an empty list as 'nothing to check', without an error");
+        assertEquals(resource, audience,
+                "aud must equal the resource identifier this app advertises (the AS must mint the same string)");
+    }
+
+    @Test
+    void blankAudienceStopsTheApp() {
+        // Unlike issuer-uri, a blank audience does not stop Boot: it quietly means "check nothing". That silence
+        // is the entire risk, so the constructor rejects it. Called directly — no context needed.
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> new SecurityConfig(ISSUER, ""),
+                "booted with no audience — any token the issuer signed would open the RCE surface");
+        assertTrue(thrown.getMessage().contains("audiences"),
+                "the message must name the setting to fix. Actual: " + thrown.getMessage());
+
+        // The other direction too: a good value must pass, or the guard blocks legitimate startup.
+        new SecurityConfig(ISSUER, "http://localhost:{{PORT}}/platform/mcp");
+    }
 }

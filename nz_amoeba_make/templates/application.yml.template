@@ -37,6 +37,12 @@ spring:
   # unset means the app will not start, because condition evaluation on Boot's jwtDecoderByIssuerUri resolves it
   # through the Environment and rejects an unresolvable placeholder. Empty/malformed values DO get past Spring,
   # which is why SecurityConfig's constructor rejects those.
+  #
+  # The same requires_when injects spring.security.oauth2.resourceserver.jwt.audiences right below it, written as
+  # ${protean.mcp.authorization.resource:} — one expression, never a repeated literal. The issuer is shared, so
+  # `iss` alone does not prove a token was meant for this app; audience does. Emit it as the placeholder so the
+  # two cannot drift apart, and keep the ':' fallback so the blank case reaches SecurityConfig's guard instead of
+  # failing as an unresolvable placeholder.
 
 protean:
   # <<protean-options>>  — engine injects every SET protean.* key here, grouped. Examples of common anchors:

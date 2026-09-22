@@ -325,7 +325,8 @@ Check, and fix or stop on each:
   Do not overstate what the pair buys even when both are on: a bytecode rule can require an annotation to be
   **present**, but it does not compare the description text against any document published elsewhere.
 - **authorizer needs authentication** — if the `authorizer` capability is selected but nothing authenticates the
-  caller (no `mcp.authorization.resource` ⇒ no `SecurityConfig`, no security starters, no `issuer-uri`), **warn**:
+  caller (no `mcp.authorization.resource` ⇒ no `SecurityConfig`, no security starters, no `issuer-uri`, no
+  audience check), **warn**:
   every caller arrives as `caller == null`, so the fragment's `DEPLOY`/`UPDATE`/`DELETE`/`APPROVE` branch denies
   them all and module deployment silently stops working. Offer the two ways out — add authentication (set
   `mcp.authorization.resource`, which forces the issuer prompt), or relax `authorize()` to `Decision.allow()` for

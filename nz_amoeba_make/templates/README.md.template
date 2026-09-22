@@ -254,6 +254,33 @@ A well-formed but wrong or unreachable issuer is deliberately not rejected at st
 returns a `SupplierJwtDecoder` that defers the discovery fetch to the first token, so the AS need not be reachable
 when the app boots.
 
+### The audience check
+
+The issuer is **shared**: one Authorization Server mints tokens for every resource server it fronts. So `iss` only
+proves *that AS signed it* — never *this token was meant for us*. Without an audience check, a token legitimately
+obtained for some other resource of the same issuer opens `/platform/**` here, and that endpoint compiles and
+hot-loads submitted source.
+
+`spring.security.oauth2.resourceserver.jwt.audiences` is therefore bound to `${protean.mcp.authorization.resource:}`
+— **one expression, not a repeated literal.** The audience and the advertised resource identifier must be the same
+string; written twice, editing one leaves the app booting happily while every request 401s, and that symptom does
+not look like a config typo.
+
+Configure your Authorization Server to mint that same string as `aud`. Check both ends:
+
+```bash
+curl -s http://<this-host>:<port>/.well-known/oauth-protected-resource | jq -r .resource
+echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq -r '.aud'
+```
+
+| Value | Symptom |
+|---|---|
+| `aud` mismatch | Starts fine, **every request 401** (`invalid_token`) |
+| Blank (`protean.mcp.authorization.resource` unset) | **Refuses to start** (`SecurityConfig` constructor) |
+
+The blank case is guarded in the constructor because Boot would *not* complain: an empty audience list means "check
+nothing", so validation would disappear in silence. That silence is the whole risk.
+
 ### Reachable from both sides
 
 `protean.mcp.authorization.resource` and `protean.mcp.authorization.authorization-servers` are **advertised** at

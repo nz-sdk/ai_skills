@@ -292,6 +292,53 @@ unable to obtain one. Both are built from `SERVER_HOST`/`SERVER_PORT` for that r
 > and a client that string-compares the resource identifier will reject it; a standard-port deployment also still
 > gets an explicit `:443`/`:80` in the URL. Switch that line in `application.yml` to `https` when you get there.
 
+### Connecting an MCP client
+
+This app issues no tokens. A client reads `/.well-known/oauth-protected-resource`, signs in at the Authorization
+Server named there, and sends the token as a Bearer. A client with native OAuth for remote servers can do that
+itself; where it can't — a plain-`http` Authorization Server, or one without dynamic client registration — put the
+`mcp-remote` stdio proxy in between. It runs the browser sign-in, keeps the token under `~/.mcp-auth/`, and
+refreshes it silently. Claude Code reads this from `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "{{NAME}}": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote@0.8.7",
+        "http://<SERVER_HOST>:{{PORT}}/platform/mcp", "3334",
+        "--host", "127.0.0.1", "--allow-http", "--transport", "http-only",
+        "--static-oauth-client-info", "{\"client_id\":\"<client id registered on the AS>\"}",
+        "--static-oauth-client-metadata", "{\"scope\":\"mcp.read mcp.write mcp.admin\"}"
+      ]
+    }
+  }
+}
+```
+
+| Argument | Without it |
+|---|---|
+| `@0.8.7` (pinned) | 0.9.0+ refuses a plain-`http` token endpoint (`InsecureTokenEndpointError`): sign-in succeeds and the token exchange dies. Unpin once the AS is behind TLS |
+| `3334` + `--host 127.0.0.1` | The redirect URI becomes `http://127.0.0.1:3334/oauth/callback` — register exactly that. Spring Authorization Server substitutes the port only for an IP-literal loopback; `localhost` is compared verbatim and gets a 400 |
+| `--static-oauth-client-info` | It attempts dynamic client registration, which most Authorization Servers leave off |
+| `--static-oauth-client-metadata` | The authorize request carries no `scope`, so the token has none |
+
+**When the token expires, re-run nothing by hand.** Access tokens refresh silently. When the refresh token lapses
+too, `mcp-remote` reopens the browser itself — at startup or in the middle of a tool call — and the call goes on
+after sign-in.
+
+**But give it time at startup.** Claude Code waits only **30 s** for an MCP server to start (its MCP log opens with
+`Starting connection with timeout of 30000ms`), and `npx` resolution alone takes ~10 s. A sign-in slower than that is
+killed together with the proxy, and the token is never saved — which is what sends people back to running `npx` by
+hand. Raise the limit in `.claude/settings.json` next to `.mcp.json`:
+
+```json
+{ "env": { "MCP_TIMEOUT": "180000" } }
+```
+
+If the next log still says `30000ms`, set `MCP_TIMEOUT` as a user environment variable instead and restart the client.
+
 ## Layout
 
 ```

@@ -52,9 +52,18 @@ final class DbFixtures {
             "CREATE INDEX ix_emp_nm ON emp (emp_nm)",
             "COMMENT ON TABLE emp IS '사원'",
             "CREATE VIEW v_active_comp AS SELECT comp_cd, comp_nm FROM comp_mst WHERE use_yn = 'Y'",
+            // A second schema holding a table of the SAME name with a different column: when OTHER_COL comes back,
+            // the lookup really moved; when COMP_CD does, it silently stayed in PUBLIC. H2 has one catalog per
+            // database, so schemas are the only place offline tests can switch location.
+            "CREATE SCHEMA other_app",
+            "CREATE TABLE other_app.comp_mst (other_col INT)",
+            "COMMENT ON TABLE other_app.comp_mst IS '다른 앱의 테이블'",
     };
 
-    /** Tables the base schema produces, as H2 stores them. */
+    /** The second schema, as H2 stores it. */
+    static final String OTHER_SCHEMA = "OTHER_APP";
+
+    /** Tables the base schema produces in PUBLIC, as H2 stores them. */
     static final int TABLE_COUNT = 3;
     static final int VIEW_COUNT = 1;
 

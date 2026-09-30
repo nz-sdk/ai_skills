@@ -168,9 +168,10 @@ split — that is what keeps an entry from silently vanishing:
    Without the count the user cannot tell whether anything is still coming, which is the only real guard against
    dropping one.
 
-Worked example, in-process + MCP enabled (the common case): seven survive — `custom_mcp_tool`,
-`builtin_tool_override`, `module_source_tools`, `code_rule`, `authorizer`, `interface_spec_validator`,
-`unload_callback` → two questions, 4 + 3. (`db_dialect`/`scope_admin` need `worker.db.auto-provision`,
+Worked example, in-process + MCP enabled + data access (the common case): eight survive — `custom_mcp_tool`,
+`builtin_tool_override`, `module_source_tools`, `db_metadata_tools`, `code_rule`, `authorizer`,
+`interface_spec_validator`, `unload_callback` → two questions, 4 + 4. (`db_metadata_tools` needs `data_access`,
+so without data access it drops out → 4 + 3. `db_dialect`/`scope_admin` need `worker.db.auto-provision`,
 `module_store_dialect` needs the jdbc module-store backend, so all three are filtered out.)
 
 Recount this list against the yaml rather than trusting the number written here — the count moves whenever a

@@ -1,0 +1,209 @@
+// Walks DatabaseMetaData against a real driver (H2) and pins each quirk DbMetadataReader exists to absorb: name
+// resolution across case rules, the LIKE-wildcard leak, the primary-key index duplicate, and both directions of
+// foreign keys.
+//
+// What H2 cannot show: the MySQL table-comment fallback. Connector/J fills getTables' REMARKS differently from H2,
+// so that branch is covered only by LiveMetadataTest against a real MySQL (self-skipping without one).
+package {{PKG}}.db;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpToolResult;
+import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class DescribeTableToolTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final DataSource database = DbFixtures.database();
+    private final DescribeTableTool tool = new DescribeTableTool(mapper, new DbMetadataReader(database));
+
+    private McpToolResult describe(String table) {
+        ObjectNode args = mapper.createObjectNode().put("table", table);
+        return tool.call(args, null);
+    }
+
+    private static JsonNode column(JsonNode structured, String name) {
+        for (JsonNode c : structured.path("columns")) {
+            if (c.path("name").asText().equals(name)) {
+                return c;
+            }
+        }
+        throw new AssertionError("no column " + name + " in " + structured.path("columns"));
+    }
+
+    private static List<String> strings(JsonNode array) {
+        List<String> out = new ArrayList<>();
+        array.forEach(n -> out.add(n.asText()));
+        return out;
+    }
+
+    @Test
+    void describesColumnsInOrderWithTypesNullabilityDefaultsAndComments() {
+        McpToolResult result = describe("comp_mst");
+
+        DbFixtures.assertSatisfiesOutputSchema(tool, result);
+        JsonNode s = result.structured();
+        assertEquals("COMP_MST", s.path("table").asText(), "the stored name comes back, not the typed one");
+        assertEquals("table", s.path("type").asText());
+        assertEquals("회사 마스터", s.path("comment").asText());
+
+        List<String> order = new ArrayList<>();
+        s.path("columns").forEach(c -> order.add(c.path("name").asText()));
+        assertEquals(List.of("COMP_CD", "COMP_NM", "USE_YN"), order);
+
+        JsonNode compCd = column(s, "COMP_CD");
+        assertTrue(compCd.path("type").asText().endsWith("(10)"), compCd.toString());
+        assertEquals(10, compCd.path("size").asInt());
+        assertFalse(compCd.path("nullable").asBoolean(true));
+        assertEquals("회사코드", compCd.path("comment").asText());
+
+        JsonNode useYn = column(s, "USE_YN");
+        assertTrue(useYn.path("nullable").asBoolean());
+        assertTrue(useYn.path("default").asText().contains("Y"), useYn.toString());
+        assertFalse(useYn.has("comment"), "an absent comment is omitted, not sent as an empty string");
+    }
+
+    @Test
+    void reportsDecimalPrecisionAndScaleAndIdentityColumns() {
+        JsonNode s = describe("emp").structured();
+
+        JsonNode salary = column(s, "SALARY");
+        assertTrue(salary.path("type").asText().endsWith("(12,2)"), salary.toString());
+        assertEquals(2, salary.path("scale").asInt());
+
+        assertTrue(column(s, "EMP_ID").path("autoIncrement").asBoolean());
+        assertFalse(column(s, "EMP_NM").path("autoIncrement").asBoolean(true));
+        assertFalse(column(s, "EMP_ID").has("size"), "an integer's precision is not part of its type");
+    }
+
+    /** The unique key is what turns a duplicate insert into a 409 — it must be visible, and not be confused. */
+    @Test
+    void separatesPrimaryKeyFromOtherIndexes() {
+        JsonNode s = describe("comp_mst").structured();
+
+        assertEquals(List.of("COMP_CD"), strings(s.path("primaryKey").path("columns")));
+        boolean uniqueOnName = false;
+        for (JsonNode index : s.path("indexes")) {
+            assertFalse(strings(index.path("columns")).equals(List.of("COMP_CD")),
+                    "the primary key's own index must not be repeated as an index: " + index);
+            if (index.path("unique").asBoolean() && strings(index.path("columns")).equals(List.of("COMP_NM"))) {
+                uniqueOnName = true;
+            }
+        }
+        assertTrue(uniqueOnName, "uk_comp_nm missing from " + s.path("indexes"));
+    }
+
+    @Test
+    void listsNonUniqueIndexes() {
+        JsonNode s = describe("emp").structured();
+
+        boolean found = false;
+        for (JsonNode index : s.path("indexes")) {
+            if (index.path("name").asText().equals("IX_EMP_NM")) {
+                assertFalse(index.path("unique").asBoolean(true));
+                assertEquals(List.of("EMP_NM"), strings(index.path("columns")));
+                found = true;
+            }
+        }
+        assertTrue(found, s.path("indexes").toString());
+    }
+
+    @Test
+    void reportsForeignKeysInBothDirections() {
+        JsonNode emp = describe("emp").structured();
+        JsonNode fk = emp.path("foreignKeys").get(0);
+        assertEquals("FK_EMP_COMP", fk.path("name").asText());
+        assertEquals("COMP_MST", fk.path("refTable").asText());
+        assertEquals(List.of("COMP_CD"), strings(fk.path("columns")));
+        assertEquals(List.of("COMP_CD"), strings(fk.path("refColumns")));
+        assertEquals("CASCADE", fk.path("onDelete").asText());
+
+        JsonNode comp = describe("comp_mst").structured();
+        JsonNode ref = comp.path("referencedBy").get(0);
+        assertEquals("EMP", ref.path("table").asText());
+        assertEquals("FK_EMP_COMP", ref.path("name").asText());
+        assertEquals(0, comp.path("foreignKeys").size());
+    }
+
+    /** comp_mst used as a LIKE pattern also matches compxmst — its column must not appear here. */
+    @Test
+    void doesNotLeakColumnsOfATableMatchingTheNameAsAWildcard() {
+        JsonNode s = describe("comp_mst").structured();
+
+        for (JsonNode c : s.path("columns")) {
+            assertFalse(c.path("name").asText().equals("TRAP_COL"), s.path("columns").toString());
+        }
+        assertEquals(3, s.path("columns").size());
+    }
+
+    @Test
+    void acceptsQuotedAndCurrentDatabaseQualifiedNames() {
+        String current = new ListTablesTool(mapper, new DbMetadataReader(database))
+                .call(mapper.createObjectNode(), null).structured().path("database").asText();
+
+        assertEquals("COMP_MST", describe("`comp_mst`").structured().path("table").asText());
+        assertEquals("COMP_MST", describe("\"COMP_MST\"").structured().path("table").asText());
+        assertEquals("COMP_MST", describe(current.toLowerCase() + ".comp_mst").structured().path("table").asText());
+    }
+
+    @Test
+    void describesViewsWithoutKeys() {
+        McpToolResult result = describe("v_active_comp");
+
+        DbFixtures.assertSatisfiesOutputSchema(tool, result);
+        JsonNode s = result.structured();
+        assertEquals("view", s.path("type").asText());
+        assertEquals(2, s.path("columns").size());
+        assertFalse(s.has("primaryKey"), "primaryKey is optional in the schema precisely for this case");
+        assertEquals(0, s.path("indexes").size());
+    }
+
+    @Test
+    void missingTableErrorsWithCloseNamesAndAPointerToListTables() {
+        McpToolResult result = describe("comp");
+
+        assertTrue(result.isError());
+        assertTrue(result.text().contains("COMP_MST"), result.text());
+        assertTrue(result.text().contains("amoeba.list_tables"), result.text());
+    }
+
+    /** Another database cannot be reached by qualifying the name — the scope never widens. */
+    @Test
+    void otherDatabasesAreNotReachableByQualifying() {
+        McpToolResult result = describe("information_schema.tables");
+
+        assertTrue(result.isError(), result.text());
+    }
+
+    /** Two tables differing only in case: an exact name wins, a case-folded one must not guess. */
+    @Test
+    void caseOnlyTwinsResolveExactlyOrRefuseToGuess() {
+        DbFixtures.exec(database, "CREATE TABLE \"Dup\" (a INT)", "CREATE TABLE \"DUP\" (b INT)");
+
+        assertEquals("A", describe("Dup").structured().path("columns").get(0).path("name").asText());
+        assertEquals("B", describe("DUP").structured().path("columns").get(0).path("name").asText());
+
+        McpToolResult ambiguous = describe("dup");
+        assertTrue(ambiguous.isError());
+        assertTrue(ambiguous.text().contains("Dup") && ambiguous.text().contains("DUP"), ambiguous.text());
+    }
+
+    @Test
+    void textSummaryReadsLikeADefinition() {
+        String text = describe("emp").text();
+
+        assertTrue(text.contains("EMP [table]"), text);
+        assertTrue(text.contains("Primary key: (EMP_ID)"), text);
+        assertTrue(text.contains("-> COMP_MST (COMP_CD) ON DELETE CASCADE"), text);
+    }
+}

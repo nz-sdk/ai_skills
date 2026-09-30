@@ -3,11 +3,14 @@
 // What it pins that the H2 tests cannot: Connector/J reports table AND column comments through DatabaseMetaData
 // with the shared connection URL unchanged (DbMetadataReader has no information_schema fallback and relies on
 // exactly this), Korean comments survive the round trip, MySQL's literal "VIEW" comment on views is dropped, its
-// PRIMARY index is folded into primaryKey, and the foreign-key rules map.
+// PRIMARY index is folded into primaryKey, and the foreign-key rules map. Also the one path H2 cannot exercise:
+// moving to ANOTHER database (catalog) with `database`, and refusing MySQL's system databases. That needs CREATE
+// DATABASE, so with a less privileged account only that test self-skips.
 //
 // SELF-SKIPS unless DB_TOOLS_TEST_URL is set, so `./gradlew test` stays offline — the same deliberate skip the
 // source/ bundle's RealDescriptorLayoutTest uses. Point it at a DISPOSABLE database (a throwaway local container),
-// never a shared one: it creates two zz_dbtools_probe_* tables and a view, and drops them again.
+// never a shared one: it creates two zz_dbtools_probe_* tables, a view and a zz_dbtools_probe_other database, and
+// drops them again.
 //
 //   docker run -d --name dbtools-probe -e MYSQL_ROOT_PASSWORD=pw -e MYSQL_DATABASE=probe -p 13306:3306 mysql:8.4
 //   DB_TOOLS_TEST_URL='jdbc:mysql://127.0.0.1:13306/probe?allowPublicKeyRetrieval=true&useSSL=false' \
@@ -41,8 +44,10 @@ class LiveMetadataTest {
     private static final String PARENT = "zz_dbtools_probe_parent";
     private static final String CHILD = "zz_dbtools_probe_child";
     private static final String VIEW = "zz_dbtools_probe_view";
+    private static final String OTHER_DB = "zz_dbtools_probe_other";
 
     private static DataSource database;
+    private static boolean otherDatabaseCreated;
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -73,6 +78,17 @@ class LiveMetadataTest {
                         + " (id) ON DELETE CASCADE"
                         + ") COMMENT='DB 도구 검증용 임시 자식'",
                 "CREATE VIEW " + VIEW + " AS SELECT id, code FROM " + PARENT);
+        try {
+            DbFixtures.exec(database, "CREATE DATABASE " + OTHER_DB,
+                    "CREATE TABLE " + OTHER_DB + ".ledger ("
+                            + " id BIGINT NOT NULL,"
+                            + " amount DECIMAL(12,2) COMMENT '금액',"
+                            + " PRIMARY KEY (id)"
+                            + ") COMMENT='다른 DB 의 원장'");
+            otherDatabaseCreated = true;
+        } catch (IllegalStateException e) {
+            otherDatabaseCreated = false;   // no CREATE privilege — the cross-database test skips itself
+        }
     }
 
     @AfterAll
@@ -80,6 +96,11 @@ class LiveMetadataTest {
         if (database != null) {
             DbFixtures.exec(database, "DROP VIEW IF EXISTS " + VIEW,
                     "DROP TABLE IF EXISTS " + CHILD, "DROP TABLE IF EXISTS " + PARENT);
+            try {
+                DbFixtures.exec(database, "DROP DATABASE IF EXISTS " + OTHER_DB);
+            } catch (IllegalStateException e) {
+                // no DROP privilege means there was no CREATE privilege either — nothing to clean up
+            }
         }
     }
 
@@ -118,6 +139,44 @@ class LiveMetadataTest {
         JsonNode ref = s.path("referencedBy").get(0);
         assertEquals(CHILD, ref.path("table").asText());
         assertEquals("CASCADE", ref.path("onDelete").asText());
+    }
+
+    @Test
+    void anotherDatabaseIsOfferedListedAndDescribed() {
+        assumeTrue(otherDatabaseCreated, "account cannot CREATE DATABASE — cross-database check skipped");
+        ListTablesTool list = new ListTablesTool(mapper, new DbMetadataReader(database));
+        DescribeTableTool describe = new DescribeTableTool(mapper, new DbMetadataReader(database));
+
+        List<String> offered = strings(list.call(mapper.createObjectNode(), null).structured().path("databases"));
+        assertTrue(offered.contains(OTHER_DB), offered.toString());
+        assertFalse(offered.contains("mysql") || offered.contains("information_schema"), offered.toString());
+
+        JsonNode listed = list.call(mapper.createObjectNode().put("database", OTHER_DB), null).structured();
+        assertEquals(OTHER_DB, listed.path("database").asText());
+        assertEquals(1, listed.path("totalCount").asInt(), listed.toString());
+        assertEquals("다른 DB 의 원장", listed.path("tables").get(0).path("comment").asText());
+
+        McpToolResult byArgument = describe.call(
+                mapper.createObjectNode().put("table", "ledger").put("database", OTHER_DB), null);
+        DbFixtures.assertSatisfiesOutputSchema(describe, byArgument);
+        assertEquals("금액", byArgument.structured().path("columns").get(1).path("comment").asText());
+        assertEquals(List.of("id"), strings(byArgument.structured().path("primaryKey").path("columns")));
+
+        JsonNode byQualifier = describe.call(
+                mapper.createObjectNode().put("table", OTHER_DB + ".ledger"), null).structured();
+        assertEquals(OTHER_DB, byQualifier.path("database").asText());
+    }
+
+    @Test
+    void systemDatabasesAreRefusedEvenThoughTheAccountSeesThem() {
+        ListTablesTool list = new ListTablesTool(mapper, new DbMetadataReader(database));
+        DescribeTableTool describe = new DescribeTableTool(mapper, new DbMetadataReader(database));
+
+        McpToolResult listed = list.call(mapper.createObjectNode().put("database", "mysql"), null);
+        assertTrue(listed.isError() && listed.text().contains("system"), listed.text());
+
+        McpToolResult qualified = describe.call(mapper.createObjectNode().put("table", "mysql.user"), null);
+        assertTrue(qualified.isError() && qualified.text().contains("system"), qualified.text());
     }
 
     private static List<String> strings(JsonNode array) {

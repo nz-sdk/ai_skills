@@ -99,6 +99,19 @@ class DbToolRegistrationTest {
         }
     }
 
+    /** Both tools take the same optional location arguments, so a listing and a describe can point at one place. */
+    @Test
+    void everyToolAcceptsADatabaseAndASchema() {
+        for (McpTool tool : tools()) {
+            JsonNode properties = tool.inputSchema().path("properties");
+            assertTrue(properties.has("database") && properties.has("schema"), tool.name());
+            for (JsonNode required : tool.inputSchema().path("required")) {
+                assertFalse(required.asText().equals("database") || required.asText().equals("schema"),
+                        () -> tool.name() + " must keep the location optional — absent means the current one");
+            }
+        }
+    }
+
     /** Neither tool may accept SQL — that is the property the whole bundle is built on. */
     @Test
     void noToolTakesSql() {

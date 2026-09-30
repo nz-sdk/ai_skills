@@ -20,6 +20,7 @@ import {{PKG}}.db.DbMetadataReader.Location;
 import {{PKG}}.db.DbMetadataReader.Lookup;
 import {{PKG}}.db.DbMetadataReader.NotFound;
 import {{PKG}}.db.DbMetadataReader.TableDetail;
+import {{PKG}}.db.DbMetadataReader.UnknownLocation;
 
 import org.htcom.protean.mcp.McpCallContext;
 import org.htcom.protean.mcp.McpTool;
@@ -55,12 +56,13 @@ public class DescribeTableTool implements McpTool {
 
     @Override
     public String description() {
-        return "Returns one table's or view's definition from the database this server's modules use: columns in "
-                + "order (type, nullability, default, auto-increment, comment), the primary key, unique and "
-                + "non-unique indexes, the foreign keys it declares and those pointing at it. Takes a table name, "
-                + "never SQL, and returns no rows. The name is matched exactly, then case-insensitively; on a miss "
-                + "the error lists close names (or call amoeba.list_tables). Check real column names and unique "
-                + "keys here before writing mapper SQL or DDL.";
+        return "Returns one table's or view's definition: columns in order (type, nullability, default, "
+                + "auto-increment, comment), the primary key, unique and non-unique indexes, the foreign keys it "
+                + "declares and those pointing at it. The table is looked up in the database this server's modules "
+                + "use unless 'database' (or a 'db.table' name) picks another one the server's DB account can see — "
+                + "system databases are refused. Takes a table name, never SQL, and returns no rows. The name is "
+                + "matched exactly, then case-insensitively; on a miss the error lists close names (or call "
+                + "amoeba.list_tables). Check real column names and unique keys here before writing mapper SQL or DDL.";
     }
 
     /** A pure read. Leaving this at the SPI's CUSTOM default would demand mcp.admin. */
@@ -89,8 +91,9 @@ public class DescribeTableTool implements McpTool {
         p.putObject("table").put("type", "string")
                 .put("minLength", 1)
                 .put("maxLength", DbToolSchemas.MAX_NAME_LENGTH)
-                .put("description", "Table or view name, e.g. 'comp_mst'. Quotes/backticks and a prefix naming "
-                        + "the current database are accepted; other databases are not visible.");
+                .put("description", "Table or view name, e.g. 'comp_mst'. Quotes/backticks are accepted, and a "
+                        + "'db.table' prefix selects that database when 'database' is not given.");
+        DbToolSchemas.putLocationArgs(p);
         schema.putArray("required").add("table");
         return schema;
     }
@@ -184,7 +187,7 @@ public class DescribeTableTool implements McpTool {
 
         Lookup lookup;
         try {
-            lookup = reader.describe(table);
+            lookup = reader.describe(table, DbToolSchemas.text(args, "database"), DbToolSchemas.text(args, "schema"));
         } catch (SQLException e) {
             return McpToolResult.error("database metadata read failed: [" + e.getSQLState() + "] "
                     + e.getMessage());
@@ -195,6 +198,7 @@ public class DescribeTableTool implements McpTool {
             case Ambiguous ambiguous -> McpToolResult.error("table '" + table + "' matches more than one table "
                     + "when case is ignored: " + String.join(", ", ambiguous.names())
                     + ". Call again with the exact name.");
+            case UnknownLocation unknown -> McpToolResult.error(unknown.message());
             case NotFound notFound -> McpToolResult.error("table '" + table + "' does not exist in "
                     + ListTablesTool.where(notFound.location())
                     + (notFound.candidates().isEmpty()

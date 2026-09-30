@@ -108,6 +108,72 @@ class ListTablesToolTest {
         assertTrue(text.contains("COMP_MST") && text.contains("회사 마스터"), text);
     }
 
+    private static List<String> strings(JsonNode array) {
+        List<String> out = new ArrayList<>();
+        array.forEach(n -> out.add(n.asText()));
+        return out;
+    }
+
+    /** The response says what else could be opened, so a caller picks a name instead of guessing one. */
+    @Test
+    void reportsTheDatabasesAndSchemasItCouldOpen() {
+        JsonNode s = tool.call(mapper.createObjectNode(), null).structured();
+
+        assertEquals(List.of(s.path("database").asText()), strings(s.path("databases")),
+                "H2 has exactly one catalog per database");
+        List<String> schemas = strings(s.path("schemas"));
+        assertTrue(schemas.contains(DbFixtures.OTHER_SCHEMA) && schemas.contains("PUBLIC"), schemas.toString());
+        assertFalse(schemas.contains("INFORMATION_SCHEMA"), "system schemas are never offered");
+    }
+
+    @Test
+    void schemaArgumentListsAnotherLocation() {
+        ObjectNode args = mapper.createObjectNode().put("schema", "other_app");
+        McpToolResult result = tool.call(args, null);
+
+        DbFixtures.assertSatisfiesOutputSchema(tool, result);
+        JsonNode s = result.structured();
+        assertEquals(DbFixtures.OTHER_SCHEMA, s.path("schema").asText(), "the stored name comes back");
+        assertEquals(List.of("COMP_MST"), names(s));
+        assertEquals("다른 앱의 테이블", s.path("tables").get(0).path("comment").asText());
+    }
+
+    /** Naming the current database explicitly must not drop the current schema and land somewhere else. */
+    @Test
+    void currentDatabaseNamedExplicitlyBehavesLikeTheDefault() {
+        JsonNode byDefault = tool.call(mapper.createObjectNode(), null).structured();
+        ObjectNode args = mapper.createObjectNode()
+                .put("database", byDefault.path("database").asText().toLowerCase());
+
+        JsonNode explicit = tool.call(args, null).structured();
+        assertEquals(names(byDefault), names(explicit));
+        assertEquals("PUBLIC", explicit.path("schema").asText());
+    }
+
+    @Test
+    void unknownDatabaseOrSchemaErrorsWithTheVisibleNames() {
+        McpToolResult noDb = tool.call(mapper.createObjectNode().put("database", "nope"), null);
+        assertTrue(noDb.isError());
+        String current = tool.call(mapper.createObjectNode(), null).structured().path("database").asText();
+        assertTrue(noDb.text().contains(current), noDb.text());
+
+        McpToolResult noSchema = tool.call(mapper.createObjectNode().put("schema", "nope"), null);
+        assertTrue(noSchema.isError());
+        assertTrue(noSchema.text().contains(DbFixtures.OTHER_SCHEMA), noSchema.text());
+    }
+
+    /** Refused by name, before any lookup — even where the account could see them. */
+    @Test
+    void systemNamespacesAreRefused() {
+        McpToolResult schema = tool.call(mapper.createObjectNode().put("schema", "information_schema"), null);
+        assertTrue(schema.isError());
+        assertTrue(schema.text().contains("system"), schema.text());
+
+        McpToolResult database = tool.call(mapper.createObjectNode().put("database", "mysql"), null);
+        assertTrue(database.isError());
+        assertTrue(database.text().contains("system"), database.text());
+    }
+
     @Test
     void classifiesAsReadSoItStaysOnMcpRead() {
         assertEquals(ModuleActionAuthorizer.ModuleAction.READ, tool.action());

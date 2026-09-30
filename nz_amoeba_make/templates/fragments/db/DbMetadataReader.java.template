@@ -2,9 +2,11 @@
 //
 // This is what the two tools share, and where every vendor quirk is absorbed so the tools stay thin:
 //
-//   · SCOPE IS THE CURRENT DATABASE ONLY. Catalog and schema come from the connection itself (getCatalog/getSchema)
-//     and no argument can move them, so the tools cannot be pointed at mysql.* or another tenant's database even
-//     where the DB account's grants would allow it.
+//   · SCOPE DEFAULTS TO THE CURRENT DATABASE. Catalog and schema come from the connection (getCatalog/getSchema)
+//     unless the caller names another one; `database`/`schema` are then resolved against getCatalogs()/getSchemas(),
+//     i.e. against what the DB ACCOUNT can see. That account's grants are the real boundary — what SHOW DATABASES
+//     would not show, these tools cannot open either. System namespaces (SYSTEM_NAMESPACES) are refused outright
+//     even when visible: their structure is the server's, not an application's.
 //   · NAMES ARE RESOLVED IN JAVA. The full table list is read once and the requested name matched exactly, then
 //     case-insensitively — H2 folds unquoted names to upper case, PostgreSQL to lower case, and MySQL on Linux keeps
 //     them case-sensitive, so no single case rule works across vendors.
@@ -36,6 +38,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 
 @Component
@@ -43,6 +46,14 @@ public class DbMetadataReader {
 
     /** Close names offered back when a requested table does not exist. */
     static final int MAX_CANDIDATES = 10;
+
+    /**
+     * Namespaces never opened, compared case-insensitively: MySQL's mysql · information_schema · performance_schema
+     * · sys, PostgreSQL's pg_catalog · pg_toast (and information_schema), H2's INFORMATION_SCHEMA. They are also left
+     * out of the visible names the tools report, so an agent is never offered one.
+     */
+    static final Set<String> SYSTEM_NAMESPACES =
+            Set.of("information_schema", "mysql", "performance_schema", "sys", "pg_catalog", "pg_toast");
 
     private final DataSource dataSource;
 
@@ -94,7 +105,12 @@ public class DbMetadataReader {
     public record TableSummary(String name, TableType type, String comment) {
     }
 
-    public record TableList(Location location, List<TableSummary> tables) {
+    /**
+     * The tables of one location, plus the other databases and schemas the account could open — so a caller picks
+     * a name instead of guessing one. System namespaces are never in either list.
+     */
+    public record TableList(Location location, List<TableSummary> tables, List<String> databases,
+                            List<String> schemas) implements Listing {
     }
 
     public record Column(String name, int position, String type, Integer size, Integer scale, boolean nullable,
@@ -120,8 +136,27 @@ public class DbMetadataReader {
                               List<Index> indexes, List<ForeignKey> foreignKeys, List<ForeignKey> referencedBy) {
     }
 
+    /** Outcome of listing a location. */
+    public sealed interface Listing permits TableList, UnknownLocation {
+    }
+
     /** Outcome of resolving a caller-typed name against the tables that actually exist. */
-    public sealed interface Lookup permits Found, NotFound, Ambiguous {
+    public sealed interface Lookup permits Found, NotFound, Ambiguous, UnknownLocation {
+    }
+
+    /**
+     * A requested database or schema that cannot be opened: not visible to the account, or a system namespace.
+     * {@code visible} is what could have been asked for instead.
+     */
+    public record UnknownLocation(String kind, String requested, boolean system, List<String> visible)
+            implements Listing, Lookup {
+
+        public String message() {
+            String head = system
+                    ? kind + " '" + requested + "' is a system " + kind + " and is not visible through these tools"
+                    : kind + " '" + requested + "' is not visible to this server's database account";
+            return head + (visible.isEmpty() ? "." : ". Visible " + kind + "s: " + String.join(", ", visible) + ".");
+        }
     }
 
     public record Found(TableDetail detail) implements Lookup {
@@ -135,34 +170,72 @@ public class DbMetadataReader {
 
     // ---- reads --------------------------------------------------------------------------------------------
 
-    /** Every table and view of the current database, sorted by name. */
-    public TableList listTables() throws SQLException {
+    /**
+     * Every table and view of a location, sorted by name. {@code database}/{@code schema} are optional; null means
+     * the connection's current one.
+     */
+    public Listing listTables(String database, String schema) throws SQLException {
         try (Connection conn = dataSource.getConnection()) {
-            Location location = locate(conn);
-            return new TableList(location, readTables(conn, location));
+            DatabaseMetaData meta = conn.getMetaData();
+            Resolved resolved = locate(conn, meta, database, schema);
+            if (resolved.failure() != null) {
+                return resolved.failure();
+            }
+            Location location = resolved.location();
+            return new TableList(location, readTables(conn, location), visible(catalogs(meta)),
+                    visible(schemas(meta, location.database())));
         }
     }
 
-    public Lookup describe(String requested) throws SQLException {
+    /**
+     * One table's definition. The name may carry a qualifier: the chosen location's own database/schema is simply
+     * stripped, and — only when neither {@code database} nor {@code schema} was given — another visible database
+     * (then schema) moves the lookup there. A system qualifier is refused rather than reported as "no such table".
+     */
+    public Lookup describe(String requested, String database, String schema) throws SQLException {
         try (Connection conn = dataSource.getConnection()) {
-            Location location = locate(conn);
-            List<TableSummary> tables = readTables(conn, location);
-            String wanted = normalizeRequested(requested, location);
+            DatabaseMetaData meta = conn.getMetaData();
+            Resolved resolved = locate(conn, meta, database, schema);
+            if (resolved.failure() != null) {
+                return resolved.failure();
+            }
+            Location location = resolved.location();
 
-            List<TableSummary> exact = tables.stream().filter(t -> t.name().equals(wanted)).toList();
+            String wanted = unquote(requested.strip());
+            int dot = wanted.indexOf('.');
+            if (dot > 0) {
+                String qualifier = unquote(wanted.substring(0, dot));
+                String rest = unquote(wanted.substring(dot + 1));
+                if (qualifier.equalsIgnoreCase(location.database()) || qualifier.equalsIgnoreCase(location.schema())) {
+                    wanted = rest;
+                } else if (isSystem(qualifier)) {
+                    return new UnknownLocation("database", qualifier, true, visible(catalogs(meta)));
+                } else if (database == null && schema == null) {
+                    Location moved = locateQualifier(conn, meta, qualifier);
+                    if (moved != null) {
+                        location = moved;
+                        wanted = rest;
+                    }
+                }
+            }
+            String name = wanted;
+
+            List<TableSummary> tables = readTables(conn, location);
+
+            List<TableSummary> exact = tables.stream().filter(t -> t.name().equals(name)).toList();
             List<TableSummary> matches = exact.isEmpty()
-                    ? tables.stream().filter(t -> t.name().equalsIgnoreCase(wanted)).toList()
+                    ? tables.stream().filter(t -> t.name().equalsIgnoreCase(name)).toList()
                     : exact;
             if (matches.size() > 1) {
                 return new Ambiguous(matches.stream().map(TableSummary::name).toList());
             }
             if (matches.isEmpty()) {
-                String lower = wanted.toLowerCase(Locale.ROOT);
+                String lower = name.toLowerCase(Locale.ROOT);
                 List<String> candidates = tables.stream()
                         .map(TableSummary::name)
                         .filter(n -> {
-                            String name = n.toLowerCase(Locale.ROOT);
-                            return name.contains(lower) || lower.contains(name);
+                            String candidate = n.toLowerCase(Locale.ROOT);
+                            return candidate.contains(lower) || lower.contains(candidate);
                         })
                         .limit(MAX_CANDIDATES)
                         .toList();
@@ -174,7 +247,15 @@ public class DbMetadataReader {
 
     // ---- internals ----------------------------------------------------------------------------------------
 
-    private static Location locate(Connection conn) throws SQLException {
+    /** A resolved location, or why the requested one cannot be opened. Exactly one side is non-null. */
+    private record Resolved(Location location, UnknownLocation failure) {
+    }
+
+    static boolean isSystem(String name) {
+        return name != null && SYSTEM_NAMESPACES.contains(name.toLowerCase(Locale.ROOT));
+    }
+
+    private static Location current(Connection conn) throws SQLException {
         String schema;
         try {
             schema = conn.getSchema();
@@ -185,20 +266,95 @@ public class DbMetadataReader {
     }
 
     /**
-     * Accepts the forms an agent naturally types: {@code comp_mst}, {@code `comp_mst`}, {@code "comp_mst"}, and a
-     * name qualified with the CURRENT database or schema. Any other qualifier is left in place, so it simply does
-     * not match — the scope never widens.
+     * Resolves the optional {@code database}/{@code schema} against what the account can see. A database other than
+     * the current one drops the current schema (MySQL has no schema level; PostgreSQL cannot leave its database), the
+     * current one named explicitly keeps it.
      */
-    private static String normalizeRequested(String requested, Location location) {
-        String name = unquote(requested.strip());
-        int dot = name.indexOf('.');
-        if (dot > 0) {
-            String qualifier = unquote(name.substring(0, dot));
-            if (qualifier.equalsIgnoreCase(location.database()) || qualifier.equalsIgnoreCase(location.schema())) {
-                name = unquote(name.substring(dot + 1));
+    private static Resolved locate(Connection conn, DatabaseMetaData meta, String database, String schema)
+            throws SQLException {
+        Location current = current(conn);
+        String catalog = current.database();
+        String sch = current.schema();
+        if (database != null) {
+            List<String> all = catalogs(meta);
+            if (isSystem(database)) {
+                return new Resolved(null, new UnknownLocation("database", database, true, visible(all)));
+            }
+            String found = match(all, database);
+            if (found == null) {
+                return new Resolved(null, new UnknownLocation("database", database, false, visible(all)));
+            }
+            if (!found.equals(catalog)) {
+                sch = null;
+            }
+            catalog = found;
+        }
+        if (schema != null) {
+            List<String> all = schemas(meta, catalog);
+            if (isSystem(schema)) {
+                return new Resolved(null, new UnknownLocation("schema", schema, true, visible(all)));
+            }
+            String found = match(all, schema);
+            if (found == null) {
+                return new Resolved(null, new UnknownLocation("schema", schema, false, visible(all)));
+            }
+            sch = found;
+        }
+        return new Resolved(new Location(catalog, sch), null);
+    }
+
+    /** A table-name qualifier naming another visible database, else another visible schema; null when neither. */
+    private static Location locateQualifier(Connection conn, DatabaseMetaData meta, String qualifier)
+            throws SQLException {
+        if (match(visible(catalogs(meta)), qualifier) != null) {
+            return locate(conn, meta, qualifier, null).location();
+        }
+        Location current = current(conn);
+        if (match(visible(schemas(meta, current.database())), qualifier) != null) {
+            return locate(conn, meta, null, qualifier).location();
+        }
+        return null;
+    }
+
+    private static List<String> catalogs(DatabaseMetaData meta) throws SQLException {
+        List<String> names = new ArrayList<>();
+        try (ResultSet rs = meta.getCatalogs()) {
+            while (rs.next()) {
+                names.add(rs.getString("TABLE_CAT"));
             }
         }
-        return name;
+        return names;
+    }
+
+    /** Schemas of one catalog. MySQL (databaseTerm=CATALOG) reports none, which is correct: it has no such level. */
+    private static List<String> schemas(DatabaseMetaData meta, String catalog) throws SQLException {
+        List<String> names = new ArrayList<>();
+        try (ResultSet rs = meta.getSchemas(catalog, null)) {
+            while (rs.next()) {
+                names.add(rs.getString("TABLE_SCHEM"));
+            }
+        }
+        return names;
+    }
+
+    /** Sorted, without blanks and without system namespaces — the names worth offering to a caller. */
+    private static List<String> visible(List<String> names) {
+        return names.stream()
+                .filter(n -> n != null && !n.isBlank() && !isSystem(n))
+                .distinct()
+                .sorted(Comparator.comparing((String n) -> n.toLowerCase(Locale.ROOT)).thenComparing(n -> n))
+                .toList();
+    }
+
+    /** Exact name first; otherwise the single case-insensitive match. Two case-only twins match neither way. */
+    private static String match(List<String> names, String requested) {
+        for (String n : names) {
+            if (n != null && n.equals(requested)) {
+                return n;
+            }
+        }
+        List<String> ci = names.stream().filter(n -> n != null && n.equalsIgnoreCase(requested)).toList();
+        return ci.size() == 1 ? ci.get(0) : null;
     }
 
     private static String unquote(String s) {

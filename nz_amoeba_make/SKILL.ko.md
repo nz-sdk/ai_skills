@@ -173,10 +173,11 @@ AskUserQuestion 은 질문당 선택지 4개가 상한이므로, 나누기를 �
 4. **총 개수와 현재 위치를 미리 밝힌다** — "여기 적용 가능한 확장 기능 — 7개 중 1/2". 개수를 밝히지 않으면
    사용자는 아직 남은 것이 있는지 알 수 없고, 그것이 누락을 막는 유일한 실질적 장치다.
 
-워크드 예시, in-process + MCP 활성(흔한 경우): 7개가 남는다 — `custom_mcp_tool`, `builtin_tool_override`,
-`module_source_tools`, `code_rule`, `authorizer`, `interface_spec_validator`, `unload_callback` → 두 질문, 4 + 3.
-(`db_dialect`/`scope_admin` 은 `worker.db.auto-provision` 이 필요하고 `module_store_dialect` 는 jdbc
-module-store 백엔드가 필요하므로, 셋 다 걸러진다.)
+워크드 예시, in-process + MCP 활성 + 데이터 접근(흔한 경우): 8개가 남는다 — `custom_mcp_tool`,
+`builtin_tool_override`, `module_source_tools`, `db_metadata_tools`, `code_rule`, `authorizer`,
+`interface_spec_validator`, `unload_callback` → 두 질문, 4 + 4. (`db_metadata_tools` 는 `data_access` 가
+필요하므로 데이터 접근이 없으면 빠진다 → 4 + 3. `db_dialect`/`scope_admin` 은 `worker.db.auto-provision` 이
+필요하고 `module_store_dialect` 는 jdbc module-store 백엔드가 필요하므로, 셋 다 걸러진다.)
 
 여기 적힌 숫자를 믿지 말고 yaml 을 세라 — capability 가 추가될 때마다 개수가 움직이고, 낡은 총계는 바로 규칙 4가
 막으려는 그 실패다.

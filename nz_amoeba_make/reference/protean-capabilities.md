@@ -218,6 +218,7 @@ On each selection the skill auto-includes companions, asks follow-ups, or inject
 |---|---|---|
 | custom / override MCP tool | `mcp.enabled=true` | MCP config absent otherwise → tool never collected |
 | `interface_spec_validator` | nothing (core is JDK + Jackson annotations only); its example MCP tool member is gated by `mcp.enabled=true` | Consumer code, not a protean SPI. Emitted as a fragment BUNDLE into `{{PKG}}.interfacedef` — members reference each other, so they are not renamed. See "Checking a declared interface" |
+| `db_metadata_tools` | `mcp.enabled=true` + `data_access` (the host `DataSource` and `spring-boot-starter-jdbc`) | Consumer code, not a protean SPI — protean has no schema-lookup tool, so without it the only read path is deploying a throwaway module. Bundle into `{{PKG}}.db`: `amoeba.list_tables` / `amoeba.describe_table` read JDBC `DatabaseMetaData` of the current database only, take no SQL, return no rows. Both override `action()`→`READ`; left at `CUSTOM` they would demand `mcp.admin` |
 | `mcp.debug.enabled` | `mcp.enabled=true` (+ idle-timeout 30m default) | debug is a sub-gate of the MCP surface |
 | `mcp.strict-schema` | `runtimeOnly 'com.networknt:json-schema-validator'` | core keeps it compileOnly; absent → silent degrade |
 | `mcp.authorization.resource` | consumer `SecurityConfig` `permitAll` + 401 `resource_metadata` | protean does not implement auth; delegates |

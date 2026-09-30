@@ -680,6 +680,59 @@ capabilities:
           compiles either way.
       The bundle adds no build_deps at all: Jackson comes with spring-boot-starter-web and Mockito with
       spring-boot-starter-test; javac comes from the JDK the sample already requires.
+  - id: db_metadata_tools
+    title: Database schema/table lookup tools (amoeba.list_tables / describe_table)
+    requires: [protean.mcp.enabled=true, data_access]
+    fragment_bundle:
+      dir: db
+      package: "{{PKG}}.db"
+      rename: false
+      files:
+        - { src: DbToolSchemas.java.template,          to: main }
+        - { src: DbMetadataReader.java.template,       to: main }
+        - { src: ListTablesTool.java.template,         to: main }
+        - { src: DescribeTableTool.java.template,      to: main }
+        - { src: DbFixtures.java.template,             to: test }
+        - { src: ListTablesToolTest.java.template,     to: test }
+        - { src: DescribeTableToolTest.java.template,  to: test }
+        - { src: DbToolRegistrationTest.java.template, to: test }
+        - { src: LiveMetadataTest.java.template,       to: test }
+    desc: >-
+      Two @Component McpTools that show the structure of the host database over MCP, on mcp.read. Without them an
+      agent that needs a column name has no read path at all, and ends up deploying a throwaway module that queries
+      information_schema and uninstalling it again. amoeba.list_tables lists tables and views with their comments
+      (its `pattern` matches the name OR the comment, so a concept word finds a Korean-commented table);
+      amoeba.describe_table returns one table's columns (type, nullability, default, auto-increment, comment), its
+      primary key, unique and non-unique indexes, and foreign keys in both directions.
+    note: >-
+      NO SQL IN, NO ROWS OUT — THAT IS THE DESIGN. Both tools take names only and read JDBC DatabaseMetaData, so
+      there is no injection surface and no business data can leave. Scope is pinned to the connection's current
+      catalog/schema; no argument can point them at another database. Do not add a "query" argument to either — a
+      read-only SQL tool is a different capability with a different threat model (statement scanning, read-only
+      connection, row/time caps), not an extension of this one.
+
+      AUTHORIZATION IS ALREADY HANDLED, and that is load-bearing — same as module_source_tools. Both override
+      action() to READ (and annotations() to readOnly()); left at the SPI's CUSTOM default, reading a column name
+      would silently demand mcp.admin. DbToolRegistrationTest#everyToolClassifiesAsReadNotCustom pins it.
+
+      DbMetadataReader ABSORBS EVERY VENDOR QUIRK, each pinned by a test against a real driver (H2): names resolved
+      in Java (exact, then case-insensitive, refusing to guess between case-only twins); '_'/'%' escaped before a
+      name is used as a LIKE pattern AND rows filtered back to the exact name (without it comp_mst also returns
+      compxmst's columns); H2 2.x "BASE TABLE" normalized to table; the primary key's own index folded out of
+      `indexes`.
+
+      COMMENTS COME FROM THE DRIVER. Connector/J 9.x reports table and column REMARKS on MySQL 8.4 with the
+      connection URL unchanged — measured. There is deliberately no information_schema fallback (it would run on
+      every call against any database with one uncommented table), and the shared spring.datasource.url is not
+      touched (every deployed module uses it). LiveMetadataTest is what pins this; it SELF-SKIPS unless
+      DB_TOOLS_TEST_URL points at a disposable MySQL/MariaDB, so `./gradlew test` stays offline.
+
+      Known gap: ENUM/SET columns come back as ENUM/SET without their values — DatabaseMetaData does not expose them.
+
+      SELF-CONTAINED BY DESIGN, like module_source_tools: DbToolSchemas duplicates text/clampLimit/cursor instead of
+      importing SourceToolSchemas, because the two are independent optional capabilities. No build_deps: `requires:
+      data_access` guarantees spring-boot-starter-jdbc + a driver, and H2 (used by the tests through a JDBC URL,
+      never an org.h2 import) reaches the test runtime classpath through protean's own runtime-scope dependency.
   - id: code_rule
     title: Custom code-review rule (CodeRule SPI)
     requires: [protean.gate.review-enabled=true]

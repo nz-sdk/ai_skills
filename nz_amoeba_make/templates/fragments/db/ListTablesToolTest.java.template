@@ -1,0 +1,115 @@
+// Covers the tool as an MCP citizen (READ classification, output-schema conformance) and as a browser over a real
+// JDBC driver (H2): type normalization, name-or-comment filtering, and paging that actually round-trips.
+package {{PKG}}.db;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ListTablesToolTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final ListTablesTool tool = new ListTablesTool(mapper, new DbMetadataReader(DbFixtures.database()));
+
+    private static List<String> names(JsonNode structured) {
+        List<String> names = new ArrayList<>();
+        structured.path("tables").forEach(t -> names.add(t.path("name").asText()));
+        return names;
+    }
+
+    @Test
+    void listsTablesAndViewsOfTheCurrentSchemaOnly() {
+        McpToolResult result = tool.call(mapper.createObjectNode(), null);
+
+        DbFixtures.assertSatisfiesOutputSchema(tool, result);
+        List<String> names = names(result.structured());
+        assertEquals(List.of("COMP_MST", "COMPXMST", "EMP", "V_ACTIVE_COMP"), names,
+                "sorted by name; H2's INFORMATION_SCHEMA must not leak in");
+        assertEquals(DbFixtures.TABLE_COUNT + DbFixtures.VIEW_COUNT, result.structured().path("totalCount").asInt());
+        assertTrue(result.structured().hasNonNull("database"), "the location the tools are pinned to is reported");
+    }
+
+    /** H2 2.x says "BASE TABLE" where MySQL says "TABLE"; the wire value must not depend on the vendor. */
+    @Test
+    void normalizesVendorTableTypes() {
+        McpToolResult result = tool.call(mapper.createObjectNode(), null);
+
+        for (JsonNode t : result.structured().path("tables")) {
+            String expected = t.path("name").asText().startsWith("V_") ? "view" : "table";
+            assertEquals(expected, t.path("type").asText(), t.toString());
+        }
+    }
+
+    @Test
+    void filtersByType() {
+        ObjectNode args = mapper.createObjectNode();
+        args.putArray("types").add("view");
+
+        assertEquals(List.of("V_ACTIVE_COMP"), names(tool.call(args, null).structured()));
+
+        args.putArray("types").add("table");
+        assertEquals(DbFixtures.TABLE_COUNT, tool.call(args, null).structured().path("totalCount").asInt());
+    }
+
+    /** Agents are handed concepts, not table names — in a Korean schema the concept lives in the comment. */
+    @Test
+    void patternMatchesTheCommentAsWellAsTheName() {
+        ObjectNode byComment = mapper.createObjectNode().put("pattern", "회사");
+        McpToolResult result = tool.call(byComment, null);
+        assertEquals(List.of("COMP_MST"), names(result.structured()));
+        assertEquals("회사 마스터", result.structured().path("tables").get(0).path("comment").asText());
+
+        ObjectNode byName = mapper.createObjectNode().put("pattern", "emp");
+        assertEquals(List.of("EMP"), names(tool.call(byName, null).structured()), "case-insensitive on names");
+    }
+
+    /** The pattern is plain text: '_' must not act as a LIKE wildcard and pull in COMPXMST. */
+    @Test
+    void patternIsNotALikeExpression() {
+        ObjectNode args = mapper.createObjectNode().put("pattern", "comp_m");
+
+        assertEquals(List.of("COMP_MST"), names(tool.call(args, null).structured()));
+    }
+
+    @Test
+    void pagesWithACursorThatRoundTrips() {
+        ObjectNode first = mapper.createObjectNode().put("limit", 3);
+        JsonNode page1 = tool.call(first, null).structured();
+        assertEquals(3, page1.path("tables").size());
+        assertTrue(page1.hasNonNull("nextCursor"));
+
+        ObjectNode second = mapper.createObjectNode().put("limit", 3)
+                .put("cursor", page1.path("nextCursor").asText());
+        JsonNode page2 = tool.call(second, null).structured();
+        assertEquals(1, page2.path("tables").size());
+        assertFalse(page2.has("nextCursor"), "the last page must not advertise more");
+
+        List<String> all = new ArrayList<>(names(page1));
+        all.addAll(names(page2));
+        assertEquals(DbFixtures.TABLE_COUNT + DbFixtures.VIEW_COUNT, new HashSet<>(all).size(), all.toString());
+    }
+
+    @Test
+    void textSummaryCarriesNamesAndComments() {
+        String text = tool.call(mapper.createObjectNode(), null).text();
+
+        assertTrue(text.contains("COMP_MST") && text.contains("회사 마스터"), text);
+    }
+
+    @Test
+    void classifiesAsReadSoItStaysOnMcpRead() {
+        assertEquals(ModuleActionAuthorizer.ModuleAction.READ, tool.action());
+    }
+}

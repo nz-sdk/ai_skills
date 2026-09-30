@@ -1,0 +1,128 @@
+// The one layer H2 cannot stand in for: Connector/J against a real MySQL/MariaDB.
+//
+// What it pins that the H2 tests cannot: Connector/J reports table AND column comments through DatabaseMetaData
+// with the shared connection URL unchanged (DbMetadataReader has no information_schema fallback and relies on
+// exactly this), Korean comments survive the round trip, MySQL's literal "VIEW" comment on views is dropped, its
+// PRIMARY index is folded into primaryKey, and the foreign-key rules map.
+//
+// SELF-SKIPS unless DB_TOOLS_TEST_URL is set, so `./gradlew test` stays offline — the same deliberate skip the
+// source/ bundle's RealDescriptorLayoutTest uses. Point it at a DISPOSABLE database (a throwaway local container),
+// never a shared one: it creates two zz_dbtools_probe_* tables and a view, and drops them again.
+//
+//   docker run -d --name dbtools-probe -e MYSQL_ROOT_PASSWORD=pw -e MYSQL_DATABASE=probe -p 13306:3306 mysql:8.4
+//   DB_TOOLS_TEST_URL='jdbc:mysql://127.0.0.1:13306/probe?allowPublicKeyRetrieval=true&useSSL=false' \
+//     DB_TOOLS_TEST_USER=root DB_TOOLS_TEST_PASSWORD=pw ./gradlew test --tests '*LiveMetadataTest'
+//   docker rm -f dbtools-probe
+package {{PKG}}.db;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpToolResult;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+class LiveMetadataTest {
+
+    private static final String PARENT = "zz_dbtools_probe_parent";
+    private static final String CHILD = "zz_dbtools_probe_child";
+    private static final String VIEW = "zz_dbtools_probe_view";
+
+    private static DataSource database;
+
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    @BeforeAll
+    static void createProbeTables() throws Exception {
+        String url = System.getenv("DB_TOOLS_TEST_URL");
+        assumeTrue(url != null && !url.isBlank(), "DB_TOOLS_TEST_URL not set — live MySQL check skipped");
+        database = new DriverManagerDataSource(url,
+                System.getenv("DB_TOOLS_TEST_USER"), System.getenv("DB_TOOLS_TEST_PASSWORD"));
+        try (Connection conn = database.getConnection()) {
+            String product = conn.getMetaData().getDatabaseProductName().toLowerCase(Locale.ROOT);
+            assumeTrue(product.contains("mysql") || product.contains("mariadb"),
+                    "this check is MySQL/MariaDB-specific; got " + product);
+        }
+        dropProbeTables();
+        DbFixtures.exec(database,
+                "CREATE TABLE " + PARENT + " ("
+                        + " id BIGINT NOT NULL AUTO_INCREMENT COMMENT '아이디',"
+                        + " code VARCHAR(20) NOT NULL COMMENT '코드',"
+                        + " PRIMARY KEY (id),"
+                        + " UNIQUE KEY uk_zz_probe_code (code)"
+                        + ") COMMENT='DB 도구 검증용 임시 테이블'",
+                "CREATE TABLE " + CHILD + " ("
+                        + " id BIGINT NOT NULL AUTO_INCREMENT,"
+                        + " parent_id BIGINT NOT NULL,"
+                        + " PRIMARY KEY (id),"
+                        + " CONSTRAINT fk_zz_probe_parent FOREIGN KEY (parent_id) REFERENCES " + PARENT
+                        + " (id) ON DELETE CASCADE"
+                        + ") COMMENT='DB 도구 검증용 임시 자식'",
+                "CREATE VIEW " + VIEW + " AS SELECT id, code FROM " + PARENT);
+    }
+
+    @AfterAll
+    static void dropProbeTables() {
+        if (database != null) {
+            DbFixtures.exec(database, "DROP VIEW IF EXISTS " + VIEW,
+                    "DROP TABLE IF EXISTS " + CHILD, "DROP TABLE IF EXISTS " + PARENT);
+        }
+    }
+
+    @Test
+    void tableCommentsArriveFromTheDriverAndViewsCarryNone() {
+        ListTablesTool tool = new ListTablesTool(mapper, new DbMetadataReader(database));
+        ObjectNode args = mapper.createObjectNode().put("pattern", "zz_dbtools_probe");
+
+        JsonNode s = tool.call(args, null).structured();
+        assertEquals(3, s.path("totalCount").asInt(), s.toString());
+        JsonNode tables = s.path("tables");
+        assertEquals("DB 도구 검증용 임시 자식", tables.get(0).path("comment").asText(), s.toString());
+        assertEquals("DB 도구 검증용 임시 테이블", tables.get(1).path("comment").asText(), s.toString());
+        assertEquals("view", tables.get(2).path("type").asText(), s.toString());
+        assertFalse(tables.get(2).has("comment"), "MySQL's literal 'VIEW' is not a comment anyone wrote: " + s);
+        assertFalse(s.has("schema"), "MySQL has no schema level below the database");
+    }
+
+    @Test
+    void describesTheParentAsMySqlReportsIt() {
+        DescribeTableTool tool = new DescribeTableTool(mapper, new DbMetadataReader(database));
+
+        McpToolResult result = tool.call(mapper.createObjectNode().put("table", PARENT), null);
+        DbFixtures.assertSatisfiesOutputSchema(tool, result);
+        JsonNode s = result.structured();
+        assertEquals("DB 도구 검증용 임시 테이블", s.path("comment").asText());
+        assertEquals("아이디", s.path("columns").get(0).path("comment").asText());
+        assertTrue(s.path("columns").get(0).path("autoIncrement").asBoolean());
+        assertEquals("VARCHAR(20)", s.path("columns").get(1).path("type").asText().toUpperCase(Locale.ROOT));
+
+        assertEquals(List.of("id"), strings(s.path("primaryKey").path("columns")));
+        List<String> indexNames = new ArrayList<>();
+        s.path("indexes").forEach(i -> indexNames.add(i.path("name").asText()));
+        assertEquals(List.of("uk_zz_probe_code"), indexNames, "PRIMARY must be folded into primaryKey");
+
+        JsonNode ref = s.path("referencedBy").get(0);
+        assertEquals(CHILD, ref.path("table").asText());
+        assertEquals("CASCADE", ref.path("onDelete").asText());
+    }
+
+    private static List<String> strings(JsonNode array) {
+        List<String> out = new ArrayList<>();
+        array.forEach(n -> out.add(n.asText()));
+        return out;
+    }
+}

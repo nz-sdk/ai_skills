@@ -1,0 +1,134 @@
+// [DB METADATA] Schema fragments and argument parsing shared by the two database-metadata tools.
+//
+// Same role as SourceToolSchemas in the source/ bundle — and deliberately NOT shared with it. The two bundles are
+// separate optional capabilities, so an import across them would make these tools fail to compile whenever the
+// module-source bundle was not selected. text/clampLimit/cursor are duplicated here (a few lines); the alternative
+// is a generation-order dependency between two independent capabilities.
+//
+// With protean.mcp.strict-schema=true these schemas are a real rejection gate — McpDispatcher validates arguments
+// against them server-side before the tool body runs.
+package {{PKG}}.db;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.db.DbMetadataReader.TableType;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.EnumSet;
+import java.util.Set;
+
+final class DbToolSchemas {
+
+    /** Upper bound on any identifier argument. Generous for every vendor (MySQL 64, PostgreSQL 63, H2 256). */
+    static final int MAX_NAME_LENGTH = 256;
+
+    private DbToolSchemas() {
+    }
+
+    // ---- input fragments ----------------------------------------------------------------------------------
+
+    /**
+     * The {@code types} property. No {@code minItems}: an empty array means "all", the same as omitting it,
+     * because rejecting it would turn a harmless client default into an error.
+     */
+    static void putTypes(ObjectNode properties) {
+        ObjectNode types = properties.putObject("types");
+        types.put("type", "array")
+                .put("description", "Which kinds to list: table, view. Defaults to both.");
+        ObjectNode items = types.putObject("items");
+        items.put("type", "string");
+        ArrayNode enumeration = items.putArray("enum");
+        for (TableType type : TableType.values()) {
+            enumeration.add(type.wire());
+        }
+        types.put("uniqueItems", true);
+    }
+
+    // ---- output fragments ---------------------------------------------------------------------------------
+
+    /**
+     * Declares {@code database} and {@code schema}. Never added to {@code required}: a driver may report either
+     * as null (MySQL has no schema below the database; some drivers report no catalog), and the dispatcher
+     * rewrites a successful result into an {@code OUTPUT_SCHEMA_VIOLATION} error when a required field is missing.
+     */
+    static void putLocation(ObjectNode properties) {
+        properties.putObject("database").put("type", "string")
+                .put("description", "The connection's current catalog — on MySQL, the database name.");
+        properties.putObject("schema").put("type", "string")
+                .put("description", "The connection's current schema, where the vendor has one below the "
+                        + "database (PostgreSQL, H2). Absent on MySQL.");
+    }
+
+    static void putTableType(ObjectNode properties) {
+        ObjectNode type = properties.putObject("type");
+        type.put("type", "string");
+        ArrayNode enumeration = type.putArray("enum");
+        for (TableType t : TableType.values()) {
+            enumeration.add(t.wire());
+        }
+    }
+
+    // ---- argument parsing ---------------------------------------------------------------------------------
+
+    /**
+     * Resolves the {@code types} argument. Absent, empty, or all-unrecognized → every type.
+     *
+     * <p>Unrecognized entries cannot normally arrive (the schema's enum rejects them first), so they are dropped
+     * rather than reported; the fallback exists for the strict-schema-off case.
+     */
+    static Set<TableType> parseTypes(JsonNode args) {
+        JsonNode node = args.path("types");
+        if (!node.isArray() || node.isEmpty()) {
+            return EnumSet.allOf(TableType.class);
+        }
+        Set<TableType> types = EnumSet.noneOf(TableType.class);
+        node.forEach(element -> TableType.fromWire(element.asText(null)).ifPresent(types::add));
+        return types.isEmpty() ? EnumSet.allOf(TableType.class) : types;
+    }
+
+    /** A string argument, or {@code null} when absent or blank. */
+    static String text(JsonNode args, String field) {
+        String value = args.path(field).asText(null);
+        return (value == null || value.isBlank()) ? null : value.strip();
+    }
+
+    /**
+     * Resolves a requested limit the way {@code protean.list_modules} does: absent/non-numeric → {@code def},
+     * {@code 0} → unbounded, negative → {@code def}, positive → capped at {@code max}.
+     */
+    static int clampLimit(JsonNode node, int def, int max) {
+        if (node == null || !node.isNumber()) {
+            return def;
+        }
+        int limit = node.asInt(def);
+        if (limit == 0) {
+            return Integer.MAX_VALUE;
+        }
+        if (limit < 0) {
+            return def;
+        }
+        return Math.min(limit, max);
+    }
+
+    /** Opaque offset cursor, same encoding as {@code protean.list_modules} so clients see one cursor format. */
+    static String encodeCursor(int offset) {
+        return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(String.valueOf(offset).getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** Decodes the cursor back to an offset. Corrupt or missing → 0 (from the start), never an error. */
+    static int decodeCursor(String cursor) {
+        if (cursor == null || cursor.isBlank()) {
+            return 0;
+        }
+        try {
+            return Math.max(Integer.parseInt(
+                    new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8)), 0);
+        } catch (RuntimeException e) {
+            return 0;
+        }
+    }
+}

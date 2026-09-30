@@ -1,0 +1,358 @@
+// [CAPABILITY: custom MCP tool] amoeba.describe_table — one table's definition: columns, keys, indexes.
+//
+// The questions a module author actually has before writing mapper SQL or handing over DDL: does this column
+// exist and what is it called exactly, is it nullable, which unique key will turn a duplicate insert into a 409,
+// which foreign keys will a delete trip over. All of it comes from DatabaseMetaData; the tool takes a table NAME,
+// never SQL, and returns no rows — so there is nothing to inject and no business data to leak.
+package {{PKG}}.db;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.db.DbMetadataReader.Ambiguous;
+import {{PKG}}.db.DbMetadataReader.Column;
+import {{PKG}}.db.DbMetadataReader.ForeignKey;
+import {{PKG}}.db.DbMetadataReader.Found;
+import {{PKG}}.db.DbMetadataReader.Index;
+import {{PKG}}.db.DbMetadataReader.Location;
+import {{PKG}}.db.DbMetadataReader.Lookup;
+import {{PKG}}.db.DbMetadataReader.NotFound;
+import {{PKG}}.db.DbMetadataReader.TableDetail;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolAnnotations;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+
+import org.springframework.stereotype.Component;
+
+import java.sql.SQLException;
+import java.util.List;
+
+@Component
+public class DescribeTableTool implements McpTool {
+
+    private final ObjectMapper mapper;
+    private final DbMetadataReader reader;
+
+    public DescribeTableTool(ObjectMapper mapper, DbMetadataReader reader) {
+        this.mapper = mapper;
+        this.reader = reader;
+    }
+
+    @Override
+    public String name() {
+        return "amoeba.describe_table";
+    }
+
+    @Override
+    public String title() {
+        return "Describe Database Table";
+    }
+
+    @Override
+    public String description() {
+        return "Returns one table's or view's definition from the database this server's modules use: columns in "
+                + "order (type, nullability, default, auto-increment, comment), the primary key, unique and "
+                + "non-unique indexes, the foreign keys it declares and those pointing at it. Takes a table name, "
+                + "never SQL, and returns no rows. The name is matched exactly, then case-insensitively; on a miss "
+                + "the error lists close names (or call amoeba.list_tables). Check real column names and unique "
+                + "keys here before writing mapper SQL or DDL.";
+    }
+
+    /** A pure read. Leaving this at the SPI's CUSTOM default would demand mcp.admin. */
+    @Override
+    public ModuleActionAuthorizer.ModuleAction action() {
+        return ModuleActionAuthorizer.ModuleAction.READ;
+    }
+
+    /** No module is involved; the authorizer sees a null target, as it does for protean.list_modules. */
+    @Override
+    public String targetModuleId(JsonNode arguments) {
+        return null;
+    }
+
+    @Override
+    public McpToolAnnotations annotations() {
+        return McpToolAnnotations.readOnly();
+    }
+
+    @Override
+    public ObjectNode inputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        schema.put("additionalProperties", false);
+        ObjectNode p = schema.putObject("properties");
+        p.putObject("table").put("type", "string")
+                .put("minLength", 1)
+                .put("maxLength", DbToolSchemas.MAX_NAME_LENGTH)
+                .put("description", "Table or view name, e.g. 'comp_mst'. Quotes/backticks and a prefix naming "
+                        + "the current database are accepted; other databases are not visible.");
+        schema.putArray("required").add("table");
+        return schema;
+    }
+
+    @Override
+    public ObjectNode outputSchema() {
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        ObjectNode p = schema.putObject("properties");
+        DbToolSchemas.putLocation(p);
+        p.putObject("table").put("type", "string").put("description", "The name exactly as the database stores it.");
+        DbToolSchemas.putTableType(p);
+        p.putObject("comment").put("type", "string");
+
+        ObjectNode columns = p.putObject("columns");
+        columns.put("type", "array");
+        ObjectNode col = columns.putObject("items");
+        col.put("type", "object");
+        ObjectNode cp = col.putObject("properties");
+        cp.putObject("name").put("type", "string");
+        cp.putObject("position").put("type", "integer");
+        cp.putObject("type").put("type", "string")
+                .put("description", "Vendor type name, with length/precision where it is part of the type.");
+        cp.putObject("size").put("type", "integer");
+        cp.putObject("scale").put("type", "integer");
+        cp.putObject("nullable").put("type", "boolean");
+        cp.putObject("default").put("type", "string")
+                .put("description", "The default as the database reports it (an expression or a quoted literal).");
+        cp.putObject("autoIncrement").put("type", "boolean");
+        cp.putObject("comment").put("type", "string");
+        col.putArray("required").add("name").add("position").add("type").add("nullable").add("autoIncrement");
+
+        ObjectNode pk = p.putObject("primaryKey");
+        pk.put("type", "object").put("description", "Absent when the table has no primary key (and for views).");
+        ObjectNode pkp = pk.putObject("properties");
+        pkp.putObject("name").put("type", "string");
+        stringArray(pkp, "columns");
+        pk.putArray("required").add("columns");
+
+        ObjectNode indexes = p.putObject("indexes");
+        indexes.put("type", "array")
+                .put("description", "Indexes other than the one backing the primary key; unique ones first.");
+        ObjectNode idx = indexes.putObject("items");
+        idx.put("type", "object");
+        ObjectNode ixp = idx.putObject("properties");
+        ixp.putObject("name").put("type", "string");
+        ixp.putObject("unique").put("type", "boolean");
+        stringArray(ixp, "columns");
+        idx.putArray("required").add("name").add("unique").add("columns");
+
+        putForeignKeys(p, "foreignKeys", "refTable",
+                "Keys this table declares: its 'columns' reference 'refColumns' of 'refTable'.");
+        putForeignKeys(p, "referencedBy", "table",
+                "Keys other tables declare against this one: their 'columns' reference this table's 'refColumns'.");
+
+        // database/schema/comment/primaryKey are conditional and therefore NOT required — the dispatcher turns a
+        // missing required field into OUTPUT_SCHEMA_VIOLATION. The four arrays are always present, possibly empty.
+        schema.putArray("required").add("table").add("type").add("columns").add("indexes")
+                .add("foreignKeys").add("referencedBy");
+        return schema;
+    }
+
+    private static void putForeignKeys(ObjectNode properties, String field, String tableField, String description) {
+        ObjectNode keys = properties.putObject(field);
+        keys.put("type", "array").put("description", description);
+        ObjectNode item = keys.putObject("items");
+        item.put("type", "object");
+        ObjectNode ip = item.putObject("properties");
+        ip.putObject("name").put("type", "string");
+        ip.putObject(tableField).put("type", "string");
+        stringArray(ip, "columns");
+        stringArray(ip, "refColumns");
+        ip.putObject("onUpdate").put("type", "string");
+        ip.putObject("onDelete").put("type", "string");
+        item.putArray("required").add(tableField).add("columns").add("refColumns");
+    }
+
+    private static void stringArray(ObjectNode properties, String field) {
+        ObjectNode array = properties.putObject(field);
+        array.put("type", "array");
+        array.putObject("items").put("type", "string");
+    }
+
+    @Override
+    public McpToolResult call(JsonNode arguments, McpCallContext ctx) {
+        JsonNode args = arguments == null ? mapper.missingNode() : arguments;
+        String table = DbToolSchemas.text(args, "table");
+        if (table == null) {
+            return McpToolResult.error("table is required");
+        }
+
+        Lookup lookup;
+        try {
+            lookup = reader.describe(table);
+        } catch (SQLException e) {
+            return McpToolResult.error("database metadata read failed: [" + e.getSQLState() + "] "
+                    + e.getMessage());
+        }
+
+        return switch (lookup) {
+            case Found found -> McpToolResult.ok(renderText(found.detail()), toJson(found.detail()));
+            case Ambiguous ambiguous -> McpToolResult.error("table '" + table + "' matches more than one table "
+                    + "when case is ignored: " + String.join(", ", ambiguous.names())
+                    + ". Call again with the exact name.");
+            case NotFound notFound -> McpToolResult.error("table '" + table + "' does not exist in "
+                    + ListTablesTool.where(notFound.location())
+                    + (notFound.candidates().isEmpty()
+                    ? "." : ". Close names: " + String.join(", ", notFound.candidates()) + ".")
+                    + " Call amoeba.list_tables to see every table.");
+        };
+    }
+
+    private ObjectNode toJson(TableDetail d) {
+        ObjectNode out = mapper.createObjectNode();
+        Location location = d.location();
+        if (location.database() != null) {
+            out.put("database", location.database());
+        }
+        if (location.schema() != null) {
+            out.put("schema", location.schema());
+        }
+        out.put("table", d.table().name());
+        out.put("type", d.table().type().wire());
+        if (d.table().comment() != null) {
+            out.put("comment", d.table().comment());
+        }
+
+        ArrayNode columns = out.putArray("columns");
+        for (Column c : d.columns()) {
+            ObjectNode node = columns.addObject();
+            node.put("name", c.name());
+            node.put("position", c.position());
+            node.put("type", c.type());
+            if (c.size() != null) {
+                node.put("size", c.size());
+            }
+            if (c.scale() != null) {
+                node.put("scale", c.scale());
+            }
+            node.put("nullable", c.nullable());
+            if (c.defaultValue() != null) {
+                node.put("default", c.defaultValue());
+            }
+            node.put("autoIncrement", c.autoIncrement());
+            if (c.comment() != null) {
+                node.put("comment", c.comment());
+            }
+        }
+
+        if (d.primaryKey() != null) {
+            ObjectNode pk = out.putObject("primaryKey");
+            if (d.primaryKey().name() != null) {
+                pk.put("name", d.primaryKey().name());
+            }
+            d.primaryKey().columns().forEach(pk.putArray("columns")::add);
+        }
+
+        ArrayNode indexes = out.putArray("indexes");
+        for (Index i : d.indexes()) {
+            ObjectNode node = indexes.addObject();
+            node.put("name", i.name());
+            node.put("unique", i.unique());
+            i.columns().forEach(node.putArray("columns")::add);
+        }
+
+        putKeys(out.putArray("foreignKeys"), d.foreignKeys(), "refTable");
+        putKeys(out.putArray("referencedBy"), d.referencedBy(), "table");
+        return out;
+    }
+
+    private static void putKeys(ArrayNode array, List<ForeignKey> keys, String tableField) {
+        for (ForeignKey k : keys) {
+            ObjectNode node = array.addObject();
+            if (k.name() != null) {
+                node.put("name", k.name());
+            }
+            node.put(tableField, k.otherTable());
+            // referencedBy: 'columns' are the referencing table's, 'refColumns' this table's — same shape as
+            // foreignKeys read from the other side, so one client-side renderer handles both.
+            k.columns().forEach(node.putArray("columns")::add);
+            k.otherColumns().forEach(node.putArray("refColumns")::add);
+            node.put("onUpdate", k.onUpdate());
+            node.put("onDelete", k.onDelete());
+        }
+    }
+
+    private static String renderText(TableDetail d) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(d.table().name()).append(" [").append(d.table().type().wire()).append("] in ")
+                .append(ListTablesTool.where(d.location()));
+        if (d.table().comment() != null) {
+            sb.append(" — ").append(d.table().comment());
+        }
+        sb.append('\n');
+
+        List<String> pkColumns = d.primaryKey() == null ? List.of() : d.primaryKey().columns();
+        int nameWidth = d.columns().stream().mapToInt(c -> c.name().length()).max().orElse(0);
+        int typeWidth = d.columns().stream().mapToInt(c -> c.type().length()).max().orElse(0);
+        sb.append("Columns (").append(d.columns().size()).append("):\n");
+        for (Column c : d.columns()) {
+            sb.append("  ").append(pad(String.valueOf(c.position()), 3))
+                    .append(pad(c.name(), nameWidth)).append("  ")
+                    .append(pad(c.type(), typeWidth)).append("  ")
+                    .append(c.nullable() ? "NULL    " : "NOT NULL");
+            if (c.defaultValue() != null) {
+                sb.append("  DEFAULT ").append(c.defaultValue());
+            }
+            if (c.autoIncrement()) {
+                sb.append("  AUTO_INCREMENT");
+            }
+            if (pkColumns.contains(c.name())) {
+                sb.append("  PK");
+            }
+            if (c.comment() != null) {
+                sb.append("  -- ").append(c.comment());
+            }
+            sb.append('\n');
+        }
+
+        if (d.primaryKey() != null) {
+            sb.append("Primary key: (").append(String.join(", ", pkColumns)).append(")\n");
+        }
+        if (!d.indexes().isEmpty()) {
+            sb.append("Indexes:\n");
+            for (Index i : d.indexes()) {
+                sb.append("  ").append(i.unique() ? "UNIQUE " : "INDEX  ").append(i.name())
+                        .append(" (").append(String.join(", ", i.columns())).append(")\n");
+            }
+        }
+        if (!d.foreignKeys().isEmpty()) {
+            sb.append("Foreign keys:\n");
+            for (ForeignKey k : d.foreignKeys()) {
+                sb.append("  ").append(k.name() == null ? "(unnamed)" : k.name())
+                        .append(" (").append(String.join(", ", k.columns())).append(") -> ")
+                        .append(k.otherTable()).append(" (").append(String.join(", ", k.otherColumns()))
+                        .append(")").append(rules(k)).append('\n');
+            }
+        }
+        if (!d.referencedBy().isEmpty()) {
+            sb.append("Referenced by:\n");
+            for (ForeignKey k : d.referencedBy()) {
+                sb.append("  ").append(k.otherTable()).append(" (").append(String.join(", ", k.columns()))
+                        .append(") -> (").append(String.join(", ", k.otherColumns())).append(")")
+                        .append(k.name() == null ? "" : "  [" + k.name() + "]")
+                        .append(rules(k)).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String rules(ForeignKey k) {
+        StringBuilder sb = new StringBuilder();
+        if (!"NO ACTION".equals(k.onDelete())) {
+            sb.append(" ON DELETE ").append(k.onDelete());
+        }
+        if (!"NO ACTION".equals(k.onUpdate())) {
+            sb.append(" ON UPDATE ").append(k.onUpdate());
+        }
+        return sb.toString();
+    }
+
+    private static String pad(String s, int width) {
+        return s.length() >= width ? s : s + " ".repeat(width - s.length());
+    }
+}

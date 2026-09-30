@@ -703,13 +703,24 @@ capabilities:
       information_schema and uninstalling it again. amoeba.list_tables lists tables and views with their comments
       (its `pattern` matches the name OR the comment, so a concept word finds a Korean-commented table);
       amoeba.describe_table returns one table's columns (type, nullability, default, auto-increment, comment), its
-      primary key, unique and non-unique indexes, and foreign keys in both directions.
+      primary key, unique and non-unique indexes, and foreign keys in both directions. Both default to the database
+      the modules use and take an optional `database` (JDBC catalog — the MySQL database) / `schema` (PostgreSQL, H2)
+      to open another one the DB account can see; list_tables reports those names in `databases`/`schemas`.
     note: >-
       NO SQL IN, NO ROWS OUT — THAT IS THE DESIGN. Both tools take names only and read JDBC DatabaseMetaData, so
-      there is no injection surface and no business data can leave. Scope is pinned to the connection's current
-      catalog/schema; no argument can point them at another database. Do not add a "query" argument to either — a
+      there is no injection surface and no business data can leave. Do not add a "query" argument to either — a
       read-only SQL tool is a different capability with a different threat model (statement scanning, read-only
       connection, row/time caps), not an extension of this one.
+
+      THE DB ACCOUNT IS THE BOUNDARY. `database`/`schema` are resolved against getCatalogs()/getSchemas(), i.e.
+      against what the host DataSource's account can see — so an mcp.read holder sees the STRUCTURE of every database
+      that account is granted, never its rows. To narrow it, narrow the grants; there is deliberately no allowlist
+      setting. System namespaces (mysql, information_schema, performance_schema, sys, pg_catalog, pg_toast —
+      DbMetadataReader.SYSTEM_NAMESPACES) are refused even when visible, as an argument and as a `db.table`
+      qualifier, and are never offered in the visible lists. Unknown names error WITH the visible list. H2 has one
+      catalog per database, so offline tests switch SCHEMA (DbFixtures puts a same-named table with a different
+      column in other_app); switching CATALOG is pinned only by LiveMetadataTest, which needs CREATE DATABASE and
+      skips that one test without it.
 
       AUTHORIZATION IS ALREADY HANDLED, and that is load-bearing — same as module_source_tools. Both override
       action() to READ (and annotations() to readOnly()); left at the SPI's CUSTOM default, reading a column name

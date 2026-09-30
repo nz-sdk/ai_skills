@@ -47,7 +47,40 @@ final class DbToolSchemas {
         types.put("uniqueItems", true);
     }
 
+    /**
+     * The {@code database} and {@code schema} arguments both tools take. Both optional: absent means the database
+     * the modules use. Resolution — against what the DB account can see, system namespaces refused — lives in
+     * DbMetadataReader; these are only the declared shapes.
+     */
+    static void putLocationArgs(ObjectNode properties) {
+        properties.putObject("database").put("type", "string")
+                .put("maxLength", MAX_NAME_LENGTH)
+                .put("description", "Optional. Another database this server's DB account can see (on MySQL, a "
+                        + "database name). Defaults to the one the modules use. System databases (mysql, "
+                        + "information_schema, performance_schema, sys) are refused. amoeba.list_tables reports the "
+                        + "visible names in 'databases'.");
+        properties.putObject("schema").put("type", "string")
+                .put("maxLength", MAX_NAME_LENGTH)
+                .put("description", "Optional. A schema below the database, for vendors that have one "
+                        + "(PostgreSQL, H2). Not used on MySQL. Defaults to the current schema.");
+    }
+
     // ---- output fragments ---------------------------------------------------------------------------------
+
+    /**
+     * Declares {@code databases} and {@code schemas} — what else could be opened. Never required: MySQL reports no
+     * schemas at all, and the field is omitted rather than sent empty.
+     */
+    static void putVisible(ObjectNode properties) {
+        ObjectNode databases = properties.putObject("databases");
+        databases.put("type", "array")
+                .put("description", "Databases the account can open with 'database', system databases excluded.");
+        databases.putObject("items").put("type", "string");
+        ObjectNode schemas = properties.putObject("schemas");
+        schemas.put("type", "array")
+                .put("description", "Schemas of the listed database that 'schema' can open (PostgreSQL, H2).");
+        schemas.putObject("items").put("type", "string");
+    }
 
     /**
      * Declares {@code database} and {@code schema}. Never added to {@code required}: a driver may report either

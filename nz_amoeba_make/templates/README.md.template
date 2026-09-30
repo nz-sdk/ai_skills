@@ -85,12 +85,13 @@ WebSocket handlers have no runtime-registration path; put a WS endpoint in this 
 ### Look at the database before writing SQL
 
 **Do not deploy a throwaway module that queries `information_schema` and uninstall it afterwards** — ask the
-server. Two read-only tools (`mcp.read`) show the structure of the database this app's modules use:
+server. Two read-only tools (`mcp.read`) show the structure of the database this app's modules use — or, with
+`database`, of another one this app's DB account can see:
 
 | Tool | Returns |
 |---|---|
-| `amoeba.list_tables` | tables and views with their comments; `pattern` matches the name **or** the comment |
-| `amoeba.describe_table` | one table's columns (type, nullability, default, auto-increment, comment), primary key, indexes, foreign keys in both directions |
+| `amoeba.list_tables` | tables and views with their comments; `pattern` matches the name **or** the comment; `databases` lists what else `database` can open |
+| `amoeba.describe_table` | one table's columns (type, nullability, default, auto-increment, comment), primary key, indexes, foreign keys in both directions; `database` or a `db.table` name for another database |
 
 ```bash
 curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{
@@ -98,8 +99,10 @@ curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '
     "name":"amoeba.describe_table","arguments":{"table":"<table>"}}}'
 ```
 
-They take **no SQL** and return **no rows** — everything comes from JDBC `DatabaseMetaData`, scoped to the
-connection's current database; no argument reaches another one. ENUM/SET columns come back without their allowed
+They take **no SQL** and return **no rows** — everything comes from JDBC `DatabaseMetaData`. `database` (and
+`schema` on PostgreSQL/H2) reaches any database the account is granted, so **the account's grants are the
+boundary** — narrow them to narrow what `mcp.read` holders see. System databases (`mysql`, `information_schema`,
+`performance_schema`, `sys`) are refused even when visible. ENUM/SET columns come back without their allowed
 values (`DatabaseMetaData` does not expose them). `LiveMetadataTest` checks the MySQL behaviour against a
 disposable database when `DB_TOOLS_TEST_URL` is set, and skips otherwise.
 <!-- [/db_metadata_tools ONLY] -->

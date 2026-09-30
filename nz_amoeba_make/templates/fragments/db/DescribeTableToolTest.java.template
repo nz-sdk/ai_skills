@@ -1,9 +1,10 @@
 // Walks DatabaseMetaData against a real driver (H2) and pins each quirk DbMetadataReader exists to absorb: name
-// resolution across case rules, the LIKE-wildcard leak, the primary-key index duplicate, and both directions of
-// foreign keys.
+// resolution across case rules, the LIKE-wildcard leak, the primary-key index duplicate, both directions of foreign
+// keys, and moving the lookup to another schema.
 //
-// What H2 cannot show: the MySQL table-comment fallback. Connector/J fills getTables' REMARKS differently from H2,
-// so that branch is covered only by LiveMetadataTest against a real MySQL (self-skipping without one).
+// What H2 cannot show: Connector/J's own behaviour — whether it reports table comments, and switching CATALOG (H2
+// has one catalog per database, so only schema switching runs here). LiveMetadataTest covers both against a real
+// MySQL, self-skipping without one.
 package {{PKG}}.db;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -177,12 +178,55 @@ class DescribeTableToolTest {
         assertTrue(result.text().contains("amoeba.list_tables"), result.text());
     }
 
-    /** Another database cannot be reached by qualifying the name — the scope never widens. */
+    /** A system namespace is refused with the reason, whether qualified or passed as an argument. */
     @Test
-    void otherDatabasesAreNotReachableByQualifying() {
-        McpToolResult result = describe("information_schema.tables");
+    void systemNamespacesAreRefused() {
+        McpToolResult qualified = describe("information_schema.tables");
+        assertTrue(qualified.isError(), qualified.text());
+        assertTrue(qualified.text().contains("system"), qualified.text());
 
-        assertTrue(result.isError(), result.text());
+        ObjectNode args = mapper.createObjectNode().put("table", "tables").put("schema", "information_schema");
+        McpToolResult argument = tool.call(args, null);
+        assertTrue(argument.isError(), argument.text());
+        assertTrue(argument.text().contains("system"), argument.text());
+    }
+
+    /** Same table name, other schema: OTHER_COL proves the lookup moved instead of silently staying in PUBLIC. */
+    @Test
+    void schemaArgumentDescribesTheSameNameElsewhere() {
+        ObjectNode args = mapper.createObjectNode().put("table", "comp_mst").put("schema", "other_app");
+        McpToolResult result = tool.call(args, null);
+
+        DbFixtures.assertSatisfiesOutputSchema(tool, result);
+        JsonNode s = result.structured();
+        assertEquals(DbFixtures.OTHER_SCHEMA, s.path("schema").asText());
+        assertEquals("OTHER_COL", s.path("columns").get(0).path("name").asText());
+        assertEquals("다른 앱의 테이블", s.path("comment").asText());
+    }
+
+    @Test
+    void qualifierSelectsAnotherLocationWhenNoArgumentIsGiven() {
+        JsonNode s = describe("other_app.comp_mst").structured();
+
+        assertEquals(DbFixtures.OTHER_SCHEMA, s.path("schema").asText());
+        assertEquals("OTHER_COL", s.path("columns").get(0).path("name").asText());
+    }
+
+    /** An explicit argument wins: a qualifier naming somewhere else is then just part of an unknown name. */
+    @Test
+    void qualifierDoesNotOverrideAnExplicitArgument() {
+        ObjectNode args = mapper.createObjectNode().put("table", "other_app.comp_mst").put("schema", "public");
+
+        assertTrue(tool.call(args, null).isError());
+    }
+
+    @Test
+    void unknownSchemaErrorsWithTheVisibleNames() {
+        ObjectNode args = mapper.createObjectNode().put("table", "comp_mst").put("schema", "nope");
+        McpToolResult result = tool.call(args, null);
+
+        assertTrue(result.isError());
+        assertTrue(result.text().contains(DbFixtures.OTHER_SCHEMA), result.text());
     }
 
     /** Two tables differing only in case: an exact name wins, a case-folded one must not guess. */

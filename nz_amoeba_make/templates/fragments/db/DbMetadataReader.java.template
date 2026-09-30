@@ -1,0 +1,454 @@
+// [DB METADATA] Reads the host database's structure through JDBC DatabaseMetaData — never through caller SQL.
+//
+// This is what the two tools share, and where every vendor quirk is absorbed so the tools stay thin:
+//
+//   · SCOPE IS THE CURRENT DATABASE ONLY. Catalog and schema come from the connection itself (getCatalog/getSchema)
+//     and no argument can move them, so the tools cannot be pointed at mysql.* or another tenant's database even
+//     where the DB account's grants would allow it.
+//   · NAMES ARE RESOLVED IN JAVA. The full table list is read once and the requested name matched exactly, then
+//     case-insensitively — H2 folds unquoted names to upper case, PostgreSQL to lower case, and MySQL on Linux keeps
+//     them case-sensitive, so no single case rule works across vendors.
+//   · '_' AND '%' ARE LIKE WILDCARDS in getTables/getColumns. A resolved name is escaped before it is used as a
+//     pattern AND the rows are filtered back to that exact name; without it, describing comp_mst also returns the
+//     columns of compxmst.
+//   · TABLE_TYPE IS NORMALIZED. H2 2.x reports "BASE TABLE" where MySQL reports "TABLE", so the type filter is
+//     applied after normalization instead of being passed to the driver.
+//   · COMMENTS COME FROM THE DRIVER. Connector/J 9.x fills REMARKS for tables and columns on MySQL 8.4 with the
+//     connection URL as it is — measured, and pinned by LiveMetadataTest. No information_schema fallback exists:
+//     it would run on every call against any database with one uncommented table, for nothing. If a driver ever
+//     stops reporting them, LiveMetadataTest is what fails; do not "fix" it by editing the shared URL, which
+//     every deployed module uses.
+package {{PKG}}.db;
+
+import org.springframework.stereotype.Component;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.TreeMap;
+
+@Component
+public class DbMetadataReader {
+
+    /** Close names offered back when a requested table does not exist. */
+    static final int MAX_CANDIDATES = 10;
+
+    private final DataSource dataSource;
+
+    public DbMetadataReader(DataSource dataSource) {
+        this.dataSource = dataSource;
+    }
+
+    // ---- model --------------------------------------------------------------------------------------------
+
+    public enum TableType {
+        TABLE("table"), VIEW("view");
+
+        private final String wire;
+
+        TableType(String wire) {
+            this.wire = wire;
+        }
+
+        public String wire() {
+            return wire;
+        }
+
+        public static Optional<TableType> fromWire(String value) {
+            for (TableType type : values()) {
+                if (type.wire.equalsIgnoreCase(value)) {
+                    return Optional.of(type);
+                }
+            }
+            return Optional.empty();
+        }
+
+        /** JDBC TABLE_TYPE → model. System tables, synonyms, temporaries and the like are not listed at all. */
+        static Optional<TableType> fromJdbc(String value) {
+            if (value == null) {
+                return Optional.empty();
+            }
+            return switch (value.toUpperCase(Locale.ROOT)) {
+                case "TABLE", "BASE TABLE" -> Optional.of(TABLE);
+                case "VIEW" -> Optional.of(VIEW);
+                default -> Optional.empty();
+            };
+        }
+    }
+
+    /** Where the connection points. Either part may be null depending on the vendor. */
+    public record Location(String database, String schema) {
+    }
+
+    public record TableSummary(String name, TableType type, String comment) {
+    }
+
+    public record TableList(Location location, List<TableSummary> tables) {
+    }
+
+    public record Column(String name, int position, String type, Integer size, Integer scale, boolean nullable,
+                         String defaultValue, boolean autoIncrement, String comment) {
+    }
+
+    public record PrimaryKey(String name, List<String> columns) {
+    }
+
+    public record Index(String name, boolean unique, List<String> columns) {
+    }
+
+    /**
+     * A foreign key seen from the described table. For {@code foreignKeys}, {@code columns} are this table's and
+     * {@code otherTable}/{@code otherColumns} the referenced ones; for {@code referencedBy}, {@code otherTable} is
+     * the referencing table, {@code columns} its columns, and {@code otherColumns} this table's.
+     */
+    public record ForeignKey(String name, List<String> columns, String otherTable, List<String> otherColumns,
+                             String onUpdate, String onDelete) {
+    }
+
+    public record TableDetail(Location location, TableSummary table, List<Column> columns, PrimaryKey primaryKey,
+                              List<Index> indexes, List<ForeignKey> foreignKeys, List<ForeignKey> referencedBy) {
+    }
+
+    /** Outcome of resolving a caller-typed name against the tables that actually exist. */
+    public sealed interface Lookup permits Found, NotFound, Ambiguous {
+    }
+
+    public record Found(TableDetail detail) implements Lookup {
+    }
+
+    public record NotFound(Location location, List<String> candidates) implements Lookup {
+    }
+
+    public record Ambiguous(List<String> names) implements Lookup {
+    }
+
+    // ---- reads --------------------------------------------------------------------------------------------
+
+    /** Every table and view of the current database, sorted by name. */
+    public TableList listTables() throws SQLException {
+        try (Connection conn = dataSource.getConnection()) {
+            Location location = locate(conn);
+            return new TableList(location, readTables(conn, location));
+        }
+    }
+
+    public Lookup describe(String requested) throws SQLException {
+        try (Connection conn = dataSource.getConnection()) {
+            Location location = locate(conn);
+            List<TableSummary> tables = readTables(conn, location);
+            String wanted = normalizeRequested(requested, location);
+
+            List<TableSummary> exact = tables.stream().filter(t -> t.name().equals(wanted)).toList();
+            List<TableSummary> matches = exact.isEmpty()
+                    ? tables.stream().filter(t -> t.name().equalsIgnoreCase(wanted)).toList()
+                    : exact;
+            if (matches.size() > 1) {
+                return new Ambiguous(matches.stream().map(TableSummary::name).toList());
+            }
+            if (matches.isEmpty()) {
+                String lower = wanted.toLowerCase(Locale.ROOT);
+                List<String> candidates = tables.stream()
+                        .map(TableSummary::name)
+                        .filter(n -> {
+                            String name = n.toLowerCase(Locale.ROOT);
+                            return name.contains(lower) || lower.contains(name);
+                        })
+                        .limit(MAX_CANDIDATES)
+                        .toList();
+                return new NotFound(location, candidates);
+            }
+            return new Found(readDetail(conn, location, matches.get(0)));
+        }
+    }
+
+    // ---- internals ----------------------------------------------------------------------------------------
+
+    private static Location locate(Connection conn) throws SQLException {
+        String schema;
+        try {
+            schema = conn.getSchema();
+        } catch (SQLException | AbstractMethodError e) {
+            schema = null;   // pre-JDBC-4.1 drivers
+        }
+        return new Location(blankToNull(conn.getCatalog()), blankToNull(schema));
+    }
+
+    /**
+     * Accepts the forms an agent naturally types: {@code comp_mst}, {@code `comp_mst`}, {@code "comp_mst"}, and a
+     * name qualified with the CURRENT database or schema. Any other qualifier is left in place, so it simply does
+     * not match — the scope never widens.
+     */
+    private static String normalizeRequested(String requested, Location location) {
+        String name = unquote(requested.strip());
+        int dot = name.indexOf('.');
+        if (dot > 0) {
+            String qualifier = unquote(name.substring(0, dot));
+            if (qualifier.equalsIgnoreCase(location.database()) || qualifier.equalsIgnoreCase(location.schema())) {
+                name = unquote(name.substring(dot + 1));
+            }
+        }
+        return name;
+    }
+
+    private static String unquote(String s) {
+        if (s.length() >= 2) {
+            char first = s.charAt(0);
+            char last = s.charAt(s.length() - 1);
+            if ((first == '`' && last == '`') || (first == '"' && last == '"') || (first == '[' && last == ']')) {
+                return s.substring(1, s.length() - 1);
+            }
+        }
+        return s;
+    }
+
+    private List<TableSummary> readTables(Connection conn, Location location) throws SQLException {
+        DatabaseMetaData meta = conn.getMetaData();
+        String escape = meta.getSearchStringEscape();
+        List<TableSummary> tables = new ArrayList<>();
+        try (ResultSet rs = meta.getTables(location.database(), like(location.schema(), escape), null, null)) {
+            while (rs.next()) {
+                Optional<TableType> type = TableType.fromJdbc(rs.getString("TABLE_TYPE"));
+                if (type.isEmpty()) {
+                    continue;
+                }
+                tables.add(new TableSummary(rs.getString("TABLE_NAME"), type.get(),
+                        comment(rs.getString("REMARKS"), type.get())));
+            }
+        }
+        tables.sort(Comparator.comparing((TableSummary t) -> t.name().toLowerCase(Locale.ROOT))
+                .thenComparing(TableSummary::name));
+        return tables;
+    }
+
+    private TableDetail readDetail(Connection conn, Location location, TableSummary table) throws SQLException {
+        DatabaseMetaData meta = conn.getMetaData();
+        String catalog = location.database();
+        String schema = location.schema();
+        String name = table.name();
+
+        List<Column> columns = readColumns(meta, catalog, schema, name);
+        PrimaryKey primaryKey = readPrimaryKey(meta, catalog, schema, name);
+        List<Index> indexes = table.type() == TableType.TABLE
+                ? readIndexes(meta, catalog, schema, name, primaryKey) : List.of();
+        List<ForeignKey> foreignKeys = new ArrayList<>();
+        List<ForeignKey> referencedBy = new ArrayList<>();
+        if (table.type() == TableType.TABLE) {
+            try (ResultSet rs = meta.getImportedKeys(catalog, schema, name)) {
+                foreignKeys = readForeignKeys(rs, location, true);
+            }
+            try (ResultSet rs = meta.getExportedKeys(catalog, schema, name)) {
+                referencedBy = readForeignKeys(rs, location, false);
+            }
+        }
+        return new TableDetail(location, table, columns, primaryKey, indexes, foreignKeys, referencedBy);
+    }
+
+    private static List<Column> readColumns(DatabaseMetaData meta, String catalog, String schema, String table)
+            throws SQLException {
+        String escape = meta.getSearchStringEscape();
+        List<Column> columns = new ArrayList<>();
+        try (ResultSet rs = meta.getColumns(catalog, like(schema, escape), like(table, escape), "%")) {
+            while (rs.next()) {
+                if (!table.equals(rs.getString("TABLE_NAME"))) {
+                    continue;   // the LIKE match leaked a sibling table — see the header
+                }
+                int dataType = rs.getInt("DATA_TYPE");
+                String typeName = rs.getString("TYPE_NAME");
+                Integer size = intOrNull(rs, "COLUMN_SIZE");
+                Integer digits = intOrNull(rs, "DECIMAL_DIGITS");
+                boolean sized = isSized(dataType, typeName);
+                boolean scaled = dataType == Types.DECIMAL || dataType == Types.NUMERIC;
+                Integer shownSize = sized || scaled ? size : null;
+                Integer shownScale = scaled ? digits : null;
+
+                int nullable = rs.getInt("NULLABLE");
+                boolean isNullable = nullable == DatabaseMetaData.columnNullableUnknown
+                        ? "YES".equalsIgnoreCase(rs.getString("IS_NULLABLE"))
+                        : nullable == DatabaseMetaData.columnNullable;
+
+                columns.add(new Column(
+                        rs.getString("COLUMN_NAME"),
+                        rs.getInt("ORDINAL_POSITION"),
+                        displayType(typeName, shownSize, shownScale),
+                        shownSize,
+                        shownScale,
+                        isNullable,
+                        rs.getString("COLUMN_DEF"),
+                        "YES".equalsIgnoreCase(rs.getString("IS_AUTOINCREMENT")),
+                        blankToNull(rs.getString("REMARKS"))));
+            }
+        }
+        columns.sort(Comparator.comparingInt(Column::position));
+        return columns;
+    }
+
+    /** Types whose size is part of their definition. ENUM/SET report a CHAR type code but carry no length. */
+    private static boolean isSized(int dataType, String typeName) {
+        if (typeName != null) {
+            String t = typeName.toUpperCase(Locale.ROOT);
+            if (t.contains("(") || t.startsWith("ENUM") || t.startsWith("SET")) {
+                return false;
+            }
+        }
+        return switch (dataType) {
+            case Types.CHAR, Types.VARCHAR, Types.NCHAR, Types.NVARCHAR, Types.BINARY, Types.VARBINARY -> true;
+            default -> false;
+        };
+    }
+
+    private static String displayType(String typeName, Integer size, Integer scale) {
+        String base = typeName == null ? "?" : typeName;
+        if (size == null) {
+            return base;
+        }
+        return scale == null ? base + "(" + size + ")" : base + "(" + size + "," + scale + ")";
+    }
+
+    private static PrimaryKey readPrimaryKey(DatabaseMetaData meta, String catalog, String schema, String table)
+            throws SQLException {
+        TreeMap<Short, String> columns = new TreeMap<>();
+        String pkName = null;
+        try (ResultSet rs = meta.getPrimaryKeys(catalog, schema, table)) {
+            while (rs.next()) {
+                if (!table.equals(rs.getString("TABLE_NAME"))) {
+                    continue;
+                }
+                columns.put(rs.getShort("KEY_SEQ"), rs.getString("COLUMN_NAME"));
+                pkName = blankToNull(rs.getString("PK_NAME"));
+            }
+        }
+        return columns.isEmpty() ? null : new PrimaryKey(pkName, List.copyOf(columns.values()));
+    }
+
+    /**
+     * Unique and non-unique indexes, minus the one backing the primary key — that is already reported as
+     * {@code primaryKey}. Recognized by name (MySQL {@code PRIMARY}, PostgreSQL {@code <table>_pkey}) or, where the
+     * vendor names it differently from the constraint (H2), as the unique index over exactly the key's columns.
+     */
+    private static List<Index> readIndexes(DatabaseMetaData meta, String catalog, String schema, String table,
+                                           PrimaryKey primaryKey) throws SQLException {
+        Map<String, TreeMap<Short, String>> columnsByIndex = new LinkedHashMap<>();
+        Map<String, Boolean> uniqueByIndex = new HashMap<>();
+        try (ResultSet rs = meta.getIndexInfo(catalog, schema, table, false, true)) {
+            while (rs.next()) {
+                String indexName = rs.getString("INDEX_NAME");
+                String column = rs.getString("COLUMN_NAME");
+                if (rs.getShort("TYPE") == DatabaseMetaData.tableIndexStatistic || indexName == null
+                        || column == null || !table.equals(rs.getString("TABLE_NAME"))) {
+                    continue;
+                }
+                columnsByIndex.computeIfAbsent(indexName, k -> new TreeMap<>())
+                        .put(rs.getShort("ORDINAL_POSITION"), column);
+                uniqueByIndex.put(indexName, !rs.getBoolean("NON_UNIQUE"));
+            }
+        }
+        List<Index> indexes = new ArrayList<>();
+        for (Map.Entry<String, TreeMap<Short, String>> e : columnsByIndex.entrySet()) {
+            Index index = new Index(e.getKey(), uniqueByIndex.get(e.getKey()), List.copyOf(e.getValue().values()));
+            if (!backsPrimaryKey(index, primaryKey)) {
+                indexes.add(index);
+            }
+        }
+        indexes.sort(Comparator.comparing((Index i) -> !i.unique()).thenComparing(Index::name));
+        return indexes;
+    }
+
+    private static boolean backsPrimaryKey(Index index, PrimaryKey primaryKey) {
+        if (primaryKey == null) {
+            return false;
+        }
+        return index.name().equalsIgnoreCase("PRIMARY")
+                || index.name().equalsIgnoreCase(primaryKey.name())
+                || (index.unique() && index.columns().equals(primaryKey.columns()));
+    }
+
+    /** Groups getImportedKeys/getExportedKeys rows (one per column) into keys, columns in KEY_SEQ order. */
+    private static List<ForeignKey> readForeignKeys(ResultSet rs, Location location, boolean imported)
+            throws SQLException {
+        record Part(String name, String otherTable, TreeMap<Short, String[]> pairs, String onUpdate,
+                    String onDelete) {
+        }
+        Map<String, Part> parts = new LinkedHashMap<>();
+        while (rs.next()) {
+            String otherTable = imported
+                    ? qualified(rs.getString("PKTABLE_CAT"), rs.getString("PKTABLE_SCHEM"),
+                    rs.getString("PKTABLE_NAME"), location)
+                    : qualified(rs.getString("FKTABLE_CAT"), rs.getString("FKTABLE_SCHEM"),
+                    rs.getString("FKTABLE_NAME"), location);
+            String fkName = blankToNull(rs.getString("FK_NAME"));
+            String onUpdate = rule(rs.getInt("UPDATE_RULE"));
+            String onDelete = rule(rs.getInt("DELETE_RULE"));
+            String key = (fkName == null ? "" : fkName) + "\u0000" + otherTable;
+            Part part = parts.computeIfAbsent(key,
+                    k -> new Part(fkName, otherTable, new TreeMap<>(), onUpdate, onDelete));
+            // fk column → pk column; for referencedBy the fk side is the OTHER table's.
+            part.pairs().put(rs.getShort("KEY_SEQ"),
+                    new String[] {rs.getString("FKCOLUMN_NAME"), rs.getString("PKCOLUMN_NAME")});
+        }
+        List<ForeignKey> keys = new ArrayList<>();
+        for (Part part : parts.values()) {
+            List<String> fkColumns = part.pairs().values().stream().map(p -> p[0]).toList();
+            List<String> pkColumns = part.pairs().values().stream().map(p -> p[1]).toList();
+            keys.add(new ForeignKey(part.name(), fkColumns, part.otherTable(), pkColumns,
+                    part.onUpdate(), part.onDelete()));
+        }
+        keys.sort(Comparator.comparing(ForeignKey::otherTable).thenComparing(
+                k -> k.name() == null ? "" : k.name()));
+        return keys;
+    }
+
+    /** A table in the same location is shown bare; one elsewhere carries its catalog/schema. */
+    private static String qualified(String catalog, String schema, String table, Location location) {
+        StringBuilder sb = new StringBuilder();
+        if (catalog != null && !catalog.equalsIgnoreCase(location.database())) {
+            sb.append(catalog).append('.');
+        }
+        if (schema != null && location.schema() != null && !schema.equalsIgnoreCase(location.schema())) {
+            sb.append(schema).append('.');
+        }
+        return sb.append(table).toString();
+    }
+
+    private static String rule(int code) {
+        return switch (code) {
+            case DatabaseMetaData.importedKeyCascade -> "CASCADE";
+            case DatabaseMetaData.importedKeyRestrict -> "RESTRICT";
+            case DatabaseMetaData.importedKeySetNull -> "SET NULL";
+            case DatabaseMetaData.importedKeySetDefault -> "SET DEFAULT";
+            default -> "NO ACTION";
+        };
+    }
+
+    /** MySQL reports the literal comment "VIEW" for every view; that is not a comment anyone wrote. */
+    private static String comment(String remarks, TableType type) {
+        String c = blankToNull(remarks);
+        return type == TableType.VIEW && "VIEW".equals(c) ? null : c;
+    }
+
+    private static String like(String value, String escape) {
+        if (value == null || escape == null || escape.isEmpty()) {
+            return value;
+        }
+        return value.replace(escape, escape + escape).replace("_", escape + "_").replace("%", escape + "%");
+    }
+
+    private static Integer intOrNull(ResultSet rs, String column) throws SQLException {
+        int value = rs.getInt(column);
+        return rs.wasNull() ? null : value;
+    }
+
+    private static String blankToNull(String s) {
+        return s == null || s.isBlank() ? null : s.strip();
+    }
+}

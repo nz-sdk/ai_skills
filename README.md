@@ -12,6 +12,8 @@
 | [appcontext-architecture](appcontext-architecture/) | 셸↔앱 계약 세우기 | Claude | 셸↔앱 계약(AppContext 근간)을 세운다 — create-frontend 다음 단계 |
 | [add-shadcn-existing](add-shadcn-existing/) | 기존 프로젝트 shadcn 추가 | Claude | 이미 있는 React 프로젝트에 shadcn/ui 를 추가·통합한다 |
 
+변경 이력은 [CHANGELOG.md](CHANGELOG.md) 다 — 사람이 갱신한다. PR 마다 「Unreleased」에 한 줄을 더한다.
+
 ## 스킬 아티팩트
 
 | 스킬 영문명 | 아티팩트 |

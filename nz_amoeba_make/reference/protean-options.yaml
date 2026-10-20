@@ -177,6 +177,16 @@ groups:
           http://${SERVER_HOST:localhost}:${SERVER_PORT:{{PORT}}}/platform/mcp. And the metadata endpoint is registered
           under @ConditionalOnProperty on this key, so an EMPTY value makes discovery SILENTLY DISAPPEAR instead of
           failing loudly — keep a fallback on every placeholder here.
+
+          ★ THE PATH MUST BE /platform/mcp, AND SecurityConfig ALSO SERVES THE PATH-APPENDED DOCUMENT. protean
+          publishes its document only at the ROOT (/.well-known/oauth-protected-resource) with this resource, while
+          RFC 9728 §3.1 puts it at /.well-known/oauth-protected-resource/platform/mcp and §3.3 makes a strict client
+          reject a document whose `resource` differs from the identifier it built the URL from. VS Code's built-in
+          MCP client therefore failed discovery against every generated app (404, then the root one rejected) and
+          fell back to treating the app as its own Authorization Server. SecurityConfig's nested McpResourceMetadata
+          returns protean's document at the path-appended address (it refuses to start unless the resource's path is
+          exactly /platform/mcp), and McpAuthenticationEntryPoint adds resource_metadata="..." to every /platform/**
+          401. ResourceServerOnlyTest pins both. Verified with VS Code: discovery → AS sign-in → tools listed.
       - key: protean.mcp.authorization.authorization-servers
         type: string-list
         default: "[]"

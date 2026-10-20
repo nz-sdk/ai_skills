@@ -350,6 +350,18 @@ refreshes it silently. Claude Code reads this from `.mcp.json`:
 | `--static-oauth-client-info` | It attempts dynamic client registration, which most Authorization Servers leave off |
 | `--static-oauth-client-metadata` | The authorize request carries no `scope`, so the token has none |
 
+**A strict client uses the path-appended document.** The 401 from `/platform/mcp` carries
+`resource_metadata="http://<SERVER_HOST>:{{PORT}}/.well-known/oauth-protected-resource/platform/mcp"`, and that
+address serves the same document as the root one (RFC 9728 §3.1 · §5.1 — `SecurityConfig.McpResourceMetadata` and
+`McpAuthenticationEntryPoint`). VS Code's built-in MCP client reads only that one: it rejects the root document,
+whose `resource` is not the bare origin (§3.3), and without the path-appended one it treats this app as the
+Authorization Server and never signs in. `mcp-remote` does not check §3.3, so it works either way. Check both:
+
+```bash
+curl -s -D - -o /dev/null -X POST http://<SERVER_HOST>:{{PORT}}/platform/mcp | grep -i www-authenticate
+curl -s http://<SERVER_HOST>:{{PORT}}/.well-known/oauth-protected-resource/platform/mcp | jq -r .resource
+```
+
 **When the token expires, re-run nothing by hand.** Access tokens refresh silently. When the refresh token lapses
 too, `mcp-remote` reopens the browser itself — at startup or in the middle of a tool call — and the call goes on
 after sign-in.

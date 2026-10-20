@@ -61,7 +61,7 @@ Each catches one failure mode that is otherwise silent.
 | # | Check | Catches |
 |---|---|---|
 | 0 | `/.well-known/oauth-protected-resource` → 200 | the app never came up |
-| 1 | `resource` == `$BASE/platform/mcp` **and** `authorization_servers` == `["$EXPECTED_ISSUER"]` | the two discovery axes diverging |
+| 1 | `resource` == `$BASE/platform/mcp` **and** `authorization_servers` == `["$EXPECTED_ISSUER"]`; the path-appended `/.well-known/oauth-protected-resource/platform/mcp` names the same `resource` | the two discovery axes diverging; strict clients (VS Code) losing discovery |
 | 2 | `POST /platform/mcp` without a token → 401 | the RCE surface falling open |
 | 3 | both AS metadata paths and `POST /oauth2/token` → 404 | someone re-adding the Authorization Server starter |
 

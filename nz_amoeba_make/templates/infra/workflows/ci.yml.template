@@ -276,6 +276,13 @@ jobs:
             || { echo "authorization_servers mismatch (expected [$EXPECTED_ISSUER])"; exit 1; }
           echo "discovery ok (resource=$BASE/platform/mcp, as=$EXPECTED_ISSUER)"
 
+          #     The RFC 9728 address for this resource is the PATH-APPENDED one, and a strict client (VS Code) tries
+          #     it first and rejects the root document above. It must exist and name the same resource.
+          meta=$(probe -s "$BASE/.well-known/oauth-protected-resource/platform/mcp")
+          echo "$meta" | grep -q "\"resource\":\"$BASE/platform/mcp\"" \
+            || { echo "path-appended metadata missing or wrong resource: $meta"; exit 1; }
+          echo "path-appended discovery ok"
+
           # (2) Is the RCE surface closed without a token? /platform/mcp compiles and hot-loads submitted source.
           code=$(probe -s -o /dev/null -w '%{http_code}' -XPOST "$BASE/platform/mcp" \
                  -H 'Content-Type: application/json' \

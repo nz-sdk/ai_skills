@@ -9,7 +9,9 @@
 //   (3) a form login reappearing, which makes the service chain stateful again,
 //   (4) /platform/** falling open,
 //   (5) the discovery document breaking — this is how an MCP client FINDS the Authorization Server, and it is
-//       the contract most easily broken without anything else failing.
+//       the contract most easily broken without anything else failing. Pinned at BOTH addresses (root and
+//       path-appended) and through the 401's resource_metadata, because a strict client (VS Code) uses only the
+//       path-appended one and a lenient one only the root.
 //
 // The whole test runs OFFLINE: no database, and the issuer need not be reachable (see props() below).
 package {{PKG}};
@@ -129,6 +131,41 @@ class ResourceServerOnlyTest {
         // on these three names, so a document that does not advertise them cannot be acted on by a client.
         assertTrue(body.contains("mcp.read") && body.contains("mcp.write") && body.contains("mcp.admin"),
                 "the scope contract (mcp.read/write/admin) must be advertised, got: " + body);
+    }
+
+    @Test
+    void pathAppendedMetadataNamesThisResource() {
+        // RFC 9728 §3.1/§3.3: the document for http://host/platform/mcp lives at
+        // /.well-known/oauth-protected-resource/platform/mcp, and its `resource` must equal the identifier the client
+        // derived that URL from. VS Code tries this address first and REJECTS the root one (whose expected resource is
+        // the bare origin) — without this document it never finds the Authorization Server.
+        ResponseEntity<String> res = this.rest.getForEntity(
+                "http://localhost:" + this.port + "/.well-known/oauth-protected-resource/platform/mcp", String.class);
+
+        assertEquals(200, res.getStatusCode().value(),
+                "path-appended protected-resource metadata must be 200 unauthenticated: " + res.getBody());
+        String body = res.getBody() == null ? "" : res.getBody();
+        assertTrue(body.contains("\"resource\":\"http://localhost:{{PORT}}/platform/mcp\""),
+                "the path-appended document must name exactly the resource it is published for, got: " + body);
+        assertTrue(body.contains("\"" + ISSUER + "\""),
+                "the path-appended document must advertise the same authorization server, got: " + body);
+    }
+
+    @Test
+    void unauthenticatedMcpPointsAtItsMetadata() {
+        // The MCP authorization spec's MUST (RFC 9728 §5.1): the 401 tells the client where the metadata is, so it
+        // does not have to guess well-known addresses.
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        ResponseEntity<String> res = this.rest.exchange(
+                "http://localhost:" + this.port + "/platform/mcp", HttpMethod.POST,
+                new HttpEntity<>("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", headers),
+                String.class);
+
+        assertEquals(401, res.getStatusCode().value(), "expected 401 without a token: " + res.getBody());
+        String challenge = res.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE);
+        assertEquals("Bearer resource_metadata=\"http://localhost:{{PORT}}/.well-known/oauth-protected-resource/platform/mcp\"",
+                challenge, "the Bearer challenge must carry resource_metadata");
     }
 
     @Test

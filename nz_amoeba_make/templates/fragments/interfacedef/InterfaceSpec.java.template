@@ -18,6 +18,12 @@
 // both decide WHICH ARTIFACTS the generator emits, which is why they live in the contract rather than in a call
 // parameter: the deploy wrapper regenerates the server-owned files from this spec on every redeploy, so a choice
 // that is not in here cannot survive one.
+//
+// `deprecation` (operation / parameter / field) is the FE · BE API compatibility addition: it is the machine-readable
+// half of "stop using this, it goes away on <date>". It drives the OpenAPI `deprecated` + `x-sunset` marks (which
+// oasdiff reads), the RFC 9745/8594 response headers (DeprecationHeaderInterceptor) and the deploy-time
+// compatibility gate's one exception (removing something whose sunset has passed). Absent = not deprecated, and
+// NON_NULL keeps already-sealed specs byte-identical.
 package {{PKG}}.interfacedef;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
@@ -189,6 +195,7 @@ public record InterfaceSpec(
      * @param parameters  path / query / header parameters (never body fields)
      * @param requestBody body field tree; {@code null} or empty means no body
      * @param responses   one entry per status code
+     * @param deprecation set when the operation is deprecated; {@code null} otherwise
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record OperationSpec(
@@ -199,12 +206,19 @@ public record InterfaceSpec(
             String description,
             List<ParamSpec> parameters,
             List<FieldSpec> requestBody,
-            List<ResponseSpec> responses
+            List<ResponseSpec> responses,
+            DeprecationSpec deprecation
     ) {
         public OperationSpec {
             parameters = parameters == null ? List.of() : List.copyOf(parameters);
             requestBody = requestBody == null ? List.of() : List.copyOf(requestBody);
             responses = responses == null ? List.of() : List.copyOf(responses);
+        }
+
+        /** An operation that is not deprecated — the shape every caller had before {@code deprecation} existed. */
+        public OperationSpec(String operationId, HttpMethod method, String path, String summary, String description,
+                             List<ParamSpec> parameters, List<FieldSpec> requestBody, List<ResponseSpec> responses) {
+            this(operationId, method, path, summary, description, parameters, requestBody, responses, null);
         }
 
         /** True when this operation carries a request body, so gate-3 probing is not possible for it. */
@@ -229,6 +243,7 @@ public record InterfaceSpec(
      *                otherwise the service's problem to solve; body fields always had this and parameters did not.
      * @param example used to substitute {@code {var}} when generating a gate-3 probe path, so a path parameter
      *                without an example makes its operation unprobeable
+     * @param deprecation set when the parameter is deprecated; {@code null} otherwise
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record ParamSpec(
@@ -238,8 +253,14 @@ public record InterfaceSpec(
             String format,
             boolean required,
             String description,
-            String example
+            String example,
+            DeprecationSpec deprecation
     ) {
+        /** A parameter that is not deprecated. */
+        public ParamSpec(String name, ParamIn in, FieldType type, String format, boolean required,
+                         String description, String example) {
+            this(name, in, type, format, required, description, example, null);
+        }
     }
 
     /**
@@ -251,6 +272,7 @@ public record InterfaceSpec(
      *               through to OpenAPI
      * @param children named fields, when {@code type} is OBJECT
      * @param items    the shape of one element, when {@code type} is ARRAY (its own {@code name} is ignored)
+     * @param deprecation set when the field is deprecated (e.g. the old name during a rename); {@code null} otherwise
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record FieldSpec(
@@ -261,10 +283,17 @@ public record InterfaceSpec(
             String description,
             String example,
             List<FieldSpec> children,
-            FieldSpec items
+            FieldSpec items,
+            DeprecationSpec deprecation
     ) {
         public FieldSpec {
             children = children == null ? List.of() : List.copyOf(children);
+        }
+
+        /** A field that is not deprecated. */
+        public FieldSpec(String name, FieldType type, String format, boolean required, String description,
+                         String example, List<FieldSpec> children, FieldSpec items) {
+            this(name, type, format, required, description, example, children, items, null);
         }
 
         /** Scalar convenience factory (tests and the skeleton generator). */
@@ -277,6 +306,22 @@ public record InterfaceSpec(
                                        boolean required, String description) {
             return new FieldSpec(name, type, format, required, description, null, List.of(), null);
         }
+    }
+
+    /**
+     * "Stop using this; it goes away on {@code sunset}" — for an operation, a parameter or a field.
+     *
+     * <p>Dates are ISO calendar dates ({@code YYYY-MM-DD}) read as 00:00 UTC, which is what the response headers
+     * carry: {@code Deprecation: @<epoch seconds of since>} (RFC 9745) and {@code Sunset: <HTTP-date of sunset>}
+     * (RFC 8594). RFC 9745 forbids a sunset before the deprecation date; {@link InterfaceSpecValidator} enforces it.
+     * Parsing lives in {@link Deprecations}, not here, so Jackson serializes exactly these three components.
+     *
+     * @param since  required — the day the item became (or becomes) deprecated
+     * @param sunset optional — the day it may be removed; until then removal is a breaking change
+     * @param link   optional — an http(s) URL of the notice ({@code Link: <...>; rel="deprecation"})
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record DeprecationSpec(String since, String sunset, String link) {
     }
 
     /**

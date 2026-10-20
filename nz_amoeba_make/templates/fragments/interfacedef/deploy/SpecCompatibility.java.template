@@ -1,0 +1,263 @@
+// [INTERFACE DEFINITION] Is the new spec a compatible evolution of the deployed one? — the deploy-time half of the
+// FE · BE API compatibility policy ("within a major version, only add").
+//
+// The four existing gates check THIS version's code against THIS version's spec. None of them looks back, so a
+// redeploy could drop a response field the open screens still read and every gate would pass. This compares the
+// deployed (sealed) spec with the incoming one and lists what would break a client written against the former.
+//
+// Breaking, per the policy's checklist — restricted to what a spec can actually show:
+//   operation (method + path) removed
+//   parameter removed / optional → required / new required parameter / type or format changed
+//   request field removed / optional → required / new required field / type or format changed
+//   response field (success 2xx) removed / required → optional / type or format changed
+//   success status changed
+// Nested object children and array items are compared recursively.
+//
+// Not breaking: anything added (except a REQUIRED request input), descriptions and examples, and removing an item
+// that is deprecated with a sunset that has already passed — that is the "contract" step of expand → migrate →
+// contract, which the deprecation exists to schedule.
+//
+// What a spec cannot show and this therefore cannot catch: a change in meaning or unit of the same field (원 → 천 원),
+// enum values (the spec has no enum), and a status code a screen branches on other than the success one.
+//
+// Path variables are compared by position, not name: /emp/{empNo} → /emp/{no} is the same URL to a client.
+package {{PKG}}.interfacedef.deploy;
+
+import {{PKG}}.interfacedef.Deprecations;
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DeprecationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public final class SpecCompatibility {
+
+    private static final Pattern MAJOR = Pattern.compile("^[vV]?(\\d+)");
+    private static final Pattern PATH_VAR = Pattern.compile("\\{[^}]*}");
+
+    private SpecCompatibility() {
+    }
+
+    /** The leading major number of a version string ({@code 1.4.0} → 1, {@code v2} → 2); empty when there is none. */
+    public static OptionalInt major(String version) {
+        if (version == null) {
+            return OptionalInt.empty();
+        }
+        Matcher m = MAJOR.matcher(version.trim());
+        if (!m.find()) {
+            return OptionalInt.empty();
+        }
+        try {
+            return OptionalInt.of(Integer.parseInt(m.group(1)));
+        }
+        catch (NumberFormatException e) {
+            return OptionalInt.empty();
+        }
+    }
+
+    /**
+     * Whether the compatibility rule binds this version step.
+     *
+     * <p>It does not when the deployed major is 0 — SemVer's initial development, where anything may change — or
+     * when the new version raises the major: that is the sanctioned way to ship a breaking change. A version that
+     * does not parse is held to the rule (an unknown step is not evidence of a major bump).
+     */
+    public static boolean applies(String deployedVersion, String nextVersion) {
+        OptionalInt before = major(deployedVersion);
+        OptionalInt after = major(nextVersion);
+        if (before.isPresent() && before.getAsInt() == 0) {
+            return false;
+        }
+        return !(before.isPresent() && after.isPresent() && after.getAsInt() > before.getAsInt());
+    }
+
+    /**
+     * Every change in {@code next} that breaks a client of {@code deployed}. Empty means compatible.
+     *
+     * @param now decides whether a deprecated item's sunset has passed (its removal is then allowed)
+     */
+    public static List<String> breakingChanges(InterfaceSpec deployed, InterfaceSpec next, Instant now) {
+        List<String> out = new ArrayList<>();
+        Map<String, OperationSpec> nextOps = byRoute(next);
+        for (OperationSpec before : deployed.operations()) {
+            if (before == null || before.method() == null || before.path() == null) {
+                continue;
+            }
+            String route = before.method() + " " + before.path();
+            OperationSpec after = nextOps.get(routeKey(before));
+            if (after == null) {
+                if (!removable(before.deprecation(), now)) {
+                    out.add(route + ": operation removed" + removalHint(before.deprecation()));
+                }
+                continue;
+            }
+            compareParameters(out, route, before, after, now);
+            compareFields(out, route + ": request field ", "", before.requestBody(), after.requestBody(),
+                    Direction.REQUEST, now);
+            compareResponses(out, route, before, after, now);
+        }
+        return out;
+    }
+
+    private enum Direction { REQUEST, RESPONSE }
+
+    private static Map<String, OperationSpec> byRoute(InterfaceSpec spec) {
+        Map<String, OperationSpec> map = new LinkedHashMap<>();
+        for (OperationSpec op : spec.operations()) {
+            if (op != null && op.method() != null && op.path() != null) {
+                map.put(routeKey(op), op);
+            }
+        }
+        return map;
+    }
+
+    private static String routeKey(OperationSpec op) {
+        return op.method() + " " + PATH_VAR.matcher(op.path()).replaceAll("{}");
+    }
+
+    private static void compareParameters(List<String> out, String route, OperationSpec before, OperationSpec after,
+                                          Instant now) {
+        Map<String, ParamSpec> next = new LinkedHashMap<>();
+        for (ParamSpec p : after.parameters()) {
+            if (p != null && p.in() != null && p.name() != null) {
+                next.put(paramKey(p), p);
+            }
+        }
+        Map<String, ParamSpec> prev = new LinkedHashMap<>();
+        for (ParamSpec p : before.parameters()) {
+            if (p == null || p.in() == null || p.name() == null) {
+                continue;
+            }
+            prev.put(paramKey(p), p);
+            String at = route + ": " + p.in().wire() + " parameter '" + p.name() + "'";
+            ParamSpec n = next.get(paramKey(p));
+            if (n == null) {
+                // A path variable is matched by position in the route key, so its name may change freely.
+                if (p.in() != InterfaceSpec.ParamIn.PATH && !removable(p.deprecation(), now)) {
+                    out.add(at + " removed" + removalHint(p.deprecation()));
+                }
+                continue;
+            }
+            if (!p.required() && n.required()) {
+                out.add(at + " became required");
+            }
+            typeChange(p.type(), p.format(), n.type(), n.format()).ifPresent(c -> out.add(at + " " + c));
+        }
+        for (ParamSpec n : next.values()) {
+            if (n.required() && n.in() != InterfaceSpec.ParamIn.PATH && !prev.containsKey(paramKey(n))) {
+                out.add(route + ": new required " + n.in().wire() + " parameter '" + n.name() + "'");
+            }
+        }
+    }
+
+    private static String paramKey(ParamSpec p) {
+        return p.in() + ":" + p.name();
+    }
+
+    private static void compareResponses(List<String> out, String route, OperationSpec before, OperationSpec after,
+                                         Instant now) {
+        Optional<ResponseSpec> was = before.successResponse();
+        Optional<ResponseSpec> is = after.successResponse();
+        if (was.isEmpty() || is.isEmpty()) {
+            return;   // the validator requires a 2xx; nothing sensible to compare
+        }
+        if (was.get().status() != is.get().status()) {
+            out.add(route + ": success status changed " + was.get().status() + " → " + is.get().status());
+        }
+        compareFields(out, route + ": response " + is.get().status() + " field ", "", was.get().body(),
+                is.get().body(), Direction.RESPONSE, now);
+    }
+
+    private static void compareFields(List<String> out, String at, String prefix, List<FieldSpec> before,
+                                      List<FieldSpec> after, Direction direction, Instant now) {
+        Map<String, FieldSpec> next = new LinkedHashMap<>();
+        for (FieldSpec f : after) {
+            if (f != null && f.name() != null) {
+                next.put(f.name(), f);
+            }
+        }
+        Map<String, FieldSpec> prev = new LinkedHashMap<>();
+        for (FieldSpec f : before) {
+            if (f == null || f.name() == null) {
+                continue;
+            }
+            prev.put(f.name(), f);
+            String path = prefix + f.name();
+            FieldSpec n = next.get(f.name());
+            if (n == null) {
+                if (!removable(f.deprecation(), now)) {
+                    out.add(at + path + " removed" + removalHint(f.deprecation()));
+                }
+                continue;
+            }
+            compareField(out, at, path, f, n, direction, now);
+        }
+        if (direction == Direction.REQUEST) {
+            for (FieldSpec n : next.values()) {
+                if (n.required() && !prev.containsKey(n.name())) {
+                    out.add(at + prefix + n.name() + " added as required");
+                }
+            }
+        }
+    }
+
+    /** One field present on both sides: attributes, then its nested shape. Also used for array elements. */
+    private static void compareField(List<String> out, String at, String path, FieldSpec before, FieldSpec after,
+                                     Direction direction, Instant now) {
+        if (direction == Direction.REQUEST && !before.required() && after.required()) {
+            out.add(at + path + " became required");
+        }
+        if (direction == Direction.RESPONSE && before.required() && !after.required()) {
+            out.add(at + path + " is no longer required (a client may find it absent)");
+        }
+        Optional<String> changed = typeChange(before.type(), before.format(), after.type(), after.format());
+        if (changed.isPresent()) {
+            out.add(at + path + " " + changed.get());
+            return;   // the nested shape of a different type is not comparable
+        }
+        if (before.type() == FieldType.OBJECT) {
+            compareFields(out, at, path + ".", before.children(), after.children(), direction, now);
+        } else if (before.type() == FieldType.ARRAY && before.items() != null && after.items() != null) {
+            compareField(out, at, path + "[]", before.items(), after.items(), direction, now);
+        }
+    }
+
+    /** {@code type changed from string(date) to string} — the format is part of the contract (yyyyMMdd → ISO). */
+    private static Optional<String> typeChange(FieldType beforeType, String beforeFormat, FieldType afterType,
+                                               String afterFormat) {
+        String was = describe(beforeType, beforeFormat);
+        String is = describe(afterType, afterFormat);
+        return was.equals(is) ? Optional.empty() : Optional.of("type changed from " + was + " to " + is);
+    }
+
+    private static String describe(FieldType type, String format) {
+        String t = type == null ? "?" : type.wire();
+        return format == null || format.isBlank() ? t : t + "(" + format.trim() + ")";
+    }
+
+    private static boolean removable(DeprecationSpec deprecation, Instant now) {
+        return deprecation != null && Deprecations.sunsetPassed(deprecation, now);
+    }
+
+    private static String removalHint(DeprecationSpec deprecation) {
+        if (deprecation == null) {
+            return " (it is not deprecated — deprecate it with a sunset first, or release a new major version)";
+        }
+        if (deprecation.sunset() == null || deprecation.sunset().isBlank()) {
+            return " (it is deprecated but has no sunset — set one, and remove it after that date)";
+        }
+        return " (deprecated, but its sunset " + deprecation.sunset() + " has not passed yet)";
+    }
+}

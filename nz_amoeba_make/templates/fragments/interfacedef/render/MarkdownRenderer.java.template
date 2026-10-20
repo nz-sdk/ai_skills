@@ -6,9 +6,14 @@
 //
 // Table skeleton follows the convention already used across document/proteanSrc/docs/guide: overview -> operation
 // list -> one `| 명칭 | 타입 | 필수 | 설명 |` table per operation section.
+//
+// A deprecated operation is flagged in the list and gets a callout line under its route; a deprecated parameter or
+// field carries the note at the end of its description cell (since · sunset · notice link, see Deprecations).
 package {{PKG}}.interfacedef.render;
 
+import {{PKG}}.interfacedef.Deprecations;
 import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DeprecationSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
@@ -67,6 +72,7 @@ public final class MarkdownRenderer {
             out.append("| [").append(cell(op.operationId())).append("](#")
                     .append(anchor(op.operationId())).append(") | ")
                     .append(op.method()).append(" | `").append(cell(op.path())).append("` | ")
+                    .append(op.deprecation() == null ? "" : "⚠ deprecated · ")
                     .append(cell(op.summary())).append(" |\n");
         }
         out.append('\n');
@@ -75,6 +81,10 @@ public final class MarkdownRenderer {
     private static void appendOperation(StringBuilder out, OperationSpec op) {
         out.append("---\n\n## ").append(op.operationId()).append("\n\n");
         out.append('`').append(op.method()).append(' ').append(op.path()).append("`\n\n");
+        if (op.deprecation() != null) {
+            out.append("> ⚠ **deprecated** — ").append(Deprecations.describe(op.deprecation()))
+                    .append(". 새 화면 · 클라이언트는 쓰지 않는다.\n\n");
+        }
         if (op.summary() != null && !op.summary().isBlank()) {
             out.append("**").append(op.summary().trim()).append("**\n\n");
         }
@@ -92,7 +102,8 @@ public final class MarkdownRenderer {
                         .append(p.in() == null ? "" : p.in().wire()).append(" | ")
                         .append(typeOf(p.type() == null ? null : p.type().wire(), p.format())).append(" | ")
                         .append(required(p.required())).append(" | ")
-                        .append(cell(p.description())).append(" |\n");
+                        .append(cell((p.description() == null ? "" : p.description())
+                                + deprecatedNote(p.deprecation()))).append(" |\n");
             }
             out.append('\n');
         }
@@ -173,7 +184,12 @@ public final class MarkdownRenderer {
 
     private static Row row(String path, FieldSpec f) {
         return new Row(path, f.type() == null ? null : f.type().wire(), f.format(),
-                f.required(), f.description());
+                f.required(), (f.description() == null ? "" : f.description()) + deprecatedNote(f.deprecation()));
+    }
+
+    /** Appended to a description cell: {@code  ⚠ deprecated (since … · sunset … · link)}, or nothing. */
+    private static String deprecatedNote(DeprecationSpec d) {
+        return d == null ? "" : " ⚠ deprecated (" + Deprecations.describe(d) + ")";
     }
 
     /** {@code string (date-time)} when a format refines the type, otherwise just the type. */

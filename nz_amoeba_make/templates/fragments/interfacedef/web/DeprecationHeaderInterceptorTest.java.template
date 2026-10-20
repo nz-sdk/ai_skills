@@ -1,0 +1,114 @@
+// The response-header half of a deprecation. Exact header strings, because the consumer is the FE's client.ts and
+// any client that implements RFC 9745 / 8594 — a near-miss format is simply not recognized.
+package {{PKG}}.interfacedef.web;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DeprecationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.SpecFixtures;
+import {{PKG}}.interfacedef.deploy.SpecResource;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+import org.htcom.protean.module.ModuleResource;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.web.servlet.HandlerMapping;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Consumer;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class DeprecationHeaderInterceptorTest {
+
+    private static final DeprecationSpec D =
+            new DeprecationSpec("2026-11-01", "2026-12-01", "https://example.com/notices/123");
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final ModulePlatform platform = mock(ModulePlatform.class);
+
+    @SuppressWarnings("unchecked")
+    private DeprecationIndex index() {
+        ObjectProvider<ModulePlatform> provider = mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(platform);
+        return new DeprecationIndex(provider, mapper);
+    }
+
+    /** orders, with GET /orders/{orderId} deprecated (or not). */
+    private ModuleDescriptor orders(DeprecationSpec getOrderDeprecation) {
+        OperationSpec get = SpecFixtures.getOrder();
+        InterfaceSpec spec = new InterfaceSpec("주문 API", "주문을 조회하고 생성한다", InterfaceSpec.DataAccess.MYBATIS,
+                List.of(new OperationSpec(get.operationId(), get.method(), get.path(), get.summary(), get.description(),
+                        get.parameters(), get.requestBody(), get.responses(), getOrderDeprecation),
+                        SpecFixtures.createOrder()));
+        return ModuleDescriptor.builder().id("orders").version("1.2.0")
+                .resources(java.util.Map.of(SpecResource.PATH,
+                        ModuleResource.text(SpecResource.serialize(mapper, spec))))
+                .build();
+    }
+
+    private static MockHttpServletResponse call(DeprecationIndex index, String method, String pattern) {
+        MockHttpServletRequest request = new MockHttpServletRequest(method, "/irrelevant");
+        request.setAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE, pattern);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        assertTrue(new DeprecationHeaderInterceptor(index).preHandle(request, response, new Object()));
+        return response;
+    }
+
+    @Test
+    void aDeprecatedOperationGetsAllThreeHeaders() {
+        when(platform.list()).thenReturn(List.of(orders(D)));
+        MockHttpServletResponse res = call(index(), "GET", "/orders/{orderId}");
+        assertEquals("@1793491200", res.getHeader("Deprecation"));
+        assertEquals("Tue, 01 Dec 2026 00:00:00 GMT", res.getHeader("Sunset"));
+        assertEquals("<https://example.com/notices/123>; rel=\"deprecation\"; type=\"text/html\"",
+                res.getHeader("Link"));
+    }
+
+    @Test
+    void otherRoutesAndMethodsAreUntouched() {
+        when(platform.list()).thenReturn(List.of(orders(D)));
+        DeprecationIndex index = index();
+        assertNull(call(index, "POST", "/orders").getHeader("Deprecation"));
+        assertNull(call(index, "DELETE", "/orders/{orderId}").getHeader("Deprecation"));
+        assertNull(call(index, "GET", "/platform/mcp").getHeader("Deprecation"));
+    }
+
+    @Test
+    void aRequestWithNoMatchedPatternPassesThrough() {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/static/app.js");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        assertTrue(new DeprecationHeaderInterceptor(index()).preHandle(request, response, new Object()));
+        assertNull(response.getHeader("Deprecation"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void aRedeployIsPickedUpThroughTheChangeListener() {
+        when(platform.list()).thenReturn(List.of(orders(null)));
+        DeprecationIndex index = index();
+        assertNull(call(index, "GET", "/orders/{orderId}").getHeader("Deprecation"), "not deprecated yet");
+
+        ArgumentCaptor<Consumer<String>> listener = ArgumentCaptor.forClass(Consumer.class);
+        verify(platform).addChangeListener(listener.capture());
+
+        when(platform.find("orders")).thenReturn(Optional.of(orders(D)));
+        listener.getValue().accept("orders");
+        assertEquals("@1793491200", call(index, "GET", "/orders/{orderId}").getHeader("Deprecation"));
+
+        when(platform.find("orders")).thenReturn(Optional.empty());   // uninstalled
+        listener.getValue().accept("orders");
+        assertNull(call(index, "GET", "/orders/{orderId}").getHeader("Deprecation"));
+    }
+}

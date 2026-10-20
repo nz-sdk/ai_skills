@@ -1,0 +1,24 @@
+// [INTERFACE DEFINITION] Registers DeprecationHeaderInterceptor for every route. Its own WebMvcConfigurer rather
+// than a line in support/WebSupportConfig, so the deprecation feature stays in one package and can be read (or
+// removed) without touching the consumer-owned support hooks. The interceptor only acts on routes the index knows,
+// so applying it to /** costs one map lookup per request.
+package {{PKG}}.interfacedef.web;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+@Configuration
+public class DeprecationHeaderConfig implements WebMvcConfigurer {
+
+    private final DeprecationIndex index;
+
+    public DeprecationHeaderConfig(DeprecationIndex index) {
+        this.index = index;
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(new DeprecationHeaderInterceptor(index));
+    }
+}

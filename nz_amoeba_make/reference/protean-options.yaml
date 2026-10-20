@@ -177,6 +177,16 @@ groups:
           http://${SERVER_HOST:localhost}:${SERVER_PORT:{{PORT}}}/platform/mcp. And the metadata endpoint is registered
           under @ConditionalOnProperty on this key, so an EMPTY value makes discovery SILENTLY DISAPPEAR instead of
           failing loudly — keep a fallback on every placeholder here.
+
+          ★ THE PATH MUST BE /platform/mcp, AND SecurityConfig ALSO SERVES THE PATH-APPENDED DOCUMENT. protean
+          publishes its document only at the ROOT (/.well-known/oauth-protected-resource) with this resource, while
+          RFC 9728 §3.1 puts it at /.well-known/oauth-protected-resource/platform/mcp and §3.3 makes a strict client
+          reject a document whose `resource` differs from the identifier it built the URL from. VS Code's built-in
+          MCP client therefore failed discovery against every generated app (404, then the root one rejected) and
+          fell back to treating the app as its own Authorization Server. SecurityConfig's nested McpResourceMetadata
+          returns protean's document at the path-appended address (it refuses to start unless the resource's path is
+          exactly /platform/mcp), and McpAuthenticationEntryPoint adds resource_metadata="..." to every /platform/**
+          401. ResourceServerOnlyTest pins both. Verified with VS Code: discovery → AS sign-in → tools listed.
       - key: protean.mcp.authorization.authorization-servers
         type: string-list
         default: "[]"
@@ -866,6 +876,47 @@ capabilities:
           Leave it UNSET (library default true) and offer it as a commented edit-point in application.yml with that
           sentence attached, so a reader learns the switch exists without being invited to flip it. Only reason to
           set false: debugging the rule itself.
+      - key: amoeba.compat-gate.enabled
+        type: boolean
+        default: true
+        advanced: true
+        requires: [protean.mcp.enabled=true]
+        desc: Whether an update of a deployed module is refused when it breaks clients within the same major version.
+        note: >-
+          deploy/SpecCompatibility, called from InterfaceDeployPreparer BEFORE anything is compiled, compares the
+          incoming spec with the deployed (sealed) one. Within the same major version it refuses: a removed operation
+          (method + path), a removed parameter or field, optional → required input, a new required input,
+          required → optional response field, a type or format change, a success-status change. Exempt: any 0.x
+          module (initial development), a major bump (1.x → 2.0.0 — ship the new shape on new paths such as
+          /api/v2/... beside the old ones), and removing an item that carries `deprecation` with a sunset that has
+          passed. A renamed path variable (/orders/{id} → /orders/{no}) is the same URL to a client, so it passes.
+          The refusal names every breaking item with its route and field path, plus the two sanctioned ways forward.
+
+          The same `deprecation: {since, sunset?, link?}` mark (operation / parameter / field; dates YYYY-MM-DD, UTC;
+          sunset not before since) also drives: the response headers of a deprecated OPERATION — Deprecation: @<epoch>
+          (RFC 9745), Sunset: <IMF-fixdate> (RFC 8594), Link: <…>; rel="deprecation" (web/DeprecationHeaderInterceptor,
+          read from the sealed spec of every module and refreshed on each install / update / uninstall); OpenAPI
+          `deprecated: true` + `x-sunset` (+ `externalDocs` for the link); the deploy result's `deprecations` list
+          and the webhook's {{deprecations}} token.
+
+          ★ AN EMERGENCY SWITCH, NOT A TUNING KNOB — do not offer false in step 5. Turning it off lets a redeploy
+          break the screens that are open right now. WRITE IT OUT as `enabled: true` under `amoeba.compat-gate`
+          with that sentence as its comment, and assert it in ConfigMatchesSelectionTest: the policy has to be
+          visible to whoever reads the config, the same reason amoeba.skeleton.service-interface is written out.
+
+          ★ KNOWN GAP WITH oasdiff (a consumer repo's CI). oasdiff honours `x-sunset` only on OPERATIONS: removing a
+          deprecated REQUIRED response field after its sunset passes this gate but is still ERR
+          (response-required-property-removed) in oasdiff; removing an OPTIONAL response field that was never
+          deprecated is refused here and passes oasdiff. Retire a whole operation when both sides must agree, or say
+          which rule the consumer follows.
+
+          ★ web/DeprecationIndex RESOLVES ModulePlatform LAZILY (ObjectProvider, on the first request). It is reached
+          from a WebMvcConfigurer, which Spring consults while creating requestMappingHandlerMapping — and
+          ModulePlatform depends on that very handler mapping through protean's ReverseProxy. An eager injection is a
+          circular reference that stops the context (seen: ResourceServerOnlyTest failing on startup).
+
+          Known bypass, left as is: protean.uninstall_module deletes the module's version history, so a fresh
+          deploy afterwards has no baseline.
       - key: amoeba.deploy-callback.enabled
         type: boolean
         default: false
@@ -909,8 +960,14 @@ capabilities:
         type: string
         default: ""
         requires: [amoeba.deploy-callback.enabled=true]
-        desc: Request body with {{outcome}} {{moduleId}} {{version}} {{target}} {{timestamp}} {{summary}} substituted.
+        desc: >-
+          Request body with {{outcome}} {{moduleId}} {{version}} {{target}} {{timestamp}} {{summary}}
+          {{deprecations}} substituted.
         note: >-
+          {{deprecations}} is what the deployed spec marks deprecated, one line per item
+          (`GET /api/dept response 200 field rows[].deptNm — since … · sunset … · <link>`), empty when nothing is —
+          the machine-readable half of a deprecation notice. Include it in the suggested template.
+
           ★ EVERY SUBSTITUTED VALUE IS JSON-STRING-ESCAPED, so each token must sit INSIDE quotes:
           {"title": "{{outcome}}", "description": "{{summary}}"}. The summary carries newlines, quotes and
           markdown; pasted in raw it produces a body that is not parseable JSON, and the endpoint answers 400 with
@@ -949,9 +1006,12 @@ capabilities:
         - { src: InterfaceSpecValidator.java.template,              to: main }
         - { src: DraftStore.java.template,                          to: main }
         - { src: SkeletonDefaults.java.template,                   to: main }
+        # deprecation marks: header values, date rules, the one-line summary for the deploy result and webhook
+        - { src: Deprecations.java.template,                        to: main }
         - { src: InterfaceSpecValidatorTest.java.template,          to: test }
         - { src: DraftStoreTest.java.template,                      to: test }
         - { src: SpecFixtures.java.template,                        to: test }
+        - { src: DeprecationSpecTest.java.template,                 to: test }
         # -- generator: spec -> the module's Java skeleton -----------------------------------------------
         - { src: gen/JavaNames.java.template,                       to: main }
         - { src: gen/GeneratedFile.java.template,                   to: main }
@@ -970,6 +1030,7 @@ capabilities:
         - { src: render/OpenApiRenderer.java.template,              to: main }
         - { src: render/MarkdownRendererTest.java.template,         to: test }
         - { src: render/OpenApiRendererTest.java.template,          to: test }
+        - { src: render/DeprecationRenderingTest.java.template,     to: test }
         # -- L3: promotion gate 2. The only layer no deploy path can bypass ------------------------------
         - { src: gate/InterfaceContractRule.java.template,          to: main, when: protean.gate.review-enabled=true }
         - { src: gate/BytecodeCompiler.java.template,               to: test, when: protean.gate.review-enabled=true }
@@ -980,6 +1041,7 @@ capabilities:
         - { src: mcp/GetInterfaceDocumentTool.java.template,        to: main, when: protean.mcp.enabled=true }
         - { src: mcp/InterfaceSpecSchemaTest.java.template,         to: test, when: protean.mcp.enabled=true }
         - { src: mcp/DefineInterfaceToolTest.java.template,         to: test, when: protean.mcp.enabled=true }
+        - { src: mcp/DeprecationSchemaTest.java.template,           to: test, when: protean.mcp.enabled=true }
         # -- L2: deploy-time enforcement, installed over the built-in tools ------------------------------
         - { src: deploy/SpecResource.java.template,                 to: main, when: protean.mcp.enabled=true }
         - { src: deploy/ProbeGenerator.java.template,               to: main, when: protean.mcp.enabled=true }
@@ -989,6 +1051,8 @@ capabilities:
         - { src: deploy/SpecBearingDeployTool.java.template,        to: main, when: protean.mcp.enabled=true }
         - { src: deploy/SpecGuardTool.java.template,                to: main, when: protean.mcp.enabled=true }
         - { src: deploy/InterfaceToolRegistrar.java.template,       to: main, when: protean.mcp.enabled=true }
+        # Compatibility gate (amoeba.compat-gate.enabled): an update may only add within a major version.
+        - { src: deploy/SpecCompatibility.java.template,            to: main, when: protean.mcp.enabled=true }
         # Deploy-time outbound webhook. Emitted UNCONDITIONALLY with the rest of the wrapper (subject to the same
         # mcp.enabled gate) and DISABLED BY DEFAULT, because SpecBearingDeployTool takes it as a constructor
         # argument — making the class conditional would fork that template into two variants for no gain. An
@@ -1001,6 +1065,14 @@ capabilities:
         - { src: deploy/InterfaceDeployPreparerTest.java.template,  to: test, when: protean.mcp.enabled=true }
         - { src: deploy/SpecBearingDeployToolTest.java.template,    to: test, when: protean.mcp.enabled=true }
         - { src: deploy/SpecGuardToolTest.java.template,            to: test, when: protean.mcp.enabled=true }
+        - { src: deploy/SpecCompatibilityTest.java.template,        to: test, when: protean.mcp.enabled=true }
+        - { src: deploy/CompatibilityGateTest.java.template,        to: test, when: protean.mcp.enabled=true }
+        # -- Deprecation / Sunset / Link response headers for deprecated operations ---------------------
+        # Gated with deploy/* because DeprecationIndex reads each module's sealed spec through deploy/SpecResource.
+        - { src: web/DeprecationIndex.java.template,                to: main, when: protean.mcp.enabled=true }
+        - { src: web/DeprecationHeaderInterceptor.java.template,    to: main, when: protean.mcp.enabled=true }
+        - { src: web/DeprecationHeaderConfig.java.template,         to: main, when: protean.mcp.enabled=true }
+        - { src: web/DeprecationHeaderInterceptorTest.java.template, to: test, when: protean.mcp.enabled=true }
     desc: >-
       Turns module authoring around. Instead of an agent writing free-form Java and the platform reconstructing the
       contract afterwards, a module DECLARES an InterfaceSpec first and the server GENERATES the DTO / controller /
@@ -1013,6 +1085,13 @@ capabilities:
       promotion gate 2) rejects the wrong BYTECODE and is the ONLY layer no deploy path can bypass, the admin REST
       surface included. Also renders the spec to a markdown contract document and to OpenAPI 3.0.3, both pure
       functions of the spec, so neither can disagree with what was deployed.
+
+      Once deployed, a module may only ADD within a major version: deploy/SpecCompatibility refuses an update that
+      would break the screens already built against it (amoeba.compat-gate.enabled). Retiring something goes
+      through a `deprecation: {since, sunset, link}` mark on the operation, parameter or field, which the server
+      turns into Deprecation · Sunset · Link response headers (RFC 9745 / 8594), OpenAPI `deprecated` + `x-sunset`,
+      the deploy result's `deprecations` list and the webhook's {{deprecations}} — and the item may be removed once
+      its sunset has passed (expand → migrate → contract).
 
       Descriptions answer to two bars, because they are not all the same kind of text. A parameter or a field
       description fills a COLUMN of the document (`| 명칭 | 타입 | 필수 | 설명 |`) and becomes the DTO's @Schema

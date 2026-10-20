@@ -1,0 +1,81 @@
+// How a deprecation reaches the two documents. The OpenAPI half is a contract with tools outside this repo: oasdiff
+// reads `deprecated` + `x-sunset` to decide that removing an item after its sunset is NOT breaking (the FE repo's CI
+// gate), and openapi-typescript turns `deprecated` into @deprecated on the generated types.
+package {{PKG}}.interfacedef.render;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DeprecationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+import {{PKG}}.interfacedef.SpecFixtures;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class DeprecationRenderingTest {
+
+    private static final DeprecationSpec D =
+            new DeprecationSpec("2026-11-01", "2026-12-01", "https://example.com/notices/123");
+
+    private static InterfaceSpec spec() {
+        OperationSpec op = new OperationSpec("dept", HttpMethod.GET, "/api/dept", "부서 목록 조회",
+                "부서 목록을 반환한다",
+                List.of(new ParamSpec("langCd", ParamIn.QUERY, FieldType.STRING, null, false,
+                        "다국어 조회 기준 언어", null, D)),
+                null,
+                List.of(new ResponseSpec(200, "조회 성공", List.of(
+                        new FieldSpec("deptNm", FieldType.STRING, null, true, "부서 한글 명칭", null, List.of(), null,
+                                D),
+                        FieldSpec.scalar("name", FieldType.STRING, true, "부서 표시 명칭")))),
+                D);
+        return new InterfaceSpec("사원등록", "사원등록 화면 API", InterfaceSpec.DataAccess.MYBATIS, List.of(op));
+    }
+
+    @Test
+    void openApiMarksTheOperationParameterAndPropertyWithSunset() {
+        ObjectNode doc = new OpenApiRenderer(new ObjectMapper()).render("dept", "1.2.0", spec());
+        var op = doc.at("/paths/~1api~1dept/get");
+        assertTrue(op.get("deprecated").asBoolean());
+        assertEquals("2026-12-01", op.get("x-sunset").asText());
+        assertEquals("https://example.com/notices/123", op.at("/externalDocs/url").asText());
+
+        var param = op.at("/parameters/0");
+        assertTrue(param.get("deprecated").asBoolean());
+        assertEquals("2026-12-01", param.get("x-sunset").asText());
+
+        var props = op.at("/responses/200/content/application~1json/schema/properties");
+        assertTrue(props.at("/deptNm/deprecated").asBoolean());
+        assertEquals("2026-12-01", props.at("/deptNm/x-sunset").asText());
+        assertTrue(props.at("/name/deprecated").isMissingNode(), "an undeprecated property stays unmarked");
+    }
+
+    @Test
+    void openApiOfASpecWithoutDeprecationIsUnchanged() {
+        String json = new OpenApiRenderer(new ObjectMapper()).render("orders", "1.0.0", SpecFixtures.orders())
+                .toString();
+        assertFalse(json.contains("deprecated"), json);
+        assertFalse(json.contains("x-sunset"), json);
+    }
+
+    @Test
+    void markdownFlagsTheOperationAndAnnotatesParameterAndField() {
+        String md = MarkdownRenderer.render("dept", "1.2.0", spec());
+        assertTrue(md.contains("| ⚠ deprecated · 부서 목록 조회 |"), md);
+        assertTrue(md.contains("> ⚠ **deprecated** — since 2026-11-01 · sunset 2026-12-01 · "
+                + "https://example.com/notices/123"), md);
+        assertTrue(md.contains("다국어 조회 기준 언어 ⚠ deprecated (since 2026-11-01"), md);
+        assertTrue(md.contains("부서 한글 명칭 ⚠ deprecated (since 2026-11-01"), md);
+    }
+}

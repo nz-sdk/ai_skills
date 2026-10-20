@@ -1,0 +1,132 @@
+// The gate wired into InterfaceDeployPreparer: a breaking update is refused BEFORE anything is compiled, with a
+// message that says what broke and the two sanctioned ways forward; the exemptions (major bump, 0.x, switch off)
+// let the same deploy through. The rules themselves are pinned in SpecCompatibilityTest.
+package {{PKG}}.interfacedef.deploy;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+import {{PKG}}.interfacedef.SkeletonDefaults;
+import {{PKG}}.interfacedef.SpecFixtures;
+import {{PKG}}.interfacedef.gen.GeneratedFile;
+import {{PKG}}.interfacedef.gen.SkeletonBundle;
+import {{PKG}}.interfacedef.gen.SkeletonGenerator;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+import org.htcom.protean.module.ModuleResource;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class CompatibilityGateTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final DraftStore draftStore = new DraftStore();
+    private final ModulePlatform platform = mock(ModulePlatform.class);
+    private final SkeletonDefaults defaults = new SkeletonDefaults("none", true, true);
+
+    /** What this deploy submits — the two-operation orders fixture. */
+    private static final InterfaceSpec NEXT = SpecFixtures.orders();
+    private static final SkeletonBundle SKELETON = SkeletonGenerator.generate(
+            new SkeletonGenerator.Request("orders", "module.orders", NEXT));
+
+    /** The deployed baseline: the same two operations plus GET /orders, which NEXT drops. */
+    private static InterfaceSpec deployedWithListOperation() {
+        List<OperationSpec> ops = new ArrayList<>(NEXT.operations());
+        ops.add(new OperationSpec("listOrders", HttpMethod.GET, "/orders", "주문 목록 조회",
+                "조건에 맞는 주문 목록을 반환한다", List.of(), null,
+                List.of(new ResponseSpec(200, "조회 성공", List.of(
+                        InterfaceSpec.FieldSpec.scalar("total", FieldType.INTEGER, true, "전체 주문 건수"))))));
+        return new InterfaceSpec(NEXT.title(), NEXT.description(), NEXT.dataAccess(), ops);
+    }
+
+    private void deployed(String version, InterfaceSpec spec) {
+        when(platform.find("orders")).thenReturn(Optional.of(ModuleDescriptor.builder()
+                .id("orders").version(version)
+                .resources(Map.of(SpecResource.PATH, ModuleResource.text(SpecResource.serialize(mapper, spec))))
+                .build()));
+    }
+
+    private ObjectNode args(String version) {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("id", "orders");
+        root.put("version", version);
+        root.put("specId", draftStore.put("orders", version, "module.orders", NEXT, SKELETON));
+        ArrayNode files = root.putArray("files");
+        for (GeneratedFile file : SKELETON.authored()) {
+            String content = file.filename().endsWith(".xml")
+                    ? file.content().replaceAll(
+                            "(?s)(<(select|insert|update|delete)\\b[^>]*>)\\s*(<!--.*?-->)?\\s*(</\\2\\s*>)",
+                            "$1SELECT 1$4")
+                    : file.content();
+            ObjectNode node = files.addObject();
+            node.put("kind", file.kind().wire());
+            node.put("filename", file.filename());
+            node.put("content", content);
+        }
+        return root;
+    }
+
+    private InterfaceDeployPreparer preparer(boolean gateEnabled) {
+        return new InterfaceDeployPreparer(mapper, draftStore, platform, defaults, gateEnabled);
+    }
+
+    @Test
+    void aBreakingUpdateInTheSameMajorIsRefusedWithTheWayForward() {
+        deployed("1.0.0", deployedWithListOperation());
+        InterfaceDeployPreparer.PreparationException e = assertThrows(
+                InterfaceDeployPreparer.PreparationException.class, () -> preparer(true).prepare(args("1.1.0")));
+        assertTrue(e.getMessage().contains("module 'orders' 1.0.0 → 1.1.0 breaks clients"), e.getMessage());
+        assertTrue(e.getMessage().contains("GET /orders: operation removed"), e.getMessage());
+        assertTrue(e.getMessage().contains("2.0.0"), "names the major-bump route: " + e.getMessage());
+    }
+
+    @Test
+    void aMajorBumpGoesThrough() {
+        deployed("1.0.0", deployedWithListOperation());
+        assertDoesNotThrow(() -> preparer(true).prepare(args("2.0.0")));
+    }
+
+    @Test
+    void aZeroMajorModuleIsInInitialDevelopment() {
+        deployed("0.3.0", deployedWithListOperation());
+        assertDoesNotThrow(() -> preparer(true).prepare(args("0.4.0")));
+    }
+
+    @Test
+    void theSwitchTurnsTheGateOff() {
+        deployed("1.0.0", deployedWithListOperation());
+        assertDoesNotThrow(() -> preparer(false).prepare(args("1.1.0")));
+    }
+
+    @Test
+    void aCompatibleUpdateGoesThrough() {
+        // Deployed had only getOrder; NEXT adds createOrder — an addition.
+        deployed("1.0.0", new InterfaceSpec(NEXT.title(), NEXT.description(), NEXT.dataAccess(),
+                List.of(SpecFixtures.getOrder())));
+        assertDoesNotThrow(() -> preparer(true).prepare(args("1.1.0")));
+    }
+
+    @Test
+    void theDefaultConstructorKeepsTheGateOn() {
+        deployed("1.0.0", deployedWithListOperation());
+        assertThrows(InterfaceDeployPreparer.PreparationException.class,
+                () -> new InterfaceDeployPreparer(mapper, draftStore, platform, defaults).prepare(args("1.1.0")));
+    }
+}

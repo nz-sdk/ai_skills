@@ -7,6 +7,11 @@
 // Inline schemas only (no $ref / components). Module interfaces are small and each operation owns its request and
 // response shapes, so hoisting them into components would add naming policy for no reuse. If shared types appear
 // later, that is the point to introduce components — not before.
+//
+// Deprecation (InterfaceSpec.DeprecationSpec) is written as `deprecated: true` plus the `x-sunset` extension on the
+// operation, parameter or property. `x-sunset` (YYYY-MM-DD) is not decoration: oasdiff reads it, so removing a
+// deprecated item AFTER its sunset is not reported as a breaking change in the FE repo's CI — the same rule the
+// deploy-time compatibility gate applies. An operation's notice link becomes `externalDocs`.
 package {{PKG}}.interfacedef.render;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,6 +19,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DeprecationSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
@@ -64,6 +70,11 @@ public final class OpenApiRenderer {
         node.put("operationId", op.operationId());
         putIfPresent(node, "summary", op.summary());
         putIfPresent(node, "description", op.description());
+        markDeprecated(node, op.deprecation());
+        if (op.deprecation() != null && op.deprecation().link() != null && !op.deprecation().link().isBlank()) {
+            node.putObject("externalDocs").put("description", "Deprecation notice")
+                    .put("url", op.deprecation().link().trim());
+        }
 
         if (!op.parameters().isEmpty()) {
             ArrayNode parameters = node.putArray("parameters");
@@ -98,6 +109,7 @@ public final class OpenApiRenderer {
         node.put("in", p.in().wire());
         node.put("required", p.required());
         putIfPresent(node, "description", p.description());
+        markDeprecated(node, p.deprecation());
         ObjectNode schema = node.putObject("schema");
         schema.put("type", p.type().wire());
         putIfPresent(schema, "format", p.format());
@@ -153,7 +165,17 @@ public final class OpenApiRenderer {
         }
         putIfPresent(schema, "description", f.description());
         putIfPresent(schema, "example", f.example());
+        markDeprecated(schema, f.deprecation());
         return schema;
+    }
+
+    /** {@code deprecated: true} and, when there is a sunset, {@code x-sunset} — the extension oasdiff reads. */
+    private static void markDeprecated(ObjectNode node, DeprecationSpec deprecation) {
+        if (deprecation == null) {
+            return;
+        }
+        node.put("deprecated", true);
+        putIfPresent(node, "x-sunset", deprecation.sunset());
     }
 
     private static void putIfPresent(ObjectNode node, String field, String value) {

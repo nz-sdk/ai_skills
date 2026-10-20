@@ -155,13 +155,18 @@
 서브플로우의 답이 이미 정해진 뒤에 옵션을 묻는다.
 **현재 `options:` 를 가진 capability 는 하나다.** 이 목록을 믿지 말고 yaml 에서 다시 세라 — 두 번째가 추가되는
 순간 낡은 정보가 되며, 그것이 아래 규칙 4가 막으려는 바로 그 실패다.
-- `interface_spec_validator` — `amoeba.skeleton.*`, `amoeba.interface.*`, `amoeba.deploy-callback.*` 아래
-  `options:` 10개. 그중 4개가 생성물의 형태를 정한다: 서비스 계층 형태, 스켈레톤의 데이터 접근, 스펙이 그 둘을
-  덮어쓸 수 있는지, 그리고 L3 규칙의 킬 스위치.
+- `interface_spec_validator` — `amoeba.skeleton.*`, `amoeba.interface.*`, `amoeba.compat-gate.*`,
+  `amoeba.deploy-callback.*` 아래 `options:` 12개. 그중 4개가 생성물의 형태를 정한다: 서비스 계층 형태, 스켈레톤의
+  데이터 접근, 스펙이 그 둘을 덮어쓸 수 있는지, 그리고 L3 규칙의 킬 스위치.
   `amoeba.skeleton.service-interface` 는 이 프로젝트의 서비스 계층 표준이고, 그 `note` 는 **답이 기본값이어도
   값을 명시해 쓰라**고 한다 — 조용히 미설정으로 남겨도 되는 항목이 아니다.
-  나머지 6개는 **배포 시점 웹훅**이다. `amoeba.deploy-callback.enabled` 를 먼저 묻고, **예일 때만** 나머지
-  5개를 묻는다 — 꺼져 있으면 의미가 없고 기본값이 꺼짐이다. 클래스는 어느 쪽이든 생성된다
+  하나는 **호환성 게이트** `amoeba.compat-gate.enabled` 다(배포된 module 은 같은 major 안에서 추가만 할 수 있다).
+  비상 스위치이므로 `true` 로 명시하고 assert 하되, `false` 를 선택지로 내밀지 않는다.
+  배경 정책(버전 규칙 · 깨는 변경 체크리스트 · expand → migrate → contract · deprecation 과 제거 규칙)은 repo 공용
+  [reference/api-compatibility.md](../reference/api-compatibility.md) 이고 `create-frontend` 와 함께 쓴다. 생성 README 의
+  「Changing a deployed module」 절이 그 서버 쪽 요약이다.
+  나머지 7개는 **배포 시점 웹훅**이다. `amoeba.deploy-callback.enabled` 를 먼저 묻고, **예일 때만** 나머지
+  6개를 묻는다 — 꺼져 있으면 의미가 없고 기본값이 꺼짐이다. 클래스는 어느 쪽이든 생성된다
   (SpecBearingDeployTool 이 생성자 인자로 받는다). 그래서 "아니오" 의 비용은 비활성 빈 하나이지 코드 분기가 아니다.
 
 AskUserQuestion 은 질문당 선택지 4개가 상한이므로, 나누기를 즉흥적으로 하지 말고 **결정적으로** 제시한다 —

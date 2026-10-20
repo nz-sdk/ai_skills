@@ -1,6 +1,6 @@
 ---
 name: create-frontend
-description: scaffold-shadcn-app으로 깐 순수 Vite+React+TS+Tailwind v4+shadcn/ui 스캐폴드 위에, 우리 기본 프로젝트(new-world 데스크톱 셸)의 표준 프론트엔드 기반을 올리는 "스캐폴드 다음 첫 작업" 레시피. "프론트 기반 잡아줘", "create-frontend", "스캐폴드 다음 셋업", "우리 표준 프론트 골격", "i18n/폰트/통신 SDK/공유 번들까지 세팅" 같은 요청에 사용. 가장 먼저 셸(호스트)/앱(자기완결) 배포 형태를 선택한다. shadcn 기본 셋업(Vite 생성·Tailwind 설치·@/ 별칭·shadcn init·기본 컴포넌트 add)은 전제로 두고 제외한다. 버전은 실행 시 최신을 조회한다. 아직 스캐폴드가 없으면 먼저 scaffold-shadcn-app을 쓴다.
+description: scaffold-shadcn-app으로 깐 순수 Vite+React+TS+Tailwind v4+shadcn/ui 스캐폴드 위에, 우리 기본 프로젝트(new-world 데스크톱 셸)의 표준 프론트엔드 기반을 올리는 "스캐폴드 다음 첫 작업" 레시피. "프론트 기반 잡아줘", "create-frontend", "스캐폴드 다음 셋업", "우리 표준 프론트 골격", "i18n/폰트/통신 SDK/공유 번들까지 세팅" 같은 요청에 사용. 가장 먼저 셸(호스트)/앱(자기완결) 배포 형태를 선택한다. shadcn 기본 셋업(Vite 생성·Tailwind 설치·@/ 별칭·shadcn init·기본 컴포넌트 add)은 전제로 두고 제외한다. 버전은 실행 시 최신을 조회한다. 아직 스캐폴드가 없으면 먼저 scaffold-shadcn-app을 쓴다. BE 와 따로 배포할 때의 API 호환 장치(새 버전 안내·청크 실패 새로고침·Deprecation 경고·OpenAPI 타입 생성·oasdiff CI)도 함께 깐다.
 version: 0.1.0
 license: AGPL-3.0-only
 compatibility:
@@ -336,6 +336,140 @@ build = tsc -b → build:vendor → build:apps → build:catalog → vite build
 - `public/apps/.build-manifest.json`(해시가 박힌 entry/css URL) + 각 `src/apps/<id>/manifest.json`(`id`·`name`) 을 **병합** → `public/catalog/index.json`.
 - 셸은 런타임에 이 catalog 를 fetch 해 어떤 앱을 어디에 마운트할지 발견한다.
 
+### 9-c. 새 버전 안내 — `version.json` (옛 화면 대응)
+
+배포가 `dist/` 를 통째로 바꾸면, 이미 열려 있던 화면은 옛 번들로 계속 돈다. 빌드가 스탬프를 `dist/version.json` 으로도 내고,
+열린 화면이 주기적으로 받아 자기 스탬프와 비교해 다르면 「새 버전 — 새로고침」을 띄운다. 정책 배경은
+[reference/api-compatibility.md](../reference/api-compatibility.md) 「옛 화면 대응」.
+
+- **어디에 띄울지는 프로젝트 UI 규칙이다** — `AskUserQuestion` 으로 고른다(상태바 칩 / 상단 배너 / toast 액션 버튼).
+  toast 에 버튼을 두지 않는 규칙이 있으면 toast 는 선택지에서 뺀다. 누르면 `location.reload()`.
+- 되돌리기(옛 Release 재게시)도 스탬프가 달라지므로 같은 안내가 뜬다 — 되돌린 판을 받으라는 뜻이라 맞다.
+
+`vite.config.ts` — 번들에 박는 값과 `version.json` 이 **같은 상수**라 어긋날 수 없다:
+
+```ts
+import { defineConfig, type Plugin } from 'vite'
+
+/** 빌드 시각 yyyyMMddHHmmss(UTC). 번들(define)과 dist/version.json 이 같은 값을 쓴다. */
+const buildStamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14)
+
+/** dist/version.json — 열린 옛 화면이 새 배포를 알아채는 기준. 개발 서버에는 만들지 않는다. */
+function versionJson(stamp: string): Plugin {
+  return {
+    name: 'version-json',
+    apply: 'build',
+    generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'version.json', source: `${JSON.stringify({ buildStamp: stamp })}\n` })
+    },
+  }
+}
+
+export default defineConfig({
+  plugins: [/* react(), tailwindcss(), … */ versionJson(buildStamp)],
+  define: { 'import.meta.env.VITE_BUILD_STAMP': JSON.stringify(buildStamp) },
+})
+```
+
+`src/shared/version/use-new-version.ts`:
+
+```ts
+import * as React from 'react'
+
+const CHECK_INTERVAL_MS = 5 * 60 * 1000
+const CURRENT_STAMP = String(import.meta.env.VITE_BUILD_STAMP ?? '')
+
+async function fetchDeployedStamp(): Promise<string | null> {
+  try {
+    const res = await fetch(`${import.meta.env.BASE_URL}version.json`, { cache: 'no-store' })
+    if (!res.ok) return null
+    const body = (await res.json()) as { buildStamp?: unknown }
+    return typeof body.buildStamp === 'string' ? body.buildStamp : null
+  } catch {
+    return null // 네트워크 · 배포 도중 404 — 다음 주기에 다시 본다
+  }
+}
+
+/** 배포된 스탬프가 이 번들과 다르면 true. 5분마다 · 창이 다시 보이거나 포커스를 얻을 때 확인한다. */
+export function useNewVersion(): boolean {
+  const [outdated, setOutdated] = React.useState(false)
+
+  React.useEffect(() => {
+    if (import.meta.env.DEV || !CURRENT_STAMP) return // 개발 서버에는 version.json 이 없다
+    let alive = true
+    let found = false
+
+    const check = () => {
+      if (found || document.visibilityState === 'hidden') return
+      void fetchDeployedStamp().then((stamp) => {
+        if (!alive || stamp == null || stamp === CURRENT_STAMP) return
+        found = true // 한 번 알아채면 더 묻지 않는다
+        setOutdated(true)
+      })
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') check()
+    }
+
+    const timer = window.setInterval(check, CHECK_INTERVAL_MS)
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('focus', check)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('focus', check)
+    }
+  }, [])
+
+  return outdated
+}
+```
+
+- 안내 문구는 i18n 키로 둔다(§6-4) — 예: `shell.newVersion` 「새 버전 — 새로고침」, `shell.newVersionTitle`(툴팁: 「작성 중인 내용은 먼저 저장하세요」).
+- 웹서버가 `version.json` 을 캐시하지 않게 한다(`fetch` 의 `no-store` 는 브라우저 캐시만 건너뛴다). nginx 예:
+  `location = /version.json { add_header Cache-Control "no-store"; }`
+
+### 9-d. 청크 실패 1회 새로고침 (옛 화면 대응)
+
+새 배포로 `dist/` 가 바뀌면 옛 화면이 아는 해시 청크(`assets/<이름>-<해시>.js`)가 사라진다. 그 화면이 아직 열지 않은
+지연 로딩 화면(`React.lazy`)을 열면 import 가 실패하고 화면이 빈다. Vite 의 preload 도우미는 동적 import 가 실패하면
+`window` 에 `vite:preloadError` 를 내므로, `lazy` 마다 감싸지 않고 한 곳에서 받는다.
+
+`src/shared/version/chunk-reload.ts` — `main.tsx` 에서 렌더 전에 `installChunkReload()` 를 한 번 부른다:
+
+```ts
+/**
+ * 🔴 무한 새로고침을 막는다 — 새로고침한 빌드 스탬프를 sessionStorage 에 남겨, 같은 빌드에서 두 번째 실패면
+ *    새로고침하지 않고 오류를 그대로 둔다(네트워크 단절처럼 새로고침으로 풀리지 않는 실패).
+ *    새 빌드를 받으면 스탬프가 달라지므로 다음 배포 때는 다시 한 번 새로고침할 수 있다.
+ */
+const GUARD_KEY = '<app>.chunkReloadStamp'   // 프로젝트 접두어로 바꾼다
+const CURRENT_STAMP = String(import.meta.env.VITE_BUILD_STAMP ?? '')
+
+function readGuard(): string | null {
+  try { return window.sessionStorage.getItem(GUARD_KEY) } catch { return null }
+}
+
+function writeGuard(stamp: string) {
+  try { window.sessionStorage.setItem(GUARD_KEY, stamp) } catch { /* 아래에서 다시 읽어 확인한다 */ }
+}
+
+export function installChunkReload() {
+  window.addEventListener('vite:preloadError', () => {
+    if (readGuard() === CURRENT_STAMP) return            // 이 빌드에서 이미 한 번 새로고침했다
+    writeGuard(CURRENT_STAMP)
+    if (readGuard() !== CURRENT_STAMP) return            // 가드를 남길 수 없으면 반복될 수 있으니 하지 않는다
+    window.location.reload()
+  })
+}
+```
+
+- 스탬프는 §9-c 의 `VITE_BUILD_STAMP` 를 같이 쓴다(§9-c 를 안 넣어도 `define` 한 줄은 넣는다).
+- 웹서버의 SPA 폴백(`try_files … /index.html`, §11-4)은 없는 청크에 `index.html` 을 돌려준다 — MIME 오류로 import 가 실패하므로 이 이벤트로 그대로 잡힌다.
+- **셸(§1-0)이면 한 가지 더** — catalog 앱(`public/apps/<id>.<hash>.js`)은 셸이 URL 로 직접 `import()` 하므로 Vite preload 를 거치지 않아 이 이벤트로 잡히지 않는다.
+  셸의 앱 로더에서 import 가 실패하면 catalog 를 다시 받고, 그래도 실패하면 같은 가드로 한 번만 새로고침한다(앱 로딩 규칙은 `appcontext-architecture`).
+
 ## 10. 공유(single-instance) 아키텍처 — importmap external **(셸 전용)**
 
 > **§1-0 에서 '앱' 을 골랐으면 이 단계 전체를 건너뛴다**(external 미적용, react 를 앱 번들에 내장 → 자기완결). '셸' 이면 아래 10-1·10-2 를 그대로 적용한다.
@@ -534,11 +668,165 @@ location /     { try_files $uri $uri/ /index.html; }     # SPA 폴백
   도입해도 §11-2 상대경로·프록시는 **여전히 필요**하다.
 - 도입해도 **화면 코드는 무변경** — 창구 안쪽만 교체된다. 그게 SDK 로 감싼 이유다.
 
+### 11-6. Deprecation 헤더 경고 (개발 빌드)
+
+BE 가 deprecate 한 API 는 응답에 `Deprecation: @<epoch>`(RFC 9745) · `Sunset: <HTTP-date>`(RFC 8594) ·
+`Link: <공지>; rel="deprecation"` 을 싣는다(정책 4, [reference/api-compatibility.md](../reference/api-compatibility.md)).
+`client.request` 가 그 헤더를 보면 **개발 빌드에서만** 경로당 한 번 콘솔에 알린다 — 운영 빌드는 조용히 지나간다.
+
+```ts
+const warnedDeprecations = new Set<string>()
+
+function warnIfDeprecated(topic: string, res: Response) {
+  if (!import.meta.env.DEV) return
+  const deprecation = res.headers.get('Deprecation')
+  if (!deprecation) return
+  const key = topic.split('?')[0]
+  if (warnedDeprecations.has(key)) return
+  warnedDeprecations.add(key)
+  console.warn(
+    `[API deprecated] ${key} — Deprecation: ${deprecation}` +
+      ` · Sunset: ${res.headers.get('Sunset') ?? '(없음)'}` +
+      ` · Link: ${res.headers.get('Link') ?? '(없음)'}`,
+  )
+}
+
+// request() 안, fetch 직후 · 상태 판정 전에:
+//   warnIfDeprecated(topic, res)
+```
+
+- 같은 출처 프록시(§11-2~11-4)라 헤더가 그대로 읽힌다. 절대주소로 부르면 `Access-Control-Expose-Headers` 없이는 안 보인다 — 그것도 상대경로를 쓰는 이유다.
+- 시험: Chrome DevTools → Network → 요청 우클릭 → **Override headers** 로 위 세 헤더를 넣고 다시 부른다.
+
+### 11-7. OpenAPI → TS 타입 (조건부 — BE 가 OpenAPI 를 낼 때)
+
+`AskUserQuestion` 으로 묻는다: 「BE 가 판마다 OpenAPI 스펙을 내는가」(예: Protean `amoeba.get_interface_document format=openapi`).
+**아니오면 이 절과 아래 CI 는 건너뛴다.** 예면 스펙 게시 방식도 묻는다(정책 문서 「스펙 게시」 — (가) FE repo 스냅샷 / (나) BE 자동 게시).
+아래는 (가) 기준이다.
+
+- `npm view openapi-typescript version` → `npm install -D openapi-typescript`.
+  ⚠ 설치 전에 `npm view openapi-typescript peerDependencies` 로 `typescript` 범위를 본다. 프로젝트 TS 가 범위 밖이면
+  `package.json` 에 `"overrides": { "openapi-typescript": { "typescript": "$typescript" } }` 를 넣는다(실행 시점 값으로 판단 — 고정하지 않는다).
+- 배치: `src/shared/api/spec/<모듈>.openapi.json`(스냅샷, 커밋) → `src/shared/api/gen/<모듈>.d.ts`(생성, 커밋, **손으로 고치지 않음**).
+- ESLint · oxlint 는 `src/shared/api/gen` 을 무시한다(생성 파일).
+- `package.json` scripts: `"api:types": "node scripts/gen-api-types.mjs"`.
+
+`scripts/gen-api-types.mjs`:
+
+```js
+// src/shared/api/spec/<모듈>.openapi.json → src/shared/api/gen/<모듈>.d.ts  (npm run api:types)
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import openapiTS, { astToString } from 'openapi-typescript'
+
+const SPEC_DIR = new URL('../src/shared/api/spec/', import.meta.url)
+const GEN_DIR = new URL('../src/shared/api/gen/', import.meta.url)
+const SUFFIX = '.openapi.json'
+
+const specs = (await readdir(SPEC_DIR)).filter((f) => f.endsWith(SUFFIX)).sort()
+
+// 스펙을 지운 모듈의 생성 파일이 남지 않도록 통째로 다시 만든다
+await rm(GEN_DIR, { recursive: true, force: true })
+await mkdir(GEN_DIR, { recursive: true })
+
+for (const file of specs) {
+  const moduleId = file.slice(0, -SUFFIX.length)
+  const ast = await openapiTS(new URL(file, SPEC_DIR))
+  const header = `// 자동 생성 — 손으로 고치지 않는다. 원천: src/shared/api/spec/${file}\n// 다시 만들기: npm run api:types\n\n`
+  await writeFile(new URL(`${moduleId}.d.ts`, GEN_DIR), header + astToString(ast))
+  console.log(`api:types  ${file} → src/shared/api/gen/${moduleId}.d.ts`)
+}
+```
+
+`src/shared/api/spec-types.ts` — 생성 타입은 `operations['<id>']['responses'][200]['content']['application/json']` 처럼 깊다.
+화면 쪽은 이 헬퍼로 **한 줄 별칭**만 두고 필드를 손으로 다시 적지 않는다:
+
+```ts
+type JsonContent<T> = T extends { content: { 'application/json': infer B } } ? B : never
+
+/** 성공(2xx) 응답 본문. */
+export type ApiOk<Ops, Id extends keyof Ops> = Ops[Id] extends { responses: infer R }
+  ? JsonContent<R[Extract<keyof R, 200 | 201 | 202 | 204>]>
+  : never
+
+/** 요청 본문(JSON). 본문이 없는 오퍼레이션이면 never. */
+export type ApiBody<Ops, Id extends keyof Ops> = Ops[Id] extends { requestBody?: infer B }
+  ? JsonContent<NonNullable<B>>
+  : never
+
+/** 쿼리 파라미터. */
+export type ApiQuery<Ops, Id extends keyof Ops> = Ops[Id] extends { parameters: { query?: infer Q } }
+  ? NonNullable<Q>
+  : never
+```
+
+```ts
+// 쓰는 쪽 — 스펙이 바뀌면 npm run api:types 만으로 타입이 따라오고, 어긋난 호출은 typecheck 에서 실패한다
+import type { operations } from '@/shared/api/gen/orders'
+import type { ApiBody, ApiOk } from '@/shared/api/spec-types'
+
+export type Order = ApiOk<operations, 'getOrder'>
+const body = { name: '…' } satisfies ApiBody<operations, 'saveOrder'>   // 요청 본문은 satisfies 로 검사
+```
+
+- `src/shared/api/spec/README.md` 에 갱신 절차를 적는다: **배포된 판**의 스펙만 받는다(정책 5) → 파일 덮기 → `npm run api:types` → 스펙과 생성 파일을 **같은 커밋**에.
+- 판이 바뀌었는지 스냅샷에 남기려면 스펙의 `info.version` 을 그대로 둔다(BE 가 넣는 판 번호).
+
+**CI (GitHub Actions 일 때)** — PR 에 두 검사를 더한다. checkout 은 `fetch-depth: 2`(merge 커밋의 부모 `HEAD^1` = base 끝).
+
+```yaml
+      # 스펙만 바꾸고 api:types 를 잊은 PR 을 막는다(새로 생긴 생성 파일도 잡도록 status 로 본다)
+      - name: API 타입 동기화
+        run: |
+          npm run api:types
+          if [ -n "$(git status --porcelain -- src/shared/api/gen)" ]; then
+            git status --porcelain -- src/shared/api/gen
+            echo "::error::src/shared/api/gen 이 스펙과 다르다 — npm run api:types 결과를 커밋한다"
+            exit 1
+          fi
+
+      # 이 PR 이 바꾼 스펙이 base 대비 깨는 변경인가(ERR 이면 실패). sunset 지난 deprecated 오퍼레이션 삭제는 통과.
+      # 🔴 바이너리는 고정 버전 + sha256 확인 후에만 실행한다.
+      - name: API 호환성 (oasdiff)
+        if: github.event_name == 'pull_request'
+        env:
+          OASDIFF_VERSION: <실행 시 조회한 버전>     # gh release view --repo oasdiff/oasdiff --json tagName
+          OASDIFF_SHA256: <그 릴리스 checksums.txt 의 linux_amd64.tar.gz 값>
+        run: |
+          set -euo pipefail
+          changed=$(git diff --name-only --diff-filter=MD HEAD^1 HEAD -- 'src/shared/api/spec/*.openapi.json')
+          if [ -z "$changed" ]; then echo "바뀐 스펙 없음"; exit 0; fi
+          tgz="oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tgz" "https://github.com/oasdiff/oasdiff/releases/download/v${OASDIFF_VERSION}/$tgz"
+          echo "$OASDIFF_SHA256  $RUNNER_TEMP/$tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tgz" -C "$RUNNER_TEMP" oasdiff
+          status=0
+          for f in $changed; do
+            if [ ! -f "$f" ]; then echo "::error file=$f::스펙 파일 삭제 = 모듈 전체 제거(깨는 변경)"; status=1; continue; fi
+            git show "HEAD^1:$f" > "$RUNNER_TEMP/base.json"
+            "$RUNNER_TEMP/oasdiff" breaking "$RUNNER_TEMP/base.json" "$f" --fail-on ERR || status=1
+          done
+          exit $status
+```
+
+- 버전 · 해시는 **실행 시 조회**한다 — 이 문서에 박힌 값을 쓰지 않는다. 로컬 확인은 같은 버전의 OS 별 바이너리(`checksums.txt` 로 확인)로 `oasdiff breaking <base> <rev> --fail-on ERR`.
+- ⚠ oasdiff 는 `x-sunset` 을 **오퍼레이션에만** 적용한다 — sunset 이 지난 deprecated *required 응답 필드* 삭제도 ERR 이다.
+  BE 게이트(Protean `SpecCompatibility`)는 그것을 허용하므로 둘의 판정이 다르다(정책 문서 「게이트 두 개와 그 차이」).
+
+### 11-8. Tolerant Reader · 정책 문서
+
+- **응답은 너그럽게 읽는다** — 타입에 없는 필드는 무시하고, enum 은 `switch` 에 모르는 값을 받는 `default` 분기를 둔다,
+  필드 순서에 기대지 않는다, 선택 필드가 없으면 기본값으로 처리한다. BE 의 「추가는 호환 변경」이 성립하는 전제다.
+- **요청은 엄격하게 보낸다** — 스펙에 없는 필드를 싣지 않는다(§11-7 의 `satisfies`).
+- 정책 문서 [reference/api-compatibility.md](../reference/api-compatibility.md) 를 프로젝트 `docs/api-compatibility.md` 로 복사하고,
+  그 문서 「정할 것」(버전 위치 · 유예 기간 · 공지 채널 · 스펙 게시 · 계약 소유권)을 `AskUserQuestion` 으로 물어 채운다. 모르면 빈칸으로 둔다.
+
 ## 12. 폴더 구조
 
 표준 배치를 잡는다(없으면 생성):
 
 - `src/shared/` — `i18n/`, `comms/`, 공통 유틸/타입
+  - `src/shared/version/` — 새 버전 안내 · 청크 실패 새로고침(§9-c · §9-d)
+  - `src/shared/api/` — `spec/`(OpenAPI 스냅샷) · `gen/`(생성 타입, 손대지 않음) · `spec-types.ts`(§11-7, 조건부)
 - `src/apps/<id>/` — 카탈로그로 묶이는 외부 앱. 각 앱 폴더 = `manifest.json`(직렬화 메타 `id`·`name` 등) + 앱 진입 파일. **앱 진입 파일은 화면 컴포넌트를 `default` 로 export 한다**(셸이 자기 트리에서 직접 렌더 → `createRoot` 는 셸 하나뿐, 엔진 1개). 앱은 자기 `createRoot` 를 만들지 않는다. ⚠️ `mount` 라는 코드체 낱말을 쓰지 말 것 — 예전에 "함수 이름"으로 오독돼 엔진 2개 사고가 났다. 진입점·계약 상세는 `appcontext-architecture` 스킬. (§9-a/§9-b)
 - `public/vendor/`·`public/apps/`·`public/catalog/` — 빌드 산출물(gitignore)
 - `src/analytics.ts` — GA4
@@ -598,6 +886,15 @@ npm run preview            # ⚠️ prod 프리뷰 — 셸(external)일 때 vend
   ```
 - **dev 만으로 끝내지 말 것** — external/importmap 실패는 `preview`(prod)에서만 드러난다.
 
+**API 호환 검증 (§9-c · §9-d · §11-6 · §11-7 을 넣었을 때)**
+
+- `npm run build` 뒤 `dist/version.json` 이 `{"buildStamp":"<14자리>"}` 로 있다.
+- 새 버전 칩: `preview` 를 연 채 다른 터미널에서 다시 `build` → 탭을 나갔다 오면 안내가 뜨고, 누르면 새로고침된다(preview 는 요청마다 `dist` 를 다시 읽는다).
+- 청크 새로고침: `preview` 를 연 채 아직 안 연 지연 로딩 화면의 청크(`dist/assets/<이름>-*.js`)를 지우고 그 화면을 연다 → **한 번만** 새로고침되고, 두 번째에는 오류가 남는다(sessionStorage 가드).
+- Deprecation 경고: `npm run dev` + DevTools Override headers(§11-6) → 콘솔 경고가 경로당 1회.
+- 생성 타입: 스펙에서 화면이 쓰는 응답 필드를 하나 지우고 `npm run api:types` → `npx tsc -b` 가 실패해야 한다(되돌린 뒤 다시 생성).
+  재생성 무차이: `npm run api:types` 후 `src/shared/api/gen` 에 변경이 없어야 한다.
+
 기타:
 - shadcn MCP `get_audit_checklist` 로 컴포넌트 점검(named vs default import, 의존성, 렌더링).
 - 전부 통과하면 프론트 기반 완료. 이후 실제 화면/앱 개발로 넘어간다.
@@ -619,7 +916,10 @@ npm run preview            # ⚠️ prod 프리뷰 — 셸(external)일 때 vend
 - **인증/애널리틱스**(§7): 사용 시 Google OAuth·GA4 규칙(시크릿은 env, GA4 CSP/localhost 가드). 미사용이면 생략.
 - **린트**(§8): ESLint 10 flat config / Next 면 eslint-config-next.
 - **아키텍처 규칙**(Vite 표준): 빌드 파이프라인(§9, minify:false·정해진 레시피), importmap 공유·단일 인스턴스(§10, 셸 전용), 통신 SDK 3-API(§11, `fetch`/`WebSocket` 직접 금지). Next 면 부록 C 기준으로 대체.
-- **폴더 구조**(§12) 와 **명령어**(§14: dev/build/lint/typecheck/preview).
+- **폴더 구조**(§12) 와 **명령어**(§14: dev/build/lint/typecheck/preview, 넣었으면 `api:types`).
+- **API 호환**(§9-c · §9-d · §11-6~8): 넣은 것만. 본문은 `docs/api-compatibility.md`(§11-8) 포인터로 두고 핵심만 적는다 —
+  BE 먼저 · FE 나중(새 API 를 쓰는 FE 는 BE 배포 뒤), `src/shared/api/gen` 은 손대지 않고 **배포된 판**의 스펙으로만 다시 만든다,
+  응답은 Tolerant Reader 로 읽는다, 새 버전 안내를 어디에 띄우는지.
 - **커밋·브랜치 규칙**(§13) — git 을 설정했으면 **반드시 넣는다**. 단 규칙 **본문은 복붙하지 말고 정본 포인터**만:
 
   ```markdown
@@ -668,6 +968,7 @@ npm run preview            # ⚠️ prod 프리뷰 — 셸(external)일 때 vend
 | 폰트(Raleway 추가)·추가 UI 라이브러리 | **create-frontend** |
 | i18n·auth/analytics·ESLint 10 | **create-frontend** |
 | 빌드 파이프라인·importmap 공유·통신 SDK | **create-frontend** |
+| API 호환(새 버전 안내·청크 새로고침·Deprecation 경고·OpenAPI 타입·CI) | **create-frontend** (§9-c·§9-d·§11-6~8) |
 | git 설정·폴더 구조 | **create-frontend** |
 | 선택 결과 → 프로젝트 CLAUDE.md 작성 | **create-frontend** |
 
@@ -683,6 +984,8 @@ npm run preview            # ⚠️ prod 프리뷰 — 셸(external)일 때 vend
 - 아키텍처(셸): importmap external(VENDOR_EXTERNAL 게이트) · **external 목록은 손으로 적지 않고 `src/**` 스캔으로 생성(§10-0)** · **vendor named-shim(동적 Object.keys)+code splitting** · **서브패스 패키지도 splitting 으로 한 번에** · `esmExternalRequirePlugin` · **minify:false(비압축)** · prod CSP · **preview 렌더 검증 필수**
 - 통신: `@desktop/sdk` — **`client.request` = HTTP fetch(`POST {API_BASE}{topic}`, `API_BASE='/api'` 상대경로)**.
   `serverStream`/`channel` 미구현. SharedWorker 는 [향후](§11-5)
+- API 호환: `version.json` + `useNewVersion` · `vite:preloadError` 1회 새로고침 · 개발 빌드 Deprecation 경고 ·
+  (조건부) openapi-typescript 생성 타입 + CI 타입 동기화 · oasdiff(고정 버전 + sha256) — 정책은 `reference/api-compatibility.md`
 
 ## 부록 C — Next.js 경로
 

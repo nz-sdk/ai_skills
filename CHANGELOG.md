@@ -14,11 +14,19 @@
 * **nz_amoeba_make:** 생성되는 리소스 서버가 액세스 토큰의 `aud` 를 검증한다 ([#5](https://github.com/nz-sdk/ai_skills/pull/5))
 * **nz_amoeba_make:** capability `db_metadata_tools` — 스키마 · 테이블 조회 MCP 도구 ([#7](https://github.com/nz-sdk/ai_skills/pull/7))
 * **nz_amoeba_make:** `db_metadata_tools` 에 `database` 인자 — 계정이 보는 다른 DB 조회 ([#8](https://github.com/nz-sdk/ai_skills/pull/8))
+* **nz_amoeba_make:** `interface_spec_validator` 에 deprecation 표시(오퍼레이션 · 파라미터 · 필드)와 호환성 게이트 `amoeba.compat-gate.enabled` — 같은 major 안에서는 추가만, `Deprecation` · `Sunset` · `Link` 응답 헤더, OpenAPI `x-sunset`, 웹훅 `{{deprecations}}` ([#10](https://github.com/nz-sdk/ai_skills/pull/10))
+* **create-frontend:** API 호환 장치 — 새 버전 안내(`version.json`), 청크 실패 1회 새로고침, 개발 빌드 Deprecation 경고, (조건부) OpenAPI → TS 타입 생성과 CI 타입 동기화 · oasdiff ([#10](https://github.com/nz-sdk/ai_skills/pull/10))
+
+
+### 버그 수정
+
+* **nz_amoeba_make:** 생성되는 서버에 VS Code MCP 클라이언트가 붙지 못하던 문제 — path-appended protected resource metadata 와 401 의 `resource_metadata`(RFC 9728) ([#10](https://github.com/nz-sdk/ai_skills/pull/10))
 
 
 ### 문서
 
 * **nz_amoeba_make:** 생성 README 에 MCP 클라이언트 연결 절 ([#6](https://github.com/nz-sdk/ai_skills/pull/6))
+* 공용 문서 `reference/api-compatibility.md` — FE · BE API 호환 정책(create-frontend · nz_amoeba_make 가 가리킨다) ([#10](https://github.com/nz-sdk/ai_skills/pull/10))
 
 ## [1.0.0](https://github.com/nz-sdk/ai_skills/releases/tag/v1.0.0) (2026-09-14) — 최초 등록
 

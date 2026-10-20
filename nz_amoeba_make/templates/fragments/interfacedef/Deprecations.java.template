@@ -1,0 +1,169 @@
+// [INTERFACE DEFINITION] Reading InterfaceSpec.DeprecationSpec — one place, so the validator, the renderers, the
+// response headers and the deploy-time compatibility gate all read the same dates the same way.
+//
+// Dates are ISO calendar dates (YYYY-MM-DD) taken as 00:00 UTC. The header formats are pinned here because both are
+// easy to get subtly wrong:
+//   Deprecation: @1793491200                       RFC 9745 — a structured-field Date: "@" + epoch SECONDS
+//   Sunset: Tue, 01 Dec 2026 00:00:00 GMT          RFC 8594 — an HTTP-date (IMF-fixdate). Java's RFC_1123_DATE_TIME
+//                                                  prints "1 Dec" (no zero pad), which is not IMF-fixdate.
+//   Link: <https://…>; rel="deprecation"; type="text/html"   RFC 9745 §3
+package {{PKG}}.interfacedef;
+
+import {{PKG}}.interfacedef.InterfaceSpec.DeprecationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+
+import java.net.URI;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.regex.Pattern;
+
+public final class Deprecations {
+
+    /** Exactly YYYY-MM-DD — ISO_LOCAL_DATE alone would also take a signed or 5-digit year. */
+    private static final Pattern ISO_DATE = Pattern.compile("\\d{4}-\\d{2}-\\d{2}");
+
+    private static final DateTimeFormatter IMF_FIXDATE =
+            DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US).withZone(ZoneOffset.UTC);
+
+    private Deprecations() {
+    }
+
+    /** The date, or empty when blank or not a real YYYY-MM-DD calendar date. */
+    public static Optional<LocalDate> date(String value) {
+        if (value == null || !ISO_DATE.matcher(value).matches()) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(LocalDate.parse(value));
+        }
+        catch (DateTimeParseException e) {
+            return Optional.empty();   // 2026-02-30 and the like
+        }
+    }
+
+    /** True when {@code value} is an absolute http(s) URL with a host and nothing that would break a Link header. */
+    public static boolean isLink(String value) {
+        if (value == null || value.isBlank() || value.chars().anyMatch(c -> c <= ' ' || c == '<' || c == '>')) {
+            return false;
+        }
+        try {
+            URI uri = new URI(value);
+            String scheme = uri.getScheme();
+            return ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) && uri.getHost() != null;
+        }
+        catch (Exception e) {
+            return false;
+        }
+    }
+
+    public static Optional<Instant> since(DeprecationSpec d) {
+        return d == null ? Optional.empty() : date(d.since()).map(Deprecations::startOfDayUtc);
+    }
+
+    public static Optional<Instant> sunset(DeprecationSpec d) {
+        return d == null ? Optional.empty() : date(d.sunset()).map(Deprecations::startOfDayUtc);
+    }
+
+    /** True when the item has a sunset and it is at or before {@code now} — removal is then no longer breaking. */
+    public static boolean sunsetPassed(DeprecationSpec d, Instant now) {
+        return sunset(d).map(s -> !now.isBefore(s)).orElse(false);
+    }
+
+    /** {@code Deprecation} header value: {@code @<epoch seconds>}. Empty when {@code since} does not parse. */
+    public static Optional<String> deprecationHeader(DeprecationSpec d) {
+        return since(d).map(i -> "@" + i.getEpochSecond());
+    }
+
+    /** {@code Sunset} header value (IMF-fixdate). Empty when there is no sunset. */
+    public static Optional<String> sunsetHeader(DeprecationSpec d) {
+        return sunset(d).map(IMF_FIXDATE::format);
+    }
+
+    /** {@code Link} header value pointing at the notice. Empty when there is no usable link. */
+    public static Optional<String> linkHeader(DeprecationSpec d) {
+        return d != null && isLink(d.link())
+                ? Optional.of("<" + d.link() + ">; rel=\"deprecation\"; type=\"text/html\"")
+                : Optional.empty();
+    }
+
+    /** One line for documents and notifications: {@code since 2026-11-01 · sunset 2026-12-01 · <link>}. */
+    public static String describe(DeprecationSpec d) {
+        StringBuilder sb = new StringBuilder("since ").append(d.since());
+        if (d.sunset() != null && !d.sunset().isBlank()) {
+            sb.append(" · sunset ").append(d.sunset());
+        }
+        if (d.link() != null && !d.link().isBlank()) {
+            sb.append(" · ").append(d.link());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Every deprecated item in a spec, one line each — for the deploy result and the deploy webhook
+     * ({@code {{deprecations}}}), so a deploy that deprecates something announces it without anyone re-reading the spec.
+     *
+     * <pre>
+     * GET /api/dept — since 2026-11-01 · sunset 2026-12-01 · https://…
+     * GET /api/dept response 200 field rows[].deptNm — since 2026-11-01 · sunset 2026-12-01
+     * GET /api/emp query parameter 'bizCd' — since 2026-11-01
+     * </pre>
+     */
+    public static List<String> summarize(InterfaceSpec spec) {
+        List<String> lines = new ArrayList<>();
+        for (OperationSpec op : spec.operations()) {
+            if (op == null) {
+                continue;
+            }
+            String route = op.method() + " " + op.path();
+            if (op.deprecation() != null) {
+                lines.add(route + " — " + describe(op.deprecation()));
+            }
+            for (ParamSpec p : op.parameters()) {
+                if (p != null && p.deprecation() != null) {
+                    lines.add(route + " " + (p.in() == null ? "" : p.in().wire() + " ") + "parameter '" + p.name()
+                            + "' — " + describe(p.deprecation()));
+                }
+            }
+            collectFields(lines, route + " request field ", "", op.requestBody());
+            for (ResponseSpec r : op.responses()) {
+                if (r != null) {
+                    collectFields(lines, route + " response " + r.status() + " field ", "", r.body());
+                }
+            }
+        }
+        return lines;
+    }
+
+    private static void collectFields(List<String> lines, String at, String prefix, List<FieldSpec> fields) {
+        for (FieldSpec f : fields) {
+            if (f == null) {
+                continue;
+            }
+            collectField(lines, at, prefix + f.name(), f);
+        }
+    }
+
+    private static void collectField(List<String> lines, String at, String path, FieldSpec f) {
+        if (f.deprecation() != null) {
+            lines.add(at + path + " — " + describe(f.deprecation()));
+        }
+        collectFields(lines, at, path + ".", f.children());
+        if (f.items() != null) {
+            collectField(lines, at, path + "[]", f.items());
+        }
+    }
+
+    private static Instant startOfDayUtc(LocalDate date) {
+        return date.atStartOfDay(ZoneOffset.UTC).toInstant();
+    }
+}

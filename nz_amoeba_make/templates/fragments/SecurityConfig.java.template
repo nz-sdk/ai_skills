@@ -26,17 +26,45 @@
 // protean.mcp.authorization.resource in application.yml) so the decoder stays the lazy SupplierJwtDecoder; what
 // Boot will NOT do is complain when the list is empty — it just stops checking. That silence is the whole risk,
 // so a blank value is rejected here.
+//
+// WHY THE 401 NAMES ITS METADATA: RFC 9728 §3.1 puts the document of a resource WITH A PATH at the path-appended
+// address (/.well-known/oauth-protected-resource/platform/mcp), and §3.3 makes a client REJECT a document whose
+// `resource` differs from the identifier it built that URL from. protean publishes the document only at the ROOT,
+// with resource = .../platform/mcp. A strict client (VS Code's built-in MCP client) therefore gets 404 at the
+// path-appended address, rejects the root one (it expects the bare origin there), gives up on discovery, treats
+// THIS app as the Authorization Server and never reaches the real one. Lenient clients (mcp-remote) skip §3.3,
+// which is why nothing shows until VS Code. Two nested classes close it: McpResourceMetadata serves protean's own
+// document at the path-appended address, and McpAuthenticationEntryPoint adds resource_metadata="..." to every
+// /platform/** 401 (RFC 9728 §5.1 — a MUST in the MCP authorization spec). They are nested, not fragments of their
+// own, because they exist only for chain #1 and must ship and rename together with it.
 package {{PKG}};
 
+import java.net.URI;
+import java.util.Map;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+import org.htcom.protean.mcp.transport.McpProtectedResourceMetadataController;
+
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.oauth2.server.resource.web.BearerTokenAuthenticationEntryPoint;
+import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 @Configuration
 public class SecurityConfig {
@@ -94,10 +122,15 @@ public class SecurityConfig {
      *
      * <p>CSRF off and sessions stateless because every caller here is a bearer-token client (MCP agents, operators'
      * scripts) — there is no browser form to protect. Rules are evaluated in declaration order.
+     *
+     * <p>The 401 carries {@code resource_metadata} ({@link McpAuthenticationEntryPoint}) — that is how an MCP client
+     * finds the protected-resource document and, through it, the Authorization Server.
      */
     @Bean
     @Order(1)
-    SecurityFilterChain platformSecurityFilterChain(HttpSecurity http) throws Exception {
+    SecurityFilterChain platformSecurityFilterChain(
+            HttpSecurity http,
+            @Value("${protean.mcp.authorization.resource:}") String resource) throws Exception {
         http
             .securityMatcher("/platform/**")
             .csrf(csrf -> csrf.disable())
@@ -121,8 +154,12 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.DELETE, "/platform/**").hasAuthority(WRITE)
                 // (5) anything else that reached this chain still needs a valid token.
                 .anyRequest().authenticated())
-            // Missing/invalid token -> 401 + WWW-Authenticate: Bearer, emitted by the Resource Server.
-            .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
+            // Missing/invalid token -> 401 + WWW-Authenticate: Bearer resource_metadata="...", emitted by the Resource
+            // Server. One entry point covers both cases: the chain's default (no token) and the bearer filter's
+            // failure handler (bad token).
+            .oauth2ResourceServer(oauth2 -> oauth2
+                .jwt(Customizer.withDefaults())
+                .authenticationEntryPoint(new McpAuthenticationEntryPoint(resource)));
         return http.build();
     }
 
@@ -155,5 +192,96 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
 
         return http.build();
+    }
+
+    /**
+     * The protected-resource document at the address RFC 9728 derives from this resource — the PATH-APPENDED one
+     * ({@value #METADATA_PATH}). The body is protean's own document, returned as-is: one source, so the two addresses
+     * cannot drift. The root one stays for lenient clients (ResourceServerOnlyTest pins both).
+     *
+     * <p>Same activation as protean's controller: it exists only when protean.mcp.authorization.resource is set.
+     * It reaches the unauthenticated chain #2 because its path is not under /platform/**.
+     */
+    @RestController
+    @ConditionalOnProperty(name = "protean.mcp.authorization.resource")
+    static class McpResourceMetadata {
+
+        static final String WELL_KNOWN = "/.well-known/oauth-protected-resource";
+
+        /** protean's MCP transport path — fixed by the library, so the mapping below can be a constant. */
+        static final String MCP_PATH = "/platform/mcp";
+
+        static final String METADATA_PATH = WELL_KNOWN + MCP_PATH;
+
+        private final ObjectProvider<McpProtectedResourceMetadataController> protean;
+
+        /**
+         * Refuses to start when the configured resource is not {@code …/platform/mcp}: the mapping is a constant,
+         * and a document served at an address that does not derive from its own {@code resource} is exactly the
+         * §3.3 mismatch this class exists to remove.
+         */
+        McpResourceMetadata(ObjectProvider<McpProtectedResourceMetadataController> protean,
+                            @Value("${protean.mcp.authorization.resource}") String resource) {
+            String path = URI.create(resource).getRawPath();
+            if (!MCP_PATH.equals(path)) {
+                throw new IllegalStateException("protean.mcp.authorization.resource must end in " + MCP_PATH
+                        + " (the MCP transport path) so its RFC 9728 metadata address " + METADATA_PATH
+                        + " derives from it. Resolved value was: '" + resource + "'");
+            }
+            this.protean = protean;
+        }
+
+        @GetMapping(METADATA_PATH)
+        ResponseEntity<Map<String, Object>> metadata() {
+            McpProtectedResourceMetadataController source = this.protean.getIfAvailable();
+            return (source == null) ? ResponseEntity.notFound().build() : ResponseEntity.ok(source.metadata());
+        }
+
+        /**
+         * The RFC 9728 §3.1 metadata URL for {@code resource}: its origin + {@value #WELL_KNOWN} + its path.
+         * {@code http://h:8080/platform/mcp} → {@code http://h:8080/.well-known/oauth-protected-resource/platform/mcp}.
+         */
+        static String metadataUrl(String resource) {
+            URI uri = URI.create(resource);
+            String path = (uri.getRawPath() == null) ? "" : uri.getRawPath();
+            return uri.getScheme() + "://" + uri.getRawAuthority() + WELL_KNOWN + path;
+        }
+    }
+
+    /**
+     * Spring's Bearer challenge plus the {@code resource_metadata} parameter (RFC 9728 §5.1).
+     *
+     * <p>Wraps BearerTokenAuthenticationEntryPoint instead of re-implementing it, so {@code error="invalid_token"}
+     * and friends keep coming from Spring; this only appends one parameter. The delegate sets a header and a status
+     * and writes no body, so the response is not committed yet and the header can still be replaced.
+     */
+    static final class McpAuthenticationEntryPoint implements AuthenticationEntryPoint {
+
+        private final BearerTokenAuthenticationEntryPoint delegate = new BearerTokenAuthenticationEntryPoint();
+
+        /** Null when no resource is configured — then this is exactly Spring's entry point. */
+        private final String resourceMetadata;
+
+        McpAuthenticationEntryPoint(String resource) {
+            this.resourceMetadata = (resource == null || resource.isBlank())
+                    ? null
+                    : McpResourceMetadata.metadataUrl(resource);
+        }
+
+        @Override
+        public void commence(HttpServletRequest request, HttpServletResponse response,
+                             AuthenticationException authException) {
+            this.delegate.commence(request, response, authException);
+            if (this.resourceMetadata == null) {
+                return;
+            }
+            String param = "resource_metadata=\"" + this.resourceMetadata + "\"";
+            String challenge = response.getHeader(HttpHeaders.WWW_AUTHENTICATE);
+            // "Bearer" alone has no parameter list yet; anything longer already does and takes a comma.
+            String value = (challenge == null || challenge.equals("Bearer"))
+                    ? "Bearer " + param
+                    : challenge + ", " + param;
+            response.setHeader(HttpHeaders.WWW_AUTHENTICATE, value);
+        }
     }
 }

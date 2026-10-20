@@ -1,0 +1,179 @@
+// Pins InterfaceSpec.DeprecationSpec end to end on the host side: the header formats (two RFCs, both easy to get
+// subtly wrong), the date rules the validator enforces, the wire format, and that a spec WITHOUT a deprecation
+// serializes exactly as before — sealed specs are signed bytes, so a new null field must not change them.
+package {{PKG}}.interfacedef;
+
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import {{PKG}}.interfacedef.InterfaceSpec.DeprecationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class DeprecationSpecTest {
+
+    private static final DeprecationSpec FULL =
+            new DeprecationSpec("2026-11-01", "2026-12-01", "https://example.com/notices/123");
+
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    // --- header formats ---
+
+    @Test
+    void deprecationHeaderIsAtEpochSeconds() {
+        // RFC 9745 structured-field Date: "@" + epoch SECONDS. 2026-11-01T00:00:00Z.
+        assertEquals("@1793491200", Deprecations.deprecationHeader(FULL).orElseThrow());
+    }
+
+    @Test
+    void sunsetHeaderIsAnImfFixdateWithAZeroPaddedDay() {
+        // RFC 8594 HTTP-date. Java's RFC_1123_DATE_TIME would print "Tue, 1 Dec 2026", which is not IMF-fixdate.
+        assertEquals("Tue, 01 Dec 2026 00:00:00 GMT", Deprecations.sunsetHeader(FULL).orElseThrow());
+    }
+
+    @Test
+    void linkHeaderCarriesTheDeprecationRelation() {
+        assertEquals("<https://example.com/notices/123>; rel=\"deprecation\"; type=\"text/html\"",
+                Deprecations.linkHeader(FULL).orElseThrow());
+    }
+
+    @Test
+    void optionalPartsProduceNoHeader() {
+        DeprecationSpec sinceOnly = new DeprecationSpec("2026-11-01", null, null);
+        assertTrue(Deprecations.sunsetHeader(sinceOnly).isEmpty());
+        assertTrue(Deprecations.linkHeader(sinceOnly).isEmpty());
+    }
+
+    // --- dates ---
+
+    @Test
+    void onlyRealYyyyMmDdDatesParse() {
+        assertTrue(Deprecations.date("2026-12-01").isPresent());
+        assertTrue(Deprecations.date("2026-02-30").isEmpty(), "impossible date");
+        assertTrue(Deprecations.date("2026-1-1").isEmpty(), "not zero padded");
+        assertTrue(Deprecations.date("+2026-01-01").isEmpty(), "signed year");
+        assertTrue(Deprecations.date("2026-12-01T00:00:00Z").isEmpty(), "a timestamp is not a date");
+        assertTrue(Deprecations.date(null).isEmpty());
+    }
+
+    @Test
+    void sunsetPassesAtMidnightUtc() {
+        Instant sunset = Instant.parse("2026-12-01T00:00:00Z");
+        assertFalse(Deprecations.sunsetPassed(FULL, sunset.minusSeconds(1)));
+        assertTrue(Deprecations.sunsetPassed(FULL, sunset));
+        assertFalse(Deprecations.sunsetPassed(new DeprecationSpec("2026-11-01", null, null), Instant.MAX),
+                "no sunset never passes");
+    }
+
+    // --- validator ---
+
+    private static InterfaceSpec withOperationDeprecation(DeprecationSpec d) {
+        OperationSpec get = SpecFixtures.getOrder();
+        return new InterfaceSpec("주문 API", "주문을 조회하고 생성한다", InterfaceSpec.DataAccess.MYBATIS,
+                List.of(new OperationSpec(get.operationId(), get.method(), get.path(), get.summary(),
+                        get.description(), get.parameters(), get.requestBody(), get.responses(), d)));
+    }
+
+    @Test
+    void aWellFormedDeprecationValidates() {
+        assertEquals(List.of(), InterfaceSpecValidator.validate(withOperationDeprecation(FULL)));
+    }
+
+    @Test
+    void sinceIsRequiredAndMustBeADate() {
+        assertTrue(InterfaceSpecValidator.validate(withOperationDeprecation(new DeprecationSpec(null, null, null)))
+                .stream().anyMatch(v -> v.startsWith("operations[0].deprecation.since")));
+        assertTrue(InterfaceSpecValidator.validate(withOperationDeprecation(
+                        new DeprecationSpec("2026-02-30", null, null)))
+                .stream().anyMatch(v -> v.startsWith("operations[0].deprecation.since")));
+    }
+
+    @Test
+    void sunsetMayNotPrecedeTheDeprecation() {
+        List<String> v = InterfaceSpecValidator.validate(withOperationDeprecation(
+                new DeprecationSpec("2026-12-01", "2026-11-01", null)));
+        assertTrue(v.stream().anyMatch(s -> s.startsWith("operations[0].deprecation.sunset") && s.contains("RFC 9745")),
+                v.toString());
+    }
+
+    @Test
+    void linkMustBeAnAbsoluteHttpUrl() {
+        for (String bad : List.of("issues/123", "ftp://host/x", "https://host/a b", "https://host/<x>")) {
+            assertTrue(InterfaceSpecValidator.validate(withOperationDeprecation(
+                            new DeprecationSpec("2026-11-01", null, bad)))
+                    .stream().anyMatch(s -> s.startsWith("operations[0].deprecation.link")), bad);
+        }
+    }
+
+    @Test
+    void parameterAndFieldDeprecationsAreValidatedToo() {
+        DeprecationSpec bad = new DeprecationSpec("someday", null, null);
+        OperationSpec op = new OperationSpec("listOrders", HttpMethod.GET, "/orders", "주문 목록 조회",
+                "조건에 맞는 주문 목록을 반환한다",
+                List.of(new ParamSpec("status", ParamIn.QUERY, FieldType.STRING, null, false,
+                        "주문 상태 코드 조건", null, bad)),
+                null,
+                List.of(new ResponseSpec(200, "조회 성공", List.of(new FieldSpec("deptNm", FieldType.STRING, null,
+                        true, "부서 한글 명칭", null, List.of(), null, bad)))));
+        List<String> v = InterfaceSpecValidator.validate(new InterfaceSpec("주문 API", "주문을 조회한다",
+                InterfaceSpec.DataAccess.MYBATIS, List.of(op)));
+        assertTrue(v.contains("operations[0].parameters[0].deprecation.since: required, a YYYY-MM-DD date (was "
+                + "'someday')"), v.toString());
+        assertTrue(v.stream().anyMatch(s -> s.startsWith("operations[0].responses[0].body[0].deprecation.since")),
+                v.toString());
+    }
+
+    // --- wire format ---
+
+    @Test
+    void aSpecWithoutDeprecationSerializesWithoutTheField() throws Exception {
+        // Sealed specs are signed bytes; NON_NULL keeps an existing module's spec byte-identical.
+        String json = mapper.writeValueAsString(SpecFixtures.orders());
+        assertFalse(json.contains("deprecation"), json);
+    }
+
+    @Test
+    void deprecationBindsUnderTheStrictReader() throws Exception {
+        // The deploy path parses with FAIL_ON_UNKNOWN_PROPERTIES; the new component must be a known property.
+        String json = mapper.writeValueAsString(withOperationDeprecation(FULL));
+        InterfaceSpec back = mapper.readerFor(InterfaceSpec.class)
+                .with(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).readValue(json);
+        assertEquals(FULL, back.operations().get(0).deprecation());
+    }
+
+    // --- summary for the deploy result / webhook ---
+
+    @Test
+    void summarizeListsEveryDeprecatedItemWithItsPath() {
+        DeprecationSpec d = new DeprecationSpec("2026-11-01", "2026-12-01", null);
+        OperationSpec op = new OperationSpec("listOrders", HttpMethod.GET, "/orders", "주문 목록 조회",
+                "조건에 맞는 주문 목록을 반환한다",
+                List.of(new ParamSpec("status", ParamIn.QUERY, FieldType.STRING, null, false,
+                        "주문 상태 코드 조건", null, d)),
+                null,
+                List.of(new ResponseSpec(200, "조회 성공", List.of(new FieldSpec("rows", FieldType.ARRAY, null, true,
+                        "주문 목록 행들", null, List.of(), new FieldSpec("row", FieldType.OBJECT, null, true,
+                        "주문 한 건", null, List.of(new FieldSpec("deptNm", FieldType.STRING, null, true,
+                        "부서 한글 명칭", null, List.of(), null, d)), null))))),
+                d);
+        List<String> lines = Deprecations.summarize(new InterfaceSpec("주문 API", "주문을 조회한다",
+                InterfaceSpec.DataAccess.MYBATIS, List.of(op)));
+        assertEquals(List.of(
+                "GET /orders — since 2026-11-01 · sunset 2026-12-01",
+                "GET /orders query parameter 'status' — since 2026-11-01 · sunset 2026-12-01",
+                "GET /orders response 200 field rows[].deptNm — since 2026-11-01 · sunset 2026-12-01"), lines);
+    }
+}

@@ -1,0 +1,47 @@
+// [INTERFACE DEFINITION] Adds the deprecation response headers to a deprecated operation's responses —
+// the machine-readable half of a deprecation notice (FE · BE API compatibility):
+//
+//   Deprecation: @1793491200                                        RFC 9745
+//   Sunset: Tue, 01 Dec 2026 00:00:00 GMT                           RFC 8594 (only when a sunset is declared)
+//   Link: <https://…>; rel="deprecation"; type="text/html"          RFC 9745 §3 (only when a link is declared)
+//
+// WHY A HOST INTERCEPTOR AND NOT THE GENERATED CONTROLLER. A generated controller returns the DTO itself —
+// ResponseEntity is rejected at gate 2 (InterfaceContractRule) — and adding an HttpServletResponse parameter would
+// break the exact-signature check the generated contract test makes. protean registers module routes on the host's
+// RequestMappingHandlerMapping, so a host HandlerInterceptor sees them with the matched pattern already resolved.
+//
+// preHandle, not postHandle: a @ResponseBody response is committed before postHandle runs. The headers are informative
+// only — they never change what the handler does — so setting them before the call is harmless even if it fails.
+package {{PKG}}.interfacedef.web;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+import {{PKG}}.interfacedef.Deprecations;
+import {{PKG}}.interfacedef.InterfaceSpec.DeprecationSpec;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.servlet.HandlerMapping;
+
+public class DeprecationHeaderInterceptor implements HandlerInterceptor {
+
+    private final DeprecationIndex index;
+
+    public DeprecationHeaderInterceptor(DeprecationIndex index) {
+        this.index = index;
+    }
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
+        Object pattern = request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE);
+        if (pattern != null) {
+            index.find(request.getMethod(), pattern.toString()).ifPresent(d -> apply(response, d));
+        }
+        return true;
+    }
+
+    static void apply(HttpServletResponse response, DeprecationSpec d) {
+        Deprecations.deprecationHeader(d).ifPresent(v -> response.setHeader("Deprecation", v));
+        Deprecations.sunsetHeader(d).ifPresent(v -> response.setHeader("Sunset", v));
+        Deprecations.linkHeader(d).ifPresent(v -> response.addHeader("Link", v));
+    }
+}

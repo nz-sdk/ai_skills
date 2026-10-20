@@ -14,6 +14,14 @@
 
 변경 이력은 [CHANGELOG.md](CHANGELOG.md) 다 — 사람이 갱신한다. PR 마다 「Unreleased」에 한 줄을 더한다.
 
+## 공용 문서
+
+스킬이 아니라 여러 스킬이 함께 가리키는 문서다(`SKILL.md` 가 없어 스킬 목록에는 나오지 않는다).
+
+| 문서 | 내용 | 쓰는 스킬 |
+| --- | --- | --- |
+| [reference/api-compatibility.md](reference/api-compatibility.md) | FE · BE 를 따로 배포할 때의 API 호환 정책 — 버전 규칙 · 깨는 변경 체크리스트 · Expand → Migrate → Contract · Deprecation 과 제거 규칙 · 정할 것 | create-frontend · nz_amoeba_make |
+
 ## 스킬 아티팩트
 
 | 스킬 영문명 | 아티팩트 |

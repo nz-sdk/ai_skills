@@ -40,6 +40,21 @@ class DeployWebhookNotifierTest {
     }
 
     @Test
+    @DisplayName("{{deprecations}} carries the deprecated items, escaped like every other token")
+    void fillsTheDeprecationsToken() throws Exception {
+        DeployWebhookNotifier n = notifier();
+        n.setBodyTemplate("{\"deprecations\": \"{{deprecations}}\", \"summary\": \"{{summary}}\"}");
+        String lines = "GET /api/dept — since 2026-11-01 · sunset 2026-12-01\n"
+                + "GET /api/dept response 200 field rows[].deptNm — since 2026-11-01";
+
+        var parsed = MAPPER.readTree(n.render(DeployWebhookNotifier.Outcome.SUCCESS, "dept", "1.2.0", "s", lines));
+        assertEquals(lines, parsed.get("deprecations").asText());
+        // The four-argument form (every caller before deprecations existed) fills it with nothing.
+        var legacy = MAPPER.readTree(n.render(DeployWebhookNotifier.Outcome.SUCCESS, "dept", "1.2.0", "s"));
+        assertEquals("", legacy.get("deprecations").asText());
+    }
+
+    @Test
     @DisplayName("disabled by default, so a generated app posts nowhere until it is configured")
     void disabledByDefault() {
         assertEquals("disabled",

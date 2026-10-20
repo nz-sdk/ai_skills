@@ -172,6 +172,40 @@ and it substitutes the path parameter's `example`: **that value must exist at de
 probe-only reserved row and name it in `example`. To probe a mutation deliberately, pass it yourself in
 `verification.integration` — a caller-supplied probe replaces the auto-generated one for the same method and path.
 
+### Changing a deployed module: only add within a major version
+
+Screens that are already open were built against the deployed spec, so an update of a deployed module is compared
+with it **before anything is compiled** (`SpecCompatibility`, called from `InterfaceDeployPreparer`). Within the same
+major version these are refused, each listed with its route and field path:
+
+| Refused | Allowed |
+|---|---|
+| operation (method + path) removed | anything added — operation, optional parameter, optional request field, response field |
+| parameter / field removed | removing an item that is `deprecation`-marked **and whose sunset has passed** |
+| optional → required input · new required input | the same change in a **major bump** (`1.x` → `2.0.0`, new paths such as `/v2/cars`) |
+| required → optional response field | any change while the module is `0.x` (initial development) |
+| type or format changed · success status changed | renaming a path variable (`/cars/{id}` → `/cars/{carId}`) |
+
+A spec cannot show a change of meaning or unit in the same field, or new enum values — those still need a human.
+`amoeba.compat-gate.enabled: false` switches the gate off for an emergency; it is not a per-deploy option.
+
+To retire something, mark it first — `deprecation: {since, sunset?, link?}` on an operation, parameter or field
+(dates `YYYY-MM-DD`, UTC; `sunset` not before `since`). That one mark drives everything else:
+
+- responses of a deprecated **operation** carry `Deprecation: @<epoch>` (RFC 9745), `Sunset: <HTTP-date>`
+  (RFC 8594) and `Link: <…>; rel="deprecation"` (`DeprecationHeaderInterceptor`, read from the sealed spec);
+- the OpenAPI document gets `deprecated: true` + `x-sunset` (+ `externalDocs` for the link) — oasdiff reads
+  `x-sunset` on operations, so a consumer's CI accepts removing a deprecated operation once its sunset has passed;
+- the deploy result lists `deprecations`, and the deploy webhook gets them as `{{deprecations}}`.
+
+The order is expand → migrate → contract: deploy the new field or path beside the old one and mark the old one
+deprecated with a sunset; ship the screens that use the new one; remove the old one after the sunset.
+
+⚠ oasdiff honours `x-sunset` only on **operations**. Removing a deprecated *required response field* after its
+sunset passes this gate but is still an error in oasdiff (`response-required-property-removed`), and removing an
+*optional* response field that was never deprecated is refused here but passes oasdiff. When a consumer runs
+oasdiff, retire whole operations, or agree which rule wins.
+
 <!-- [/interface_spec_validator ONLY] -->
 
 **Extend the base types this app provides.** In the MVC shape (Controller → Service → Mapper) the Service and the

@@ -90,6 +90,15 @@ public class DeployWebhookNotifier {
      * only the notification is missing.
      */
     public String notifyDeploy(Outcome outcome, String moduleId, String version, String summaryMarkdown) {
+        return notifyDeploy(outcome, moduleId, version, summaryMarkdown, "");
+    }
+
+    /**
+     * As above, plus the deprecations the deployed spec declares — one line per item, filled into
+     * {@code {{deprecations}}} so the endpoint can announce them (FE · BE API compatibility).
+     */
+    public String notifyDeploy(Outcome outcome, String moduleId, String version, String summaryMarkdown,
+                               String deprecations) {
         if (!enabled) {
             return "disabled";
         }
@@ -104,7 +113,7 @@ public class DeployWebhookNotifier {
         }
 
         try {
-            return send(outcome, moduleId, version, summaryMarkdown);
+            return send(render(outcome, moduleId, version, summaryMarkdown, deprecations), moduleId, version);
         } catch (Exception e) {
             // Deliberately broad: nothing this method can hit is worth failing a completed deploy over.
             log.warn("deploy callback failed for module {} {} ({})", moduleId, version, outcome, e);
@@ -112,8 +121,7 @@ public class DeployWebhookNotifier {
         }
     }
 
-    private String send(Outcome outcome, String moduleId, String version, String summaryMarkdown) throws Exception {
-        String body = render(outcome, moduleId, version, summaryMarkdown);
+    private String send(String body, String moduleId, String version) throws Exception {
         Duration timeout = Duration.ofMillis(timeoutMs);
 
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url.trim()))
@@ -151,6 +159,10 @@ public class DeployWebhookNotifier {
      * <p>A non-JSON endpoint (form-encoded, plain text) is the caller's business: it simply gets escaped text.
      */
     String render(Outcome outcome, String moduleId, String version, String summaryMarkdown) {
+        return render(outcome, moduleId, version, summaryMarkdown, "");
+    }
+
+    String render(Outcome outcome, String moduleId, String version, String summaryMarkdown, String deprecations) {
         Map<String, String> tokens = new LinkedHashMap<>();
         tokens.put("outcome", String.valueOf(outcome));
         tokens.put("moduleId", moduleId == null ? "" : moduleId);
@@ -158,6 +170,7 @@ public class DeployWebhookNotifier {
         tokens.put("target", self);
         tokens.put("timestamp", Instant.now().toString());
         tokens.put("summary", summaryMarkdown == null ? "" : summaryMarkdown);
+        tokens.put("deprecations", deprecations == null ? "" : deprecations);
 
         String out = bodyTemplate;
         for (Map.Entry<String, String> e : tokens.entrySet()) {

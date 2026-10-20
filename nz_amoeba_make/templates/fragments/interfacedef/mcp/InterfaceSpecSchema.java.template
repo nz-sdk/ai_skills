@@ -49,6 +49,9 @@ public final class InterfaceSpecSchema {
 
     public static final String PACKAGE_PATTERN = "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$";
 
+    /** Deprecation dates — same shape Deprecations.date() accepts (it additionally rejects impossible dates). */
+    public static final String DATE_PATTERN = "^\\d{4}-\\d{2}-\\d{2}$";
+
     /** Placeholder descriptions are caught semantically; the schema only enforces "not empty". */
     private static final int MIN_DESCRIPTION_LENGTH = 2;
 
@@ -97,6 +100,7 @@ public final class InterfaceSpecSchema {
         defs.set("param", param(m));
         defs.set("response", response(m));
         defs.set("field", field(m));
+        defs.set("deprecation", deprecation(m));
     }
 
     /** A reference to the attached spec definition, for use as a property schema. */
@@ -151,6 +155,9 @@ public final class InterfaceSpecSchema {
                 .put("description", "One entry per status code. At least one 2xx is required — it supplies the "
                         + "expected status for the generated verification probe.");
         responses.putObject("items").put("$ref", "#/$defs/response");
+        deprecationRef(p, "Set to deprecate this operation. Adds the Deprecation / Sunset / Link response headers "
+                + "and OpenAPI deprecated + x-sunset. The operation can be removed without a major version only "
+                + "after its sunset.");
         required(s, "operationId", "method", "path", "summary", "description", "responses");
         return s;
     }
@@ -176,6 +183,8 @@ public final class InterfaceSpecSchema {
                 + "EXISTS at deploy time: the generated gate-3 probe substitutes it into the path and asserts "
                 + "the declared 2xx, so an id matching no row fails the deploy. Give the table a probe-only "
                 + "reserved row and name it here. Only non-mutating operations are probed automatically.");
+        deprecationRef(p, "Set to deprecate this parameter (OpenAPI deprecated + x-sunset). It can be removed "
+                + "without a major version only after its sunset.");
         required(s, "name", "in", "type", "required", "description");
         return s;
     }
@@ -215,8 +224,36 @@ public final class InterfaceSpecSchema {
                 .put("description", "The shape of one element. Required when type is array, forbidden otherwise. "
                         + "Its own name is only used when the element is an object, where it becomes the nested "
                         + "record's type name.");
+        deprecationRef(p, "Set to deprecate this field, e.g. the old name while both names are served during a "
+                + "rename (OpenAPI deprecated + x-sunset). It can be removed without a major version only after "
+                + "its sunset.");
         required(s, "name", "type", "required", "description");
         return s;
+    }
+
+    /**
+     * Mirrors {@code InterfaceSpec.DeprecationSpec}. The patterns are the cheap half of the check;
+     * {@code InterfaceSpecValidator} still rejects impossible dates (2026-02-30) and a sunset before since.
+     */
+    private static ObjectNode deprecation(ObjectMapper m) {
+        ObjectNode s = object(m, "Deprecation notice: stop using the item; it may be removed after the sunset date.");
+        ObjectNode p = s.putObject("properties");
+        p.putObject("since").put("type", "string").put("pattern", DATE_PATTERN)
+                .put("description", "Date the item is deprecated from, YYYY-MM-DD (UTC). Becomes the "
+                        + "Deprecation response header.");
+        p.putObject("sunset").put("type", "string").put("pattern", DATE_PATTERN)
+                .put("description", "Date the item may be removed, YYYY-MM-DD (UTC), not before since. Until then "
+                        + "removing it is a breaking change that the deploy gate refuses within the same major "
+                        + "version. Becomes the Sunset response header and OpenAPI x-sunset.");
+        p.putObject("link").put("type", "string").put("pattern", "^https?://\\S+$")
+                .put("description", "URL of the notice explaining what to use instead. Becomes "
+                        + "Link: <url>; rel=\"deprecation\".");
+        required(s, "since");
+        return s;
+    }
+
+    private static void deprecationRef(ObjectNode properties, String description) {
+        properties.putObject("deprecation").put("$ref", "#/$defs/deprecation").put("description", description);
     }
 
     // --- small builders, so the shape of every node above stays uniform ---

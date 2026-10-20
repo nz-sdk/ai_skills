@@ -19,6 +19,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import {{PKG}}.interfacedef.Deprecations;
 import {{PKG}}.interfacedef.DraftStore;
 import {{PKG}}.interfacedef.SkeletonDefaults;
 import {{PKG}}.interfacedef.mcp.InterfaceSpecSchema;
@@ -162,6 +163,8 @@ public final class SpecBearingDeployTool implements McpTool {
         stringArray(p, "generatedProbes", "Gate-3 probes generated from the spec.");
         stringArray(p, "undeclaredRoutes",
                 "Routes the module serves that the spec does not declare. Reported, not blocking.");
+        stringArray(p, "deprecations",
+                "Operations, parameters and fields this version marks as deprecated, with since and sunset dates.");
         p.putObject("document").put("type", "string")
                 .put("description", "The interface definition document, rendered as markdown.");
         // Declared, not optional-by-omission: strict-schema validates structured results, and a silent callback is
@@ -312,8 +315,14 @@ public final class SpecBearingDeployTool implements McpTool {
         putStrings(structured, "undeclaredRoutes", verification.extra());
         structured.put("document", document);
 
+        // What this version marks as deprecated — announced in the result and the webhook so the FE side hears about
+        // it at deploy time, not when the sunset arrives (FE · BE API compatibility).
+        List<String> deprecated = Deprecations.summarize(prepared.spec());
+        putStrings(structured, "deprecations", deprecated);
+
         String callbackStatus = notifier.notifyDeploy(DeployWebhookNotifier.Outcome.SUCCESS,
-                prepared.moduleId(), prepared.version(), successSummary(prepared, verification));
+                prepared.moduleId(), prepared.version(), successSummary(prepared, verification, deprecated),
+                String.join("\n", deprecated));
         structured.put("callbackStatus", callbackStatus);
 
         StringBuilder text = new StringBuilder(delegated.text() == null ? "" : delegated.text());
@@ -323,6 +332,8 @@ public final class SpecBearingDeployTool implements McpTool {
         appendList(text, "Filled in from the skeleton because you omitted them", prepared.seeded());
         appendList(text, "Routes served but not declared — add them to the spec or remove them",
                 verification.extra());
+        appendList(text, "Deprecated in this version (announce to the FE side; remove only after the sunset)",
+                deprecated);
         if (!prepared.probes().isEmpty()) {
             appendList(text, "Verification probes generated and passed", prepared.probes().stream()
                     .map(p -> p.method() + " " + p.path() + " expecting " + p.expectedStatus())
@@ -336,7 +347,7 @@ public final class SpecBearingDeployTool implements McpTool {
 
     /** The issue body for a successful deploy — the same facts the MCP result carries, in markdown. */
     private String successSummary(InterfaceDeployPreparer.Prepared prepared,
-                                  InterfaceVerifier.Verification verification) {
+                                  InterfaceVerifier.Verification verification, List<String> deprecated) {
         StringBuilder out = new StringBuilder();
         out.append("| 검증 | ").append(verification.status()).append(" |\n");
         appendBullets(out, "생성된 probe", prepared.probes().stream()
@@ -345,6 +356,7 @@ public final class SpecBearingDeployTool implements McpTool {
         appendBullets(out, "스펙에서 재생성된 파일", prepared.replaced());
         appendBullets(out, "스켈레톤이 채운 파일", prepared.seeded());
         appendBullets(out, "선언되지 않은 라우트", verification.extra());
+        appendBullets(out, "deprecated (사용 중단 예정 — sunset 뒤에만 제거)", deprecated);
         return out.toString();
     }
 

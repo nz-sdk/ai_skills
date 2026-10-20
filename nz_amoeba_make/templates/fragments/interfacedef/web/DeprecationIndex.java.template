@@ -1,0 +1,116 @@
+// [INTERFACE DEFINITION] Which live routes are deprecated — read from every module's SEALED spec.
+//
+// Built from the specs protean already stores with each module (SpecResource), so a route's deprecation is exactly
+// what was deployed: changing the spec takes effect on the next update_module, never before. Kept per module and
+// refreshed through ModulePlatform's change listener (install / update / uninstall / reload all fire it), so a
+// request never parses a spec.
+//
+// ★ ModulePlatform IS RESOLVED LAZILY, ON THE FIRST LOOKUP — not a style choice. This bean is reached from a
+//   WebMvcConfigurer, which Spring consults while it is still creating requestMappingHandlerMapping; and
+//   ModulePlatform depends (through protean's ReverseProxy) on that very handler mapping. Injecting the platform
+//   eagerly is a circular reference that stops the context. By the first request everything exists, the full
+//   module list is read once, and the change listener keeps it current from then on.
+package {{PKG}}.interfacedef.web;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DeprecationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.deploy.SpecResource;
+import org.htcom.protean.module.ModuleDescriptor;
+import org.htcom.protean.module.ModulePlatform;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.stereotype.Component;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
+
+@Component
+public class DeprecationIndex {
+
+    private final ObjectProvider<ModulePlatform> platformProvider;
+    private final ObjectMapper mapper;
+
+    /** Set by {@link #loadAll()}; guarded by {@code this}. */
+    private ModulePlatform platform;
+
+    /** moduleId → ("METHOD /path" → deprecation). Guarded by {@code this}. */
+    private final Map<String, Map<String, DeprecationSpec>> byModule = new HashMap<>();
+
+    /** All modules merged — replaced wholesale, so a lookup reads it without a lock. */
+    private volatile Map<String, DeprecationSpec> routes = Map.of();
+
+    private volatile boolean loaded;
+
+    public DeprecationIndex(ObjectProvider<ModulePlatform> platformProvider, ObjectMapper mapper) {
+        this.platformProvider = platformProvider;
+        this.mapper = mapper;
+    }
+
+    /**
+     * The deprecation of the operation Spring matched, if any.
+     *
+     * @param pattern the best-matching route pattern ({@code /api/emp/{empNo}}) — the same string the spec
+     *                declares as the operation's path
+     */
+    public Optional<DeprecationSpec> find(String method, String pattern) {
+        if (!loaded) {
+            loadAll();
+        }
+        return Optional.ofNullable(routes.get(method + " " + pattern));
+    }
+
+    private synchronized void loadAll() {
+        if (loaded) {
+            return;
+        }
+        platform = platformProvider.getIfAvailable();
+        if (platform == null) {
+            loaded = true;   // no module platform in this context (e.g. a worker) — nothing is ever deprecated
+            return;
+        }
+        // Registered before the full read, so a change that lands in between is applied after it, not lost.
+        platform.addChangeListener(this::refresh);
+        for (ModuleDescriptor d : platform.list()) {
+            byModule.put(d.id(), entriesOf(d));
+        }
+        rebuild();
+        loaded = true;
+    }
+
+    /** Change-listener callback: re-read one module, or drop it when it is gone. */
+    synchronized void refresh(String moduleId) {
+        if (platform == null) {
+            return;
+        }
+        Optional<ModuleDescriptor> d = platform.find(moduleId);
+        if (d.isPresent()) {
+            byModule.put(moduleId, entriesOf(d.get()));
+        } else {
+            byModule.remove(moduleId);
+        }
+        rebuild();
+    }
+
+    private Map<String, DeprecationSpec> entriesOf(ModuleDescriptor d) {
+        Optional<InterfaceSpec> spec = SpecResource.read(mapper, d.resources());
+        if (spec.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, DeprecationSpec> out = new HashMap<>();
+        for (OperationSpec op : spec.get().operations()) {
+            if (op != null && op.deprecation() != null && op.method() != null && op.path() != null) {
+                out.put(op.method() + " " + op.path(), op.deprecation());
+            }
+        }
+        return out;
+    }
+
+    private void rebuild() {
+        Map<String, DeprecationSpec> merged = new HashMap<>();
+        byModule.values().forEach(merged::putAll);
+        routes = Map.copyOf(merged);
+    }
+}

@@ -22,6 +22,7 @@
 // so a caller reports every problem in one round trip instead of one per retry.
 package {{PKG}}.interfacedef;
 
+import {{PKG}}.interfacedef.InterfaceSpec.DeprecationSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
 import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
@@ -29,10 +30,12 @@ import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
 import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
 import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
 
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -177,6 +180,7 @@ public final class InterfaceSpecValidator {
         checkParameters(violations, at, op, pathVars);
         checkRequestBody(violations, at, op);
         checkResponses(violations, at, op);
+        checkDeprecation(violations, at + ".deprecation", op.deprecation());
     }
 
     /**
@@ -245,6 +249,7 @@ public final class InterfaceSpecValidator {
                 checkWireName(violations, pAt + ".name", p.name());
             }
             checkColumnDescription(violations, pAt + ".description", p.description(), p.name());
+            checkDeprecation(violations, pAt + ".deprecation", p.deprecation());
 
             if (p.in() == null) {
                 violations.add(pAt + ".in: required");
@@ -355,6 +360,7 @@ public final class InterfaceSpecValidator {
     /** Validates one field's own attributes and its nested shape. Shared by sibling lists and array items. */
     private static void checkField(List<String> violations, String at, FieldSpec f, int depth) {
         checkColumnDescription(violations, at + ".description", f.description(), f.name());
+        checkDeprecation(violations, at + ".deprecation", f.deprecation());
 
         if (f.type() == null) {
             violations.add(at + ".type: required");
@@ -397,6 +403,34 @@ public final class InterfaceSpecValidator {
                             + f.type().wire() + "')");
                 }
             }
+        }
+    }
+
+    /**
+     * A deprecation notice: {@code since} is a real YYYY-MM-DD date, {@code sunset} (when given) is one too and not
+     * before it — RFC 9745 §2 forbids a sunset that precedes the deprecation — and {@code link} is an absolute
+     * http(s) URL that fits in a {@code Link} header. The minimum grace period between the two dates is a policy still
+     * to be decided, so it is deliberately not enforced here.
+     */
+    private static void checkDeprecation(List<String> violations, String at, DeprecationSpec d) {
+        if (d == null) {
+            return;
+        }
+        Optional<LocalDate> since = Deprecations.date(d.since());
+        if (since.isEmpty()) {
+            violations.add(at + ".since: required, a YYYY-MM-DD date (was '" + d.since() + "')");
+        }
+        if (d.sunset() != null) {
+            Optional<LocalDate> sunset = Deprecations.date(d.sunset());
+            if (sunset.isEmpty()) {
+                violations.add(at + ".sunset: must be a YYYY-MM-DD date (was '" + d.sunset() + "')");
+            } else if (since.isPresent() && sunset.get().isBefore(since.get())) {
+                violations.add(at + ".sunset: " + d.sunset() + " is before since " + d.since()
+                        + " — a sunset may not precede the deprecation (RFC 9745)");
+            }
+        }
+        if (d.link() != null && !Deprecations.isLink(d.link())) {
+            violations.add(at + ".link: must be an absolute http(s) URL (was '" + d.link() + "')");
         }
     }
 

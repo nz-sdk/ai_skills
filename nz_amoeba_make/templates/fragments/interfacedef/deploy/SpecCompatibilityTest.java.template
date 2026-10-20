@@ -1,0 +1,227 @@
+// One test per breaking-change rule, plus the changes that must stay allowed. The allowed ones matter as much as
+// the refused ones: a gate that refuses an ADDITION would make every routine deploy an emergency override.
+package {{PKG}}.interfacedef.deploy;
+
+import {{PKG}}.interfacedef.InterfaceSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.DeprecationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.FieldType;
+import {{PKG}}.interfacedef.InterfaceSpec.HttpMethod;
+import {{PKG}}.interfacedef.InterfaceSpec.OperationSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamIn;
+import {{PKG}}.interfacedef.InterfaceSpec.ParamSpec;
+import {{PKG}}.interfacedef.InterfaceSpec.ResponseSpec;
+import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.UnaryOperator;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class SpecCompatibilityTest {
+
+    private static final Instant NOW = Instant.parse("2026-12-15T00:00:00Z");
+    private static final DeprecationSpec SUNSET_PASSED = new DeprecationSpec("2026-11-01", "2026-12-01", null);
+    private static final DeprecationSpec SUNSET_AHEAD = new DeprecationSpec("2026-11-01", "2027-03-01", null);
+
+    // --- a small, readable baseline: GET /dept?langCd → {rows: [{deptCd, deptNm, sortSeq?}]}, POST /dept {name} ---
+
+    private static FieldSpec scalar(String name, FieldType type, boolean required) {
+        return FieldSpec.scalar(name, type, required, name + " 설명 문구");
+    }
+
+    private static FieldSpec rows(List<FieldSpec> row) {
+        return new FieldSpec("rows", FieldType.ARRAY, null, true, "부서 목록 행들", null, List.of(),
+                new FieldSpec("row", FieldType.OBJECT, null, true, "부서 한 건", null, row, null));
+    }
+
+    private static OperationSpec list(List<ParamSpec> params, List<FieldSpec> row, int status, DeprecationSpec d) {
+        return new OperationSpec("dept", HttpMethod.GET, "/api/dept", "부서 목록 조회", "부서 목록을 반환한다", params,
+                null, List.of(new ResponseSpec(status, "조회 성공", List.of(rows(row)))), d);
+    }
+
+    private static OperationSpec save(List<FieldSpec> body) {
+        return new OperationSpec("save", HttpMethod.POST, "/api/dept", "부서 저장", "부서 한 건을 저장한다",
+                List.of(), body, List.of(new ResponseSpec(200, "저장 성공", List.of(scalar("ok", FieldType.BOOLEAN,
+                true)))));
+    }
+
+    private static ParamSpec langCd(boolean required) {
+        return new ParamSpec("langCd", ParamIn.QUERY, FieldType.STRING, null, required, "조회 기준 언어 코드", null);
+    }
+
+    private static List<FieldSpec> row() {
+        return List.of(scalar("deptCd", FieldType.STRING, true), scalar("deptNm", FieldType.STRING, true),
+                scalar("sortSeq", FieldType.INTEGER, false));
+    }
+
+    private static InterfaceSpec spec(OperationSpec... ops) {
+        return new InterfaceSpec("부서", "부서 API", InterfaceSpec.DataAccess.MYBATIS, List.of(ops));
+    }
+
+    private static final InterfaceSpec BASE = spec(
+            list(List.of(langCd(false)), row(), 200, null),
+            save(List.of(scalar("name", FieldType.STRING, true), scalar("memo", FieldType.STRING, false))));
+
+    private static List<String> diff(InterfaceSpec next) {
+        return SpecCompatibility.breakingChanges(BASE, next, NOW);
+    }
+
+    private static List<FieldSpec> rowWith(UnaryOperator<List<FieldSpec>> edit) {
+        return edit.apply(new ArrayList<>(row()));
+    }
+
+    // --- refused ---
+
+    @Test
+    void removingAnOperationBreaks() {
+        List<String> d = diff(spec(list(List.of(langCd(false)), row(), 200, null)));
+        assertEquals(1, d.size(), d.toString());
+        assertTrue(d.get(0).startsWith("POST /api/dept: operation removed"), d.toString());
+    }
+
+    @Test
+    void removingAResponseFieldBreaksAndNamesItsPath() {
+        List<String> d = diff(spec(list(List.of(langCd(false)), rowWith(r -> {
+            r.remove(1);
+            return r;
+        }), 200, null), BASE.operations().get(1)));
+        assertEquals(List.of("GET /api/dept: response 200 field rows[].deptNm removed (it is not deprecated — "
+                + "deprecate it with a sunset first, or release a new major version)"), d);
+    }
+
+    @Test
+    void aResponseFieldThatBecomesOptionalBreaks() {
+        List<String> d = diff(spec(list(List.of(langCd(false)), rowWith(r -> {
+            r.set(1, scalar("deptNm", FieldType.STRING, false));
+            return r;
+        }), 200, null), BASE.operations().get(1)));
+        assertTrue(d.get(0).contains("rows[].deptNm is no longer required"), d.toString());
+    }
+
+    @Test
+    void changingAFieldTypeOrFormatBreaks() {
+        List<String> type = diff(spec(list(List.of(langCd(false)), rowWith(r -> {
+            r.set(2, scalar("sortSeq", FieldType.STRING, false));
+            return r;
+        }), 200, null), BASE.operations().get(1)));
+        assertTrue(type.get(0).contains("rows[].sortSeq type changed from integer to string"), type.toString());
+
+        List<String> format = diff(spec(list(List.of(langCd(false)), rowWith(r -> {
+            r.set(0, FieldSpec.scalar("deptCd", FieldType.STRING, "date", true, "deptCd 설명 문구"));
+            return r;
+        }), 200, null), BASE.operations().get(1)));
+        assertTrue(format.get(0).contains("type changed from string to string(date)"), format.toString());
+    }
+
+    @Test
+    void requestRulesRunInTheOtherDirection() {
+        List<String> d = diff(spec(BASE.operations().get(0), save(List.of(
+                scalar("name", FieldType.STRING, true),
+                scalar("memo", FieldType.STRING, true),          // optional → required
+                scalar("code", FieldType.STRING, true)))));      // new required input
+        assertTrue(d.contains("POST /api/dept: request field memo became required"), d.toString());
+        assertTrue(d.contains("POST /api/dept: request field code added as required"), d.toString());
+    }
+
+    @Test
+    void parameterRulesBreak() {
+        List<String> required = diff(spec(list(List.of(langCd(true)), row(), 200, null), BASE.operations().get(1)));
+        assertEquals(List.of("GET /api/dept: query parameter 'langCd' became required"), required);
+
+        List<String> removed = diff(spec(list(List.of(), row(), 200, null), BASE.operations().get(1)));
+        assertTrue(removed.get(0).startsWith("GET /api/dept: query parameter 'langCd' removed"), removed.toString());
+
+        ParamSpec newRequired = new ParamSpec("bizCd", ParamIn.QUERY, FieldType.STRING, null, true, "사업장 코드 조건",
+                null);
+        List<String> added = diff(spec(list(List.of(langCd(false), newRequired), row(), 200, null),
+                BASE.operations().get(1)));
+        assertEquals(List.of("GET /api/dept: new required query parameter 'bizCd'"), added);
+    }
+
+    @Test
+    void changingTheSuccessStatusBreaks() {
+        List<String> d = diff(spec(list(List.of(langCd(false)), row(), 201, null), BASE.operations().get(1)));
+        assertTrue(d.contains("GET /api/dept: success status changed 200 → 201"), d.toString());
+    }
+
+    @Test
+    void removingADeprecatedItemBeforeItsSunsetStillBreaks() {
+        InterfaceSpec deployed = spec(list(List.of(langCd(false)), row(), 200, SUNSET_AHEAD),
+                BASE.operations().get(1));
+        List<String> d = SpecCompatibility.breakingChanges(deployed, spec(BASE.operations().get(1)), NOW);
+        assertEquals(List.of("GET /api/dept: operation removed (deprecated, but its sunset 2027-03-01 has not passed "
+                + "yet)"), d);
+    }
+
+    // --- allowed ---
+
+    @Test
+    void addingIsCompatible() {
+        ParamSpec optional = new ParamSpec("bizCd", ParamIn.QUERY, FieldType.STRING, null, false, "사업장 코드 조건",
+                null);
+        OperationSpec extra = new OperationSpec("tree", HttpMethod.GET, "/api/dept/tree", "부서 트리 조회",
+                "부서를 트리로 반환한다", List.of(), null,
+                List.of(new ResponseSpec(200, "조회 성공", List.of(scalar("ok", FieldType.BOOLEAN, true)))));
+        InterfaceSpec next = spec(
+                list(List.of(langCd(false), optional), rowWith(r -> {
+                    r.add(scalar("deptLevel", FieldType.INTEGER, true));
+                    return r;
+                }), 200, null),
+                save(List.of(scalar("name", FieldType.STRING, true), scalar("memo", FieldType.STRING, false),
+                        scalar("note", FieldType.STRING, false))),
+                extra);
+        assertEquals(List.of(), diff(next));
+    }
+
+    @Test
+    void anUnchangedSpecIsCompatible() {
+        assertEquals(List.of(), diff(BASE));
+    }
+
+    @Test
+    void removingADeprecatedItemAfterItsSunsetIsAllowed() {
+        InterfaceSpec deployed = spec(list(List.of(langCd(false)), rowWith(r -> {
+            r.set(1, new FieldSpec("deptNm", FieldType.STRING, null, true, "부서 한글 명칭", null, List.of(), null,
+                    SUNSET_PASSED));
+            return r;
+        }), 200, null), save(List.of(scalar("name", FieldType.STRING, true))));
+        // deptNm dropped from the response, and the whole POST /api/dept dropped too — only the former was deprecated
+        InterfaceSpec next = spec(list(List.of(langCd(false)), rowWith(r -> {
+            r.remove(1);
+            return r;
+        }), 200, null));
+        List<String> d = SpecCompatibility.breakingChanges(deployed, next, NOW);
+        assertEquals(1, d.size(), d.toString());
+        assertTrue(d.get(0).startsWith("POST /api/dept: operation removed"), d.toString());
+    }
+
+    @Test
+    void renamingAPathVariableIsNotARemoval() {
+        ParamSpec idBefore = new ParamSpec("empNo", ParamIn.PATH, FieldType.STRING, null, true, "사원 번호 값", "E1");
+        ParamSpec idAfter = new ParamSpec("no", ParamIn.PATH, FieldType.STRING, null, true, "사원 번호 값", "E1");
+        OperationSpec before = new OperationSpec("remove", HttpMethod.DELETE, "/api/emp/{empNo}", "사원 삭제",
+                "사원 한 건을 삭제한다", List.of(idBefore), null,
+                List.of(new ResponseSpec(200, "삭제 성공", List.of(scalar("ok", FieldType.BOOLEAN, true)))));
+        OperationSpec after = new OperationSpec("remove", HttpMethod.DELETE, "/api/emp/{no}", "사원 삭제",
+                "사원 한 건을 삭제한다", List.of(idAfter), null, before.responses());
+        assertEquals(List.of(), SpecCompatibility.breakingChanges(spec(before), spec(after), NOW));
+    }
+
+    // --- which version steps the rule binds ---
+
+    @Test
+    void theRuleBindsWithinAMajorVersionOnly() {
+        assertTrue(SpecCompatibility.applies("1.4.0", "1.5.0"));
+        assertTrue(SpecCompatibility.applies("1.4.0", "1.4.0"), "a redeploy of the same version is still checked");
+        assertFalse(SpecCompatibility.applies("1.4.0", "2.0.0"), "a major bump is how a breaking change ships");
+        assertFalse(SpecCompatibility.applies("0.9.0", "0.10.0"), "0.x is initial development");
+        assertTrue(SpecCompatibility.applies("draft", "1.0.0"), "an unparsable version is held to the rule");
+        assertTrue(SpecCompatibility.applies("2.0.0", "1.9.0"), "a lower major is not an exemption");
+        assertEquals(2, SpecCompatibility.major("v2.1").getAsInt());
+    }
+}

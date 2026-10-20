@@ -1,0 +1,105 @@
+// The L1 half of `deprecation`: with protean.mcp.strict-schema=true a property the schema does not list is REJECTED
+// before the record ever sees it, so the schema must carry `deprecation` wherever InterfaceSpec does (operation,
+// parameter, field) — and close it with additionalProperties:false like every other object here.
+package {{PKG}}.interfacedef.mcp;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion;
+import com.networknt.schema.ValidationMessage;
+
+import {{PKG}}.interfacedef.DraftStore;
+import {{PKG}}.interfacedef.SkeletonDefaults;
+import org.junit.jupiter.api.Test;
+
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class DeprecationSchemaTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectNode schema =
+            new DefineInterfaceTool(mapper, new DraftStore(), new SkeletonDefaults("none", true, true)).inputSchema();
+
+    private Set<ValidationMessage> validate(String json) {
+        try {
+            JsonNode instance = mapper.readTree(json);
+            return JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012).getSchema(schema).validate(instance);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private void accepts(String json) {
+        Set<ValidationMessage> messages = validate(json);
+        assertTrue(messages.isEmpty(), () -> "expected the schema to accept this, but got " + messages);
+    }
+
+    /** Location, not message text — networknt localizes messages to the JVM locale. */
+    private void rejectsAt(String json, String instanceLocation) {
+        Set<ValidationMessage> messages = validate(json);
+        assertTrue(messages.stream().anyMatch(m -> m.getInstanceLocation().toString().startsWith(instanceLocation)),
+                () -> "expected a violation at '" + instanceLocation + "' but got "
+                        + messages.stream().map(m -> m.getInstanceLocation().toString()).toList());
+    }
+
+    private static String input(String operationDeprecation, String paramDeprecation, String fieldDeprecation) {
+        return """
+                {
+                  "moduleId": "orders",
+                  "version": "1.0.0",
+                  "packageName": "module.orders",
+                  "interface": {
+                    "description": "주문을 조회한다",
+                    "operations": [{
+                      "operationId": "listOrders",
+                      "method": "GET",
+                      "path": "/orders",
+                      "summary": "주문 목록 조회",
+                      "description": "조건에 맞는 주문 목록을 반환한다",
+                      %s
+                      "parameters": [{
+                        "name": "status", "in": "query", "type": "string", "required": false,
+                        "description": "주문 상태 코드 조건" %s
+                      }],
+                      "responses": [{
+                        "status": 200, "description": "조회 성공",
+                        "body": [{"name": "deptNm", "type": "string", "required": true,
+                                  "description": "부서 한글 명칭" %s}]
+                      }]
+                    }]
+                  }
+                }
+                """.formatted(operationDeprecation, paramDeprecation, fieldDeprecation);
+    }
+
+    @Test
+    void acceptsDeprecationOnOperationParameterAndField() {
+        accepts(input(
+                "\"deprecation\": {\"since\": \"2026-11-01\", \"sunset\": \"2026-12-01\", "
+                        + "\"link\": \"https://example.com/notices/123\"},",
+                ", \"deprecation\": {\"since\": \"2026-11-01\"}",
+                ", \"deprecation\": {\"since\": \"2026-11-01\", \"sunset\": \"2026-12-01\"}"));
+    }
+
+    @Test
+    void sinceIsRequired() {
+        rejectsAt(input("\"deprecation\": {\"sunset\": \"2026-12-01\"},", "", ""),
+                "$.interface.operations[0].deprecation");
+    }
+
+    @Test
+    void datesMustBeYyyyMmDd() {
+        rejectsAt(input("", ", \"deprecation\": {\"since\": \"2026/11/01\"}", ""),
+                "$.interface.operations[0].parameters[0].deprecation.since");
+    }
+
+    @Test
+    void theDeprecationObjectIsClosed() {
+        rejectsAt(input("", "", ", \"deprecation\": {\"since\": \"2026-11-01\", \"until\": \"2026-12-01\"}"),
+                "$.interface.operations[0].responses[0].body[0].deprecation");
+    }
+}

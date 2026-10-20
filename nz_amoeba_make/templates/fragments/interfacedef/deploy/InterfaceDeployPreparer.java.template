@@ -14,6 +14,10 @@
 //   4. gate-3 probes generated from the spec, merged with any the caller supplied.
 //   5. controller / components / needsSharedBeans, taken from the skeleton. The caller no longer has to get these
 //      right, and `components` defaulting to [controller] alone is the classic MVC-module wiring failure.
+//
+// It also REFUSES two kinds of update before anything is compiled: a service-layer shape switch, and a breaking
+// change within the same major version (SpecCompatibility — the FE · BE API compatibility gate). Refusing here is
+// cheap: nothing is installed yet, so there is nothing to roll back.
 package {{PKG}}.interfacedef.deploy;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -29,10 +33,14 @@ import {{PKG}}.interfacedef.SkeletonDefaults;
 import {{PKG}}.interfacedef.gen.GeneratedFile;
 import {{PKG}}.interfacedef.gen.SkeletonBundle;
 import {{PKG}}.interfacedef.gen.SkeletonGenerator;
+import org.htcom.protean.module.ModuleDescriptor;
 import org.htcom.protean.module.ModulePlatform;
 import org.htcom.protean.module.VerificationPlan;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -51,12 +59,24 @@ public class InterfaceDeployPreparer {
     /** The project skeleton standard, shared with DefineInterfaceTool. */
     private final SkeletonDefaults defaults;
 
+    /** {@code amoeba.compat-gate.enabled} — the escape hatch for an emergency, not a per-deploy option. */
+    private final boolean compatGateEnabled;
+
+    /** The gate on — what every caller outside Spring (tests, fixtures) gets. */
     public InterfaceDeployPreparer(ObjectMapper mapper, DraftStore draftStore, ModulePlatform platform,
                                   SkeletonDefaults defaults) {
+        this(mapper, draftStore, platform, defaults, true);
+    }
+
+    @Autowired
+    public InterfaceDeployPreparer(ObjectMapper mapper, DraftStore draftStore, ModulePlatform platform,
+                                  SkeletonDefaults defaults,
+                                  @Value("${amoeba.compat-gate.enabled:true}") boolean compatGateEnabled) {
         this.mapper = mapper;
         this.draftStore = draftStore;
         this.platform = platform;
         this.defaults = defaults;
+        this.compatGateEnabled = compatGateEnabled;
     }
 
     /** A caller-facing rejection. The message is written to be actionable on its own. */
@@ -95,6 +115,45 @@ public class InterfaceDeployPreparer {
                 + "kept alongside the new ones and the module would not compile. Either declare "
                 + "serviceInterface=" + was + " to match what is deployed, or uninstall the module "
                 + "(protean.uninstall_module) and deploy it fresh under the new shape.");
+    }
+
+    /**
+     * Refuses a breaking change to an already-deployed module within the same major version.
+     *
+     * <p>The deployed descriptor's sealed spec is the baseline — the contract every open screen was built against.
+     * A major bump (or a 0.x module) is exempt: that is how a breaking change is meant to ship, with the new shape on
+     * new paths beside the old ones. Removing something deprecated whose sunset has passed is allowed — that is the
+     * last step of expand → migrate → contract.
+     *
+     * <p>Known bypass, left as is: {@code protean.uninstall_module} deletes the module's version history, so a fresh
+     * deploy afterwards has no baseline. Uninstalling a module the screens still call breaks them anyway.
+     */
+    private void rejectBreakingChange(String moduleId, String version, InterfaceSpec next) {
+        if (!compatGateEnabled) {
+            return;
+        }
+        Optional<ModuleDescriptor> current = platform.find(moduleId);
+        Optional<InterfaceSpec> deployed = current.flatMap(d -> SpecResource.read(mapper, d.resources()));
+        if (deployed.isEmpty()) {
+            return; // first deploy, or a module that carries no sealed spec — no baseline to break
+        }
+        String deployedVersion = current.get().version();
+        if (!SpecCompatibility.applies(deployedVersion, version)) {
+            return;
+        }
+        List<String> breaking = SpecCompatibility.breakingChanges(deployed.get(), next, Instant.now());
+        if (breaking.isEmpty()) {
+            return;
+        }
+        int major = SpecCompatibility.major(deployedVersion).orElse(1);
+        throw new PreparationException("module '" + moduleId + "' " + deployedVersion + " → " + version
+                + " breaks clients of the deployed version (same major version):\n  - "
+                + String.join("\n  - ", breaking)
+                + "\nWithin a major version a module may only add. Either keep the old shape alongside the new one "
+                + "(add first, deprecate the old item with a sunset, remove it after the sunset), or release the "
+                + "change as version " + (major + 1) + ".0.0 with the new shape on new paths (e.g. /api/v"
+                + (major + 1) + "/...) beside the old ones. The gate can be switched off with "
+                + "amoeba.compat-gate.enabled=false for an emergency.");
     }
 
     /**
@@ -137,6 +196,7 @@ public class InterfaceDeployPreparer {
 
         Resolved resolved = resolveSpec(args, moduleId);
         rejectServiceLayerSwitch(moduleId, resolved.spec());
+        rejectBreakingChange(moduleId, version, resolved.spec());
         Map<String, FileEntry> files = collectFiles(args);
         List<String> replaced = new ArrayList<>();
         List<String> seeded = new ArrayList<>();

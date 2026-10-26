@@ -232,7 +232,12 @@ The workflow and the Dockerfile also `chmod +x` as a second line of defence.
 | Artifact | Retention |
 |---|---|
 | `test-results-<run_id>` | 7 days |
-| `bootjar-<sha>` | 14 days |
+| `bootjar-<sha>` | 1 day |
+
+`bootjar` is a diagnostic copy that nothing downloads, so it is kept for one day only. At ~35 MB per
+commit a 14-day window filled the free-plan Actions storage quota (500 MB, shared by every repo in the
+org). Once the quota is hit, artifact uploads fail org-wide (`Artifact storage quota has been hit`), and
+deleting artifacts frees the space only after GitHub recalculates usage, 6–12 hours later.
 
 ## Reproducing CI locally
 

@@ -107,11 +107,14 @@ jobs:
       # ⚠ This jar is a DIAGNOSTIC ARTIFACT, not a way to run the app. `java -jar` makes Protean's
       #   RuntimeCompiler see only the fat jar on java.class.path and module compilation fails. The image
       #   explodes this jar and runs a flat classpath.
+      # ⚠ 1 day on purpose. Nothing downloads this jar (the image job builds its own), and at ~35 MB per
+      #   commit a 14-day window filled the free-plan Actions storage quota (500 MB, shared by the whole
+      #   org) — after which every artifact upload in the org fails. See docs/ci-cd.md "Artifact retention".
       - uses: actions/upload-artifact@v4
         with:
           name: bootjar-${{ github.sha }}
           path: build/libs/protean-{{NAME}}-sample.jar
-          retention-days: 14
+          retention-days: 1
           overwrite: true
 
   # ───────────────────────────────────────────────────────────────────

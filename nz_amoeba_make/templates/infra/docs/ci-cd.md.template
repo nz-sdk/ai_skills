@@ -48,11 +48,11 @@ that — whereas `http://<alias>:<port>` only matches when `SERVER_HOST` genuine
   the default branch (a PR cannot poison main's cache), wrapper-distribution caching, and `validate-wrappers`
   to detect a tampered `gradle-wrapper.jar`.
 - `--offline` is **not** usable: `settings.gradle`'s foojay-resolver reaches the network at configuration time.
-- ⚠️ **`overwrite: true` on both `upload-artifact` steps is required.** Neither name carries a `run_attempt`
-  axis, and `upload-artifact@v4` hard-fails with 409 Conflict when an artifact of that name survives from a
-  previous attempt — "Re-run all jobs" would die at the upload rather than in the build. `run_attempt` is kept
-  out of the names on purpose, so a link keeps pointing at "the jar for that commit".
-- The uploaded bootJar is a **diagnostic artifact, not a way to run the app** (see docs/docker.md, constraint 2).
+- ⚠️ **`overwrite: true` on the `upload-artifact` step is required.** The name carries no `run_attempt` axis,
+  and `upload-artifact@v4` hard-fails with 409 Conflict when an artifact of that name survives from a previous
+  attempt — "Re-run all jobs" would die at the upload rather than in the build.
+- `build` also builds the bootJar, which checks packaging, but the jar is **not uploaded** (see "Artifact
+  retention" below). It is not a way to run the app anyway (see docs/docker.md, constraint 2).
 
 ## `image` — four smokes
 
@@ -232,12 +232,12 @@ The workflow and the Dockerfile also `chmod +x` as a second line of defence.
 | Artifact | Retention |
 |---|---|
 | `test-results-<run_id>` | 7 days |
-| `bootjar-<sha>` | 1 day |
 
-`bootjar` is a diagnostic copy that nothing downloads, so it is kept for one day only. At ~35 MB per
-commit a 14-day window filled the free-plan Actions storage quota (500 MB, shared by every repo in the
-org). Once the quota is hit, artifact uploads fail org-wide (`Artifact storage quota has been hit`), and
-deleting artifacts frees the space only after GitHub recalculates usage, 6–12 hours later.
+The bootJar is deliberately **not** an artifact. Nothing downloads it (the image job builds its own), and at
+~35 MB per commit, keeping it for 14 days filled the free-plan Actions storage quota (500 MB, shared by every
+repo in the org and with GitHub Packages). Once the quota is hit, artifact uploads fail org-wide (`Artifact
+storage quota has been hit`), and deleting artifacts frees the space only after GitHub recalculates usage,
+6–12 hours later.
 
 ## Reproducing CI locally
 

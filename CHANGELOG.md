@@ -21,6 +21,7 @@
 ### 버그 수정
 
 * **nz_amoeba_make:** 생성되는 서버에 VS Code MCP 클라이언트가 붙지 못하던 문제 — path-appended protected resource metadata 와 401 의 `resource_metadata`(RFC 9728) ([#10](https://github.com/nz-sdk/ai_skills/pull/10))
+* **nz_amoeba_make:** 생성 CI 가 bootjar(~35 MB)를 커밋마다 artifact 로 올려(14일 보관) 무료 플랜 조직 Actions 저장 한도(500 MB)를 채우던 문제 — 업로드를 뺀다 ([#11](https://github.com/nz-sdk/ai_skills/pull/11))
 
 
 ### 문서

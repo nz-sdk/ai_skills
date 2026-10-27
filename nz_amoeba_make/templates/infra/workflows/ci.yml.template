@@ -76,6 +76,8 @@ jobs:
       # `build` = test + bootJar. Every test is offline: no database and no reachable Authorization Server
       # (ResourceServerOnlyTest uses RANDOM_PORT and an unreachable issuer), so there are no port collisions
       # whether the runner is a container or a binary on the host.
+      # The bootJar is built (so packaging is checked) but NOT uploaded — it goes away with the runner. Uploading
+      # it (~35 MB per commit) once filled the org's Actions storage quota. See docs/ci-cd.md "Artifact retention".
       - name: Build and test
         run: ./gradlew --no-daemon --console=plain build
 
@@ -89,11 +91,9 @@ jobs:
 
       # Unconditional fallback so results are visible even if publishing fails (permissions/network).
       #
-      # ⚠️ `overwrite` IS REQUIRED. Neither artifact name has an attempt axis (run_id · sha), and
-      #    upload-artifact@v4 HARD-FAILS with 409 Conflict when an artifact of the same name survives from a
-      #    previous attempt → "Re-run all jobs" would die here rather than in the build. run_attempt is
-      #    deliberately NOT in the name: the link would then differ per attempt and stop pointing at
-      #    "the jar for that commit".
+      # ⚠️ `overwrite` IS REQUIRED. The name has no attempt axis (run_id only), and upload-artifact@v4
+      #    HARD-FAILS with 409 Conflict when an artifact of the same name survives from a previous attempt →
+      #    "Re-run all jobs" would die here rather than in the build.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -102,16 +102,6 @@ jobs:
             build/reports/tests/test
             build/test-results/test
           retention-days: 7
-          overwrite: true
-
-      # ⚠ This jar is a DIAGNOSTIC ARTIFACT, not a way to run the app. `java -jar` makes Protean's
-      #   RuntimeCompiler see only the fat jar on java.class.path and module compilation fails. The image
-      #   explodes this jar and runs a flat classpath.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bootjar-${{ github.sha }}
-          path: build/libs/protean-{{NAME}}-sample.jar
-          retention-days: 14
           overwrite: true
 
   # ───────────────────────────────────────────────────────────────────

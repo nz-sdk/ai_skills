@@ -19,7 +19,7 @@
 | `{{PKG_PATH}}` | `{{PKG}}` 를 경로로 (`.`→`/`) | `prototype/orders` |
 | `{{PORT}}` | HTTP 포트 — **사용자가 직접 입력** (기본값 `8080`). `${SERVER_PORT:{{PORT}}}` 의 기본값 자리에만 들어간다 | `9200` |
 | `{{COORD}}` | Protean group:artifact | `org.htcom:protean` |
-| `{{VERSION}}` | Protean 버전 | `0.0.1` |
+| `{{VERSION}}` | Protean 버전 | `0.0.2` |
 | `{{DB}}` | 데이터베이스/스키마 이름 (기본값 = `<name>`) | `orders` |
 | `{{PW}}` | DB 비밀번호 (기본값 = `<DB>1234`) | `orders1234` |
 

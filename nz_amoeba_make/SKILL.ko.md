@@ -92,8 +92,8 @@
 
 ### 2. 좌표 / 버전 (타이핑) + maven-central 확인
 
-좌표/버전을 **입력**하게 한다(기본값 `org.htcom:protean:0.0.1` — 2026-08-09 부터 Maven Central 에 올라간 릴리스
-버전). 그다음 의존성 출처를 판단한다:
+좌표/버전을 **입력**하게 한다(기본값 `org.htcom:protean:0.0.2` — 2026-10-31 부터 Maven Central 에 올라간 최신 릴리스
+버전. `0.0.1`(2026-08-09)은 MCP 보안 권고 2건의 수정이 없으니 기본값으로 쓰지 않는다). 그다음 의존성 출처를 판단한다:
 - `-SNAPSHOT` → Central 은 스냅샷을 호스팅하지 않는다 → **mavenLocal 경로**. protean 저장소에서 먼저
   `./gradlew publishToMavenLocal` 하라고 안내한다.
 - 그 외에는 probe: `curl -sfI https://repo1.maven.org/maven2/org/htcom/protean/<ver>/protean-<ver>.pom` → 2xx 면
@@ -291,7 +291,7 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   펼치는 embed 런타임을 외부 아티팩트로 대체하며, 필요한 키가 격리 모드에 따라 다르다:
   `worker`(프로세스 트랙) ⇒ **`worker.sidecar.jar`**(flat `-worker` uber-jar. Boot fat jar 는 동작하지 않는다 —
   릴리스가 `worker` classifier 아티팩트로 하나를 게시하므로 사용자가 shadow 로 직접 빌드할 필요는 없다),
-  `container` ⇒ **`worker.sidecar.image`**(`ghcr.io/htcom-code/protean-worker:<ver>`, 예: `:0.0.1`). 다른 쪽 키는
+  `container` ⇒ **`worker.sidecar.image`**(`ghcr.io/htcom-code/protean-worker:<ver>`, 예: `:0.0.2`). 다른 쪽 키는
   해당 트랙에서 inert 다. Protean 은 이 값을 startup 이 아니라 **첫 worker spawn(첫 배포)** 시점에 해소하며,
   값이 없으면 그 자리에서 `IllegalStateException` 을 던진다. 그러니 여기서 검증하고, 배포 전에 `setup.sh` 가 다시
   확인하게 한다. `worker.sidecar.shared-api`(프로세스 트랙 전용)는 선택이지만, 설정했다면 실제 존재하는 jar 여야
@@ -358,11 +358,11 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 `{{PORT}}`(step 1 에서 입력받은 포트), `{{COORD}}`, `{{VERSION}}`, 그리고 DB 토큰 `{{DB}}`/`{{PW}}` 를
 치환한다.
 
-**★ `{{COORD}}` 는 버전을 뺀 `group:artifact` 다.** step 2 는 버전이 포함된 *좌표*(`org.htcom:protean:0.0.1`)를
+**★ `{{COORD}}` 는 버전을 뺀 `group:artifact` 다.** step 2 는 버전이 포함된 *좌표*(`org.htcom:protean:0.0.2`)를
 물으므로 둘은 같은 문자열이 아니고, 치환 전에 쪼개야 한다 — `{{COORD}}` = `org.htcom:protean`,
-`{{VERSION}}` = `0.0.1`. 합치는 것은 템플릿이 직접 한다: `build.gradle.template` 은 `'{{COORD}}:{{VERSION}}'` 을
+`{{VERSION}}` = `0.0.2`. 합치는 것은 템플릿이 직접 한다: `build.gradle.template` 은 `'{{COORD}}:{{VERSION}}'` 을
 쓰고, `setup.sh.template` 은 mavenLocal pom 을 찾기 위해 `${COORD%%:*}` / `${COORD##*:}` 로 다시 쪼갠다. 세 조각
-좌표를 그대로 치환하면 `build.gradle` 에는 `org.htcom:protean:0.0.1:0.0.1` 이, `setup.sh` 에는 깨진 mavenLocal
+좌표를 그대로 치환하면 `build.gradle` 에는 `org.htcom:protean:0.0.2:0.0.2` 이, `setup.sh` 에는 깨진 mavenLocal
 경로가 남는다.
 
 **★ 사용자가 입력하지 않지만 생성기가 채워야 하는 플레이스홀더** — 각각 템플릿이 분기하는 값이고, 안 채우면

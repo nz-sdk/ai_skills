@@ -1,0 +1,192 @@
+// amoeba.explain_query and amoeba.select_query end to end over H2 (DbFixtures' schema): results conform to their
+// declared outputSchema as a whole, locations move the statement, refusals come back as tool errors with a reason,
+// and every cap does what its name says.
+package {{PKG}}.db.query;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.db.DbFixtures;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
+
+import static {{PKG}}.db.query.QueryFixtures.MAPPER;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class QueryToolsTest {
+
+    private DataSource db;
+
+    @BeforeEach
+    void database() {
+        db = DbFixtures.database();
+        DbFixtures.exec(db,
+                "INSERT INTO comp_mst (comp_cd, comp_nm) VALUES ('A01', '가나다 회사'), ('B02', 'Beta Inc')",
+                "INSERT INTO emp (comp_cd, emp_nm, salary) VALUES ('A01', '홍길동', 1500.00),"
+                        + " ('A01', '김철수', 2300.50), ('B02', 'Kim', NULL)",
+                "INSERT INTO other_app.comp_mst (other_col) VALUES (42)");
+    }
+
+    private static ObjectNode args(String sql) {
+        return MAPPER.createObjectNode().put("sql", sql);
+    }
+
+    // ---- explain ------------------------------------------------------------------------------------------
+
+    @Test
+    void explainPlansWithoutRunning() {
+        ExplainQueryTool tool = QueryFixtures.explain(db);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(args("SELECT comp_nm FROM comp_mst WHERE comp_cd = 'A01'"), null));
+        assertEquals("h2", s.path("vendor").asText());
+        assertEquals("text", s.path("format").asText());
+        assertTrue(s.path("text").asText().toUpperCase().contains("COMP_MST"), s.toString());
+    }
+
+    @Test
+    void explainMovesToTheRequestedSchema() {
+        ExplainQueryTool tool = QueryFixtures.explain(db);
+        // other_col exists only in OTHER_APP.COMP_MST: planning it in PUBLIC would fail.
+        JsonNode s = QueryFixtures.ok(tool, tool.call(
+                args("SELECT other_col FROM comp_mst").put("schema", DbFixtures.OTHER_SCHEMA), null));
+        assertEquals(DbFixtures.OTHER_SCHEMA, s.path("schema").asText());
+    }
+
+    @Test
+    void explainRefusesWhatIsNotAQuery() {
+        ExplainQueryTool tool = QueryFixtures.explain(db);
+        QueryFixtures.refused(tool.call(args("DELETE FROM emp"), null), "not run:");
+        QueryFixtures.refused(tool.call(args("SELECT 1; DROP TABLE emp"), null), "only one statement");
+        QueryFixtures.refused(tool.call(args("SELECT * FROM INFORMATION_SCHEMA.TABLES"), null), "system namespace");
+        QueryFixtures.refused(tool.call(MAPPER.createObjectNode(), null), "'sql' is empty");
+        QueryFixtures.refused(tool.call(args("SELECT 1").put("schema", "NOPE"), null), "not visible");
+    }
+
+    @Test
+    void aDatabaseErrorIsReportedNotThrown() {
+        ExplainQueryTool tool = QueryFixtures.explain(db);
+        QueryFixtures.refused(tool.call(args("SELECT no_such_column FROM comp_mst"), null), "database error");
+    }
+
+    // ---- select -------------------------------------------------------------------------------------------
+
+    @Test
+    void selectReturnsRowsWithPrecisionKept() {
+        SelectQueryTool tool = QueryFixtures.select(db);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(
+                args("SELECT e.emp_id, e.emp_nm, e.salary, c.comp_nm FROM emp e JOIN comp_mst c"
+                        + " ON c.comp_cd = e.comp_cd ORDER BY e.emp_id"), null));
+        assertEquals(3, s.path("rowCount").asInt());
+        assertFalse(s.path("truncated").asBoolean());
+        assertEquals("EMP_NM", s.path("columns").get(1).path("name").asText());
+        JsonNode first = s.path("rows").get(0);
+        assertTrue(first.get(0).isIntegralNumber(), "ids within 2^53 stay numbers: " + first);
+        assertEquals("홍길동", first.get(1).asText());
+        assertEquals("1500.00", first.get(2).asText(), "a decimal keeps its scale as a string");
+        assertEquals("가나다 회사", first.get(3).asText());
+        assertTrue(s.path("rows").get(2).get(2).isNull(), "NULL is null: " + s);
+    }
+
+    @Test
+    void selectStopsAtMaxRowsAndSaysSo() {
+        SelectQueryTool tool = QueryFixtures.select(db);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp ORDER BY emp_id").put("maxRows", 2),
+                null));
+        assertEquals(2, s.path("rowCount").asInt());
+        assertTrue(s.path("truncated").asBoolean());
+        assertEquals("rows", s.path("truncatedBy").asText());
+
+        JsonNode exact = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp").put("maxRows", 3), null));
+        assertFalse(exact.path("truncated").asBoolean(), "exactly maxRows rows is not truncation: " + exact);
+    }
+
+    @Test
+    void selectCutsLongCellsAndLargeResults() {
+        SelectQueryTool cells = QueryFixtures.select(db, QueryFixtures.settings(null, 3, null));
+        JsonNode s = QueryFixtures.ok(cells, cells.call(args("SELECT comp_nm FROM comp_mst ORDER BY comp_cd"), null));
+        assertEquals("가나다…", s.path("rows").get(0).get(0).asText());
+        assertEquals(2, s.path("cellsTruncated").asInt());
+
+        SelectQueryTool bytes = QueryFixtures.select(db, QueryFixtures.settings(40, null, null));
+        JsonNode b = QueryFixtures.ok(bytes, bytes.call(args("SELECT emp_nm, comp_cd FROM emp ORDER BY emp_id"), null));
+        assertTrue(b.path("rowCount").asInt() >= 1 && b.path("rowCount").asInt() < 3, b.toString());
+        assertEquals("bytes", b.path("truncatedBy").asText());
+    }
+
+    @Test
+    void selectMovesToTheRequestedSchema() {
+        SelectQueryTool tool = QueryFixtures.select(db);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(
+                args("SELECT * FROM comp_mst").put("schema", DbFixtures.OTHER_SCHEMA), null));
+        assertEquals("OTHER_COL", s.path("columns").get(0).path("name").asText());
+        assertEquals(42, s.path("rows").get(0).get(0).asInt());
+    }
+
+    @Test
+    void selectRefusesWritesAndLeavesTheDataAlone() {
+        SelectQueryTool tool = QueryFixtures.select(db);
+        QueryFixtures.refused(tool.call(args("UPDATE emp SET salary = 0"), null), "not run:");
+        QueryFixtures.refused(tool.call(args("WITH x AS (SELECT 1) DELETE FROM emp"), null), "not run:");
+        QueryFixtures.refused(tool.call(args("SELECT * FROM emp FOR UPDATE"), null), "not run:");
+        JsonNode s = QueryFixtures.ok(tool, tool.call(args("SELECT COUNT(*) FROM emp WHERE salary > 0"), null));
+        assertEquals(2, s.path("rows").get(0).get(0).asInt());
+    }
+
+    // ---- the row limit written into every statement ---------------------------------------------------------
+
+    @Test
+    void aQueryWithoutALimitIsSentWithOne() {
+        SelectQueryTool tool = QueryFixtures.select(db);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp ORDER BY emp_id"), null));
+        assertEquals("SELECT emp_nm FROM emp ORDER BY emp_id FETCH FIRST 101 ROWS ONLY", s.path("executedSql").asText());
+        assertEquals(101, s.path("limit").asInt(), "default maxRows 100, plus the row that tells 'truncated'");
+        assertEquals("added", s.path("limitApplied").asText());
+        assertEquals(3, s.path("rowCount").asInt());
+
+        JsonNode two = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp").put("maxRows", 2), null));
+        assertTrue(two.path("executedSql").asText().endsWith("FETCH FIRST 3 ROWS ONLY"), two.toString());
+        assertTrue(two.path("truncated").asBoolean(), two.toString());
+    }
+
+    @Test
+    void aLargerLimitIsLoweredASmallerOneKept() {
+        SelectQueryTool tool = QueryFixtures.select(db);
+        JsonNode lowered = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp LIMIT 100000"), null));
+        assertEquals("SELECT emp_nm FROM emp LIMIT 101", lowered.path("executedSql").asText());
+        assertEquals("lowered", lowered.path("limitApplied").asText());
+
+        JsonNode kept = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp LIMIT 1"), null));
+        assertEquals("SELECT emp_nm FROM emp LIMIT 1", kept.path("executedSql").asText());
+        assertEquals("kept", kept.path("limitApplied").asText());
+        assertEquals(1, kept.path("rowCount").asInt());
+        assertFalse(kept.path("truncated").asBoolean(), "the query's own limit is not a truncation: " + kept);
+    }
+
+    @Test
+    void aLimitThatIsNotAPlainNumberIsRefused() {
+        SelectQueryTool tool = QueryFixtures.select(db);
+        QueryFixtures.refused(tool.call(args("SELECT emp_nm FROM emp LIMIT 1 + 100000"), null), "plain number");
+    }
+
+    @Test
+    void explainKeepsTheQueryAsWritten() {
+        ExplainQueryTool tool = QueryFixtures.explain(db);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp"), null));
+        assertFalse(s.path("text").asText().toUpperCase().contains("FETCH FIRST"), "no limit added to a plan: " + s);
+    }
+
+    @Test
+    void theInputSchemaCapsMaxRowsAndRequiresSql() {
+        SelectQueryTool tool = QueryFixtures.select(db);
+        assertTrue(QueryFixtures.validateInput(tool, args("SELECT 1").put("maxRows", 1000)).isEmpty());
+        assertFalse(QueryFixtures.validateInput(tool, args("SELECT 1").put("maxRows", 1001)).isEmpty());
+        assertFalse(QueryFixtures.validateInput(tool, args("SELECT 1").put("maxRows", 0)).isEmpty());
+        assertFalse(QueryFixtures.validateInput(tool, MAPPER.createObjectNode()).isEmpty());
+        assertFalse(QueryFixtures.validateInput(tool, args("SELECT 1").put("query", "x")).isEmpty(),
+                "closed object: an unknown argument is rejected, not ignored");
+    }
+}

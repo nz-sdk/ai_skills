@@ -77,9 +77,39 @@ Dockerfile does `mkdir -p /var/lib/protean/modules && chown` before declaring th
 | `DB_PORT` | `spring.datasource.url` port | `3306` | No |
 | `DB_USER` | `spring.datasource.username` | none | **Yes** |
 | `DB_PASSWORD` | `spring.datasource.password` | none | **Yes** |
+| `DB_QUERY_URL` / `_USER` / `_PASSWORD` | `amoeba.db-query.datasource.*` — the query tools' own account `[db_query_tools ONLY]` | empty → the `DB_*` account | No (recommended) |
 | `PROTEAN_MODULESTORE_DIR` | `protean.module-store.dir` | `/var/lib/protean/modules` | No |
 | `JAVA_OPTS` | JVM flags | `-XX:MaxRAMPercentage=75.0` | No |
 | `IMAGE_TAG` | image tag compose builds/runs | `local` | No |
+
+<!-- [db_query_tools ONLY] Drop this block when that capability was not selected. -->
+### Read-only account for the query tools
+
+`amoeba.explain_query` / `amoeba.select_query` run whatever passes their guard as this account, so **its grants are
+what can be read at all**. Grant `SELECT` per table or per business schema — never on a whole database that also
+holds an authorization server's tables or the module store.
+
+```sql
+-- MySQL / MariaDB
+CREATE USER 'app_query'@'%' IDENTIFIED BY '<secret>';
+GRANT SELECT ON business_db.* TO 'app_query'@'%';
+-- PostgreSQL
+CREATE ROLE app_query LOGIN PASSWORD '<secret>';
+GRANT USAGE ON SCHEMA app TO app_query;
+GRANT SELECT ON ALL TABLES IN SCHEMA app TO app_query;
+-- SQL Server: no read-only transaction exists, so this account IS the boundary
+CREATE LOGIN app_query WITH PASSWORD = '<secret>';
+USE app; CREATE USER app_query FOR LOGIN app_query;
+ALTER ROLE db_datareader ADD MEMBER app_query;
+-- Oracle: and no EXECUTE on functions declared PRAGMA AUTONOMOUS_TRANSACTION
+CREATE USER app_query IDENTIFIED BY "<secret>";
+GRANT CREATE SESSION TO app_query;
+GRANT SELECT ON app.some_table TO app_query;
+```
+
+The pool (`amoeba-db-query`, read-only) is private to the tools — never a `DataSource` bean — so modules and the
+module store keep the app's own account.
+<!-- [/db_query_tools ONLY] -->
 
 `PROTEAN_MODULESTORE_DIR` is spelled exactly like that. Relaxed binding maps it to `protean.modulestore.dir`,
 whose uniform form equals `protean.module-store.dir`. `PROTEAN_MODULE_STORE_DIR` does **not** match.

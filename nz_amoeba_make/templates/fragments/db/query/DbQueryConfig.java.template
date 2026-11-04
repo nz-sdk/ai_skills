@@ -1,0 +1,11 @@
+// [DB QUERY] Binds amoeba.db-query.* (top level, beside amoeba.skeleton — the app's own namespace, not protean's).
+// Registered here rather than as a @Component record so the binding is explicit, the same way AdminConfig does it.
+package {{PKG}}.db.query;
+
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties(DbQuerySettings.class)
+public class DbQueryConfig {
+}

@@ -25,9 +25,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-final class DbFixtures {
+public final class DbFixtures {
 
-    static final String[] SCHEMA = {
+    public static final String[] SCHEMA = {
             """
             CREATE TABLE comp_mst (
               comp_cd VARCHAR(10)  NOT NULL,
@@ -61,7 +61,7 @@ final class DbFixtures {
     };
 
     /** The second schema, as H2 stores it. */
-    static final String OTHER_SCHEMA = "OTHER_APP";
+    public static final String OTHER_SCHEMA = "OTHER_APP";
 
     /** Tables the base schema produces in PUBLIC, as H2 stores them. */
     static final int TABLE_COUNT = 3;
@@ -71,14 +71,14 @@ final class DbFixtures {
     }
 
     /** A fresh, isolated database with {@link #SCHEMA} applied. Each call gets its own name, so tests never share. */
-    static DataSource database() {
+    public static DataSource database() {
         DriverManagerDataSource ds = new DriverManagerDataSource(
                 "jdbc:h2:mem:dbtools_" + UUID.randomUUID().toString().replace("-", "") + ";DB_CLOSE_DELAY=-1");
         exec(ds, SCHEMA);
         return ds;
     }
 
-    static void exec(DataSource ds, String... statements) {
+    public static void exec(DataSource ds, String... statements) {
         try (Connection conn = ds.getConnection(); Statement st = conn.createStatement()) {
             for (String sql : statements) {
                 st.execute(sql);
@@ -96,7 +96,7 @@ final class DbFixtures {
      * that omits a field it declared required works in a unit test and fails over the wire. Kept here rather than
      * shared with the source/ bundle's SourceToolAssertions: the two bundles are independent capabilities.
      */
-    static void assertSatisfiesOutputSchema(McpTool tool, McpToolResult result) {
+    public static void assertSatisfiesOutputSchema(McpTool tool, McpToolResult result) {
         assertFalse(result.isError(), () -> "expected a successful result, got: " + result.text());
         JsonNode structured = result.structured();
         assertNotNull(structured, "a tool declaring an outputSchema must return structuredContent");

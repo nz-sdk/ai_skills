@@ -1,0 +1,84 @@
+package {{PKG}}.db.query;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+import java.time.Duration;
+
+/**
+ * Bound from {@code amoeba.db-query.*} — the limits of amoeba.explain_query / amoeba.select_query and the account
+ * they run as. Every key is optional; see application.yml for the environment variables behind them.
+ *
+ * @param defaultRows   rows select_query returns when the caller names no {@code maxRows}
+ * @param maxRows       ceiling for a caller's {@code maxRows}
+ * @param maxBytes      approximate size of one select_query result (cell text, UTF-8) before it is cut
+ * @param maxCellChars  characters kept per cell; longer text/LOB/binary values are cut and marked
+ * @param timeout       statement timeout, also the wall-clock budget for reading rows
+ * @param maxConcurrent calls running at once. Borrowed from the host pool when no dedicated account is set, so this
+ *                      is what keeps a burst of queries from starving the modules' connections
+ * @param datasource    a dedicated (read-only) account. Url blank → the host DataSource is used
+ */
+@ConfigurationProperties(prefix = "amoeba.db-query")
+public record DbQuerySettings(
+        Integer defaultRows,
+        Integer maxRows,
+        Integer maxBytes,
+        Integer maxCellChars,
+        Duration timeout,
+        Integer maxConcurrent,
+        Datasource datasource) {
+
+    static final int DEFAULT_ROWS = 100;
+    static final int MAX_ROWS = 1000;
+    static final int MAX_BYTES = 256 * 1024;
+    static final int MAX_CELL_CHARS = 2000;
+    static final Duration TIMEOUT = Duration.ofSeconds(10);
+    static final int MAX_CONCURRENT = 2;
+
+    /**
+     * @param url             JDBC URL. Blank → not configured
+     * @param username        account name
+     * @param password        its password — from the environment only, never a literal in application.yml
+     * @param driverClassName optional; the driver is found from the URL when blank
+     */
+    public record Datasource(String url, String username, String password, String driverClassName) {
+
+        public Datasource {
+            url = trim(url);
+            username = trim(username);
+            password = password == null ? "" : password.strip();
+            driverClassName = trim(driverClassName);
+        }
+
+        public boolean configured() {
+            return !url.isEmpty();
+        }
+    }
+
+    public DbQuerySettings {
+        maxRows = positive(maxRows, MAX_ROWS);
+        defaultRows = Math.min(positive(defaultRows, DEFAULT_ROWS), maxRows);
+        maxBytes = positive(maxBytes, MAX_BYTES);
+        maxCellChars = positive(maxCellChars, MAX_CELL_CHARS);
+        timeout = timeout == null || timeout.isNegative() || timeout.isZero() ? TIMEOUT : timeout;
+        maxConcurrent = positive(maxConcurrent, MAX_CONCURRENT);
+        datasource = datasource == null ? new Datasource(null, null, null, null) : datasource;
+    }
+
+    /** Defaults everywhere, the host DataSource — what an absent amoeba.db-query block means. */
+    public static DbQuerySettings defaults() {
+        return new DbQuerySettings(null, null, null, null, null, null, null);
+    }
+
+    /** The statement timeout in whole seconds, at least 1 (JDBC's unit). */
+    public int timeoutSeconds() {
+        return (int) Math.max(1, Math.min(Integer.MAX_VALUE, (timeout.toMillis() + 999) / 1000));
+    }
+
+    private static int positive(Integer value, int fallback) {
+        return value == null || value <= 0 ? fallback : value;
+    }
+
+    private static String trim(String value) {
+        return value == null ? "" : value.strip();
+    }
+}

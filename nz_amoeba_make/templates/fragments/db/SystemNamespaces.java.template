@@ -1,0 +1,91 @@
+// [DB METADATA] The databases and schemas that belong to the database server, not to an application.
+//
+// They are refused as a `database`/`schema` argument and as a `db.table` qualifier, and never offered in the visible
+// lists — even when the account can see them. Their structure is the server's, and on SQL Server and Oracle the
+// account usually CAN see them, so the account's grants alone would not keep them out of the listing.
+//
+// Compared case-insensitively. Per vendor:
+//   · COMMON (every vendor, unchanged from before vendors were told apart): MySQL's mysql · information_schema ·
+//     performance_schema · sys, PostgreSQL's pg_catalog · pg_toast, H2's INFORMATION_SCHEMA. Kept for every vendor
+//     so that adding vendor detection cannot open a name that used to be refused.
+//   · PostgreSQL — anything starting with pg_ as well (pg_temp_N, pg_toast_temp_N).
+//   · SQL Server — the system databases master · model · msdb · tempdb, and the built-in schemas guest and the nine
+//     fixed-role schemas db_owner … db_denydatawriter (sys and INFORMATION_SCHEMA are in COMMON). Listed by name, not
+//     as a db_ prefix: a user database called db_sales is an application's and must stay visible.
+//   · Oracle — every user the database marks ORACLE_MAINTAINED (12c+), read from ALL_USERS once per call. That
+//     column is the vendor's own answer and stays right across releases; the static list below is the fallback for
+//     an older server or an account that cannot read it.
+package {{PKG}}.db;
+
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Set;
+
+public final class SystemNamespaces {
+
+    static final Set<String> COMMON =
+            Set.of("information_schema", "mysql", "performance_schema", "sys", "pg_catalog", "pg_toast");
+
+    static final Set<String> SQLSERVER = Set.of("master", "model", "msdb", "tempdb", "guest",
+            "db_owner", "db_accessadmin", "db_securityadmin", "db_ddladmin", "db_backupoperator", "db_datareader",
+            "db_datawriter", "db_denydatareader", "db_denydatawriter");
+
+    /** Fallback when ALL_USERS.ORACLE_MAINTAINED cannot be read. Prefixes are handled separately (APEX_, FLOWS_). */
+    static final Set<String> ORACLE_FALLBACK = Set.of(
+            "sys", "system", "xdb", "outln", "dbsnmp", "appqossys", "audsys", "ctxsys", "dvsys", "dvf",
+            "gsmadmin_internal", "gsmcatuser", "gsmuser", "gsmrootuser", "lbacsys", "mdsys", "ojvmsys", "olapsys",
+            "orddata", "ordplugins", "ordsys", "si_informtn_schema", "wmsys", "xs$null", "anonymous", "dip", "ggsys",
+            "sysbackup", "sysdg", "syskm", "sysrac", "sys$umf", "remote_scheduler_agent", "dbsfwuser", "public",
+            "mddata", "dgpdb_int", "opsg_admin", "baasys", "ggshareddata");
+
+    private final DbVendor vendor;
+    private final Set<String> maintained;
+
+    private SystemNamespaces(DbVendor vendor, Set<String> maintained) {
+        this.vendor = vendor;
+        this.maintained = maintained;
+    }
+
+    /** The system namespaces of the server this connection talks to. Reads ALL_USERS on Oracle only. */
+    public static SystemNamespaces of(Connection conn, DbVendor vendor) {
+        if (vendor != DbVendor.ORACLE) {
+            return new SystemNamespaces(vendor, Set.of());
+        }
+        Set<String> names = new HashSet<>();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT USERNAME FROM ALL_USERS WHERE ORACLE_MAINTAINED = 'Y'")) {
+            while (rs.next()) {
+                names.add(rs.getString(1).toLowerCase(Locale.ROOT));
+            }
+        } catch (SQLException e) {
+            names.clear();   // pre-12c, or no access to the column: the static fallback stands alone
+        }
+        return new SystemNamespaces(vendor, Set.copyOf(names));
+    }
+
+    /** Rules for a vendor without reading the server — what {@link #of} returns on every vendor but Oracle. */
+    public static SystemNamespaces forVendor(DbVendor vendor) {
+        return new SystemNamespaces(vendor, Set.of());
+    }
+
+    public boolean contains(String name) {
+        if (name == null) {
+            return false;
+        }
+        String n = name.toLowerCase(Locale.ROOT);
+        if (COMMON.contains(n)) {
+            return true;
+        }
+        return switch (vendor) {
+            case POSTGRESQL -> n.startsWith("pg_");
+            case SQLSERVER -> SQLSERVER.contains(n);
+            case ORACLE -> maintained.contains(n) || ORACLE_FALLBACK.contains(n)
+                    || n.startsWith("apex_") || n.startsWith("flows_");
+            default -> false;
+        };
+    }
+}

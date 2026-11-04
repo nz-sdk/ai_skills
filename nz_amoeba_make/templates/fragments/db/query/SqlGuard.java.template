@@ -1,0 +1,242 @@
+// [DB QUERY] Decides whether caller SQL may reach the server through amoeba.explain_query / amoeba.select_query.
+//
+// ★ A SAFETY LAYER, NOT THE BOUNDARY. Both tools need mcp.write, whose holders can already deploy Java that reads the
+//   whole DataSource; this guard is not what keeps them out. It stops the careless and the prompt-injected — an agent
+//   that pastes `SELECT …; DELETE …` or a CTE that deletes — before anything is sent. What actually holds is below
+//   it: the read-only transaction (QueryEnvelope), the rollback that always follows, and, when configured, an account
+//   that can only SELECT. On SQL Server and H2 there is no server-side read-only mode, so there the account matters.
+//
+// The rules, over SqlLexer's tokens (quoted identifiers and literals are never mistaken for keywords):
+//   1. One statement. A single trailing `;` is dropped; any other `;` is refused.
+//   2. It starts with SELECT, WITH, or `(`. At parenthesis depth 0 only ONE SELECT may stand without a set operator
+//      (UNION / INTERSECT / EXCEPT / MINUS) before it — SQL Server runs `SELECT 1 DELETE FROM t` as two statements
+//      without any `;`, and this is what catches the second one there.
+//   3. Words that write, lock or leave the statement are refused at any depth: INSERT/UPDATE/DELETE/MERGE (PostgreSQL
+//      lets them hide in a CTE), INTO (SELECT INTO, INTO OUTFILE/DUMPFILE/@var), locking reads (FOR UPDATE/SHARE,
+//      LOCK IN SHARE MODE, SQL Server lock hints), sequences (NEXTVAL, NEXT VALUE FOR), SET (outside CHARACTER SET),
+//      DDL/DCL and transaction control, plus T-SQL statements that can only appear in a batch (EXEC, USE, WAITFOR …).
+//      A column that really is named like one of these must be quoted.
+//   4. Functions with side effects or outside reach, by vendor (SLEEP, GET_LOCK, LOAD_FILE; pg_sleep, pg_read_file,
+//      set_config, dblink, query_to_xml; UTL_*, DBMS_*; xp_*, sp_*, OPENROWSET; FILE_READ, CSVWRITE …), unquoted or
+//      quoted, bare or schema-qualified.
+//   5. Explicit system-namespace qualifiers (mysql.user, information_schema.tables, master.dbo.x, SYS.USER$) and,
+//      on PostgreSQL, unqualified pg_* relations (pg_catalog is on every search_path). Best effort — use
+//      amoeba.list_tables / describe_table for structure; the account's grants remain the boundary for data.
+package {{PKG}}.db.query;
+
+import {{PKG}}.db.DbVendor;
+import {{PKG}}.db.SystemNamespaces;
+import {{PKG}}.db.query.SqlLexer.Kind;
+import {{PKG}}.db.query.SqlLexer.Rejected;
+import {{PKG}}.db.query.SqlLexer.Token;
+
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+public final class SqlGuard {
+
+    /** Refused at any depth on every vendor. */
+    static final Set<String> DENIED_WORDS = Set.of(
+            "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "INTO", "NEXTVAL", "SETVAL", "LOCK", "UNLOCK",
+            "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE", "CALL", "EXEC", "EXECUTE", "DECLARE",
+            "COMMIT", "ROLLBACK", "SAVEPOINT", "OUTFILE", "DUMPFILE");
+
+    /** T-SQL statements a batch could append after the SELECT, and the table hints that take locks. */
+    static final Set<String> DENIED_WORDS_SQLSERVER = Set.of(
+            "USE", "BEGIN", "WAITFOR", "WHILE", "GOTO", "DBCC", "BACKUP", "RESTORE", "KILL", "SHUTDOWN", "RECONFIGURE",
+            "BULK", "DENY", "RECEIVE", "SEND", "CHECKPOINT", "SETUSER", "ENABLE", "DISABLE", "REVERT",
+            "UPDLOCK", "XLOCK", "HOLDLOCK", "TABLOCK", "TABLOCKX", "PAGLOCK", "ROWLOCK");
+
+    static final Set<String> SET_OPERATORS = Set.of("UNION", "INTERSECT", "EXCEPT", "MINUS", "ALL", "DISTINCT");
+
+    static final Set<String> DENIED_FUNCTIONS_MYSQL = Set.of(
+            "SLEEP", "BENCHMARK", "GET_LOCK", "RELEASE_LOCK", "RELEASE_ALL_LOCKS", "IS_FREE_LOCK", "IS_USED_LOCK",
+            "LOAD_FILE", "MASTER_POS_WAIT", "SOURCE_POS_WAIT", "WAIT_FOR_EXECUTED_GTID_SET",
+            "WAIT_UNTIL_SQL_THREAD_AFTER_GTIDS", "SYS_EXEC", "SYS_EVAL");
+
+    static final Set<String> DENIED_FUNCTIONS_POSTGRESQL = Set.of("SET_CONFIG", "NEXTVAL", "SETVAL", "DBLINK");
+
+    static final List<String> DENIED_PREFIXES_POSTGRESQL = List.of(
+            "PG_SLEEP", "PG_READ_", "PG_LS_", "PG_STAT_FILE", "PG_TERMINATE_", "PG_CANCEL_", "PG_RELOAD_",
+            "PG_ROTATE_", "PG_ADVISORY_", "PG_TRY_ADVISORY_", "PG_NOTIFY", "PG_LOGICAL_", "PG_CREATE_", "PG_DROP_",
+            "PG_REPLICATION_", "PG_SWITCH_", "PG_PROMOTE", "PG_FILE_", "PG_COPY_", "PG_WAL_", "PG_BACKUP_",
+            "PG_START_", "PG_STOP_", "PG_IMPORT_", "LO_", "DBLINK_", "QUERY_TO_", "CURSOR_TO_");
+
+    static final Set<String> DENIED_FUNCTIONS_H2 = Set.of(
+            "FILE_READ", "FILE_WRITE", "CSVREAD", "CSVWRITE", "LINK_SCHEMA", "ABORT_SESSION", "CANCEL_SESSION");
+
+    static final Set<String> DENIED_FUNCTIONS_ORACLE = Set.of("HTTPURITYPE", "DBURITYPE", "XDBURITYPE");
+
+    static final List<String> DENIED_PREFIXES_ORACLE = List.of("UTL_", "DBMS_");
+
+    static final Set<String> DENIED_FUNCTIONS_SQLSERVER = Set.of(
+            "OPENROWSET", "OPENDATASOURCE", "OPENQUERY", "FN_GET_AUDIT_FILE", "FN_TRACE_GETTABLE",
+            "FN_XE_FILE_TARGET_READ_FILE", "FN_DBLOG", "FN_DUMP_DBLOG");
+
+    static final List<String> DENIED_PREFIXES_SQLSERVER = List.of("XP_", "SP_");
+
+    private SqlGuard() {
+    }
+
+    /**
+     * Checks {@code sql} for {@code vendor} and returns the statement to send — trimmed, without its trailing
+     * {@code ;} (Oracle refuses one). Throws {@link Rejected} with a reason meant for the caller.
+     */
+    public static String check(String sql, DbVendor vendor, SystemNamespaces system) {
+        if (vendor == DbVendor.OTHER) {
+            throw new Rejected("this database product is not supported by the query tools (MySQL, MariaDB, "
+                    + "PostgreSQL, H2, Oracle and SQL Server are).");
+        }
+        if (sql == null || sql.isBlank()) {
+            throw new Rejected("'sql' is empty.");
+        }
+        List<Token> tokens = SqlLexer.lex(sql, vendor);
+        if (tokens.isEmpty()) {
+            throw new Rejected("'sql' contains no statement, only comments.");
+        }
+
+        int last = tokens.size() - 1;
+        int end = sql.length();
+        if (tokens.get(last).isSymbol(";")) {
+            end = tokens.get(last).start();
+            tokens = tokens.subList(0, last);
+            if (tokens.isEmpty()) {
+                throw new Rejected("'sql' contains no statement.");
+            }
+        }
+        for (Token t : tokens) {
+            if (t.isSymbol(";")) {
+                throw new Rejected("only one statement is accepted — found ';' at position " + t.start() + ".");
+            }
+        }
+
+        int first = 0;
+        while (first < tokens.size() && tokens.get(first).isSymbol("(")) {
+            first++;
+        }
+        if (first == tokens.size()
+                || !(tokens.get(first).isWord("SELECT") || tokens.get(first).isWord("WITH"))) {
+            throw new Rejected("only a query is accepted: the statement must start with SELECT or WITH … SELECT.");
+        }
+
+        int depth = 0;
+        int standaloneSelects = 0;
+        for (int i = 0; i < tokens.size(); i++) {
+            Token t = tokens.get(i);
+            Token prev = i > 0 ? tokens.get(i - 1) : null;
+            Token next = i + 1 < tokens.size() ? tokens.get(i + 1) : null;
+            if (t.isSymbol("(")) {
+                depth++;
+            } else if (t.isSymbol(")")) {
+                if (--depth < 0) {
+                    throw new Rejected("unbalanced ')' at position " + t.start() + ".");
+                }
+            }
+            if (t.kind() == Kind.WORD) {
+                String word = t.upper();
+                if (depth == 0 && word.equals("SELECT")
+                        && (prev == null || prev.kind() != Kind.WORD || !SET_OPERATORS.contains(prev.upper()))) {
+                    if (++standaloneSelects > 1) {
+                        throw new Rejected("only one statement is accepted — a second SELECT starts at position "
+                                + t.start() + " without a set operator before it.");
+                    }
+                }
+                checkWord(t, word, prev, next, vendor);
+            }
+            if ((t.kind() == Kind.WORD || t.kind() == Kind.QUOTED) && next != null && next.isSymbol("(")) {
+                checkFunction(t, qualifiedName(tokens, i), vendor);
+            }
+            if (next != null && next.isSymbol(".")) {
+                String qualifier = qualifierName(t, vendor);
+                if (qualifier != null && system.contains(qualifier)) {
+                    throw new Rejected("'" + qualifier + "' is a system namespace and is not readable through the "
+                            + "query tools — use amoeba.list_tables / amoeba.describe_table for structure.");
+                }
+                // Oracle calls a package function without parentheses when it takes no arguments, so a package
+                // reference is refused on its own, not only when followed by '('.
+                if (qualifier != null && vendor == DbVendor.ORACLE
+                        && DENIED_PREFIXES_ORACLE.stream().anyMatch(qualifier.toUpperCase(Locale.ROOT)::startsWith)) {
+                    throw new Rejected("package '" + qualifier + "' at position " + t.start() + " is not accepted: "
+                            + "UTL_* and DBMS_* reach outside the query.");
+                }
+            }
+            if (vendor == DbVendor.POSTGRESQL && (t.kind() == Kind.WORD || t.kind() == Kind.QUOTED)
+                    && t.name().toLowerCase(Locale.ROOT).startsWith("pg_")
+                    && (next == null || !next.isSymbol("("))
+                    && (prev == null || !prev.isSymbol("."))) {
+                throw new Rejected("'" + t.name() + "' looks like a PostgreSQL system catalog (pg_catalog is on every "
+                        + "search_path) and is not readable through the query tools.");
+            }
+        }
+        if (depth != 0) {
+            throw new Rejected("unbalanced '(' — " + depth + " left open.");
+        }
+        return sql.substring(0, end).strip();
+    }
+
+    private static void checkWord(Token t, String word, Token prev, Token next, DbVendor vendor) {
+        if (DENIED_WORDS.contains(word)
+                || (vendor == DbVendor.SQLSERVER && DENIED_WORDS_SQLSERVER.contains(word))) {
+            throw new Rejected("'" + t.text() + "' at position " + t.start() + " is not accepted: only side-effect-free "
+                    + "queries run here (quote it if it is a column name).");
+        }
+        if (word.equals("SET") && !(prev != null && (prev.isWord("CHARACTER") || prev.isWord("CHAR")))) {
+            throw new Rejected("'SET' at position " + t.start() + " is not accepted (only CHARACTER SET is).");
+        }
+        if (word.equals("FOR") && next != null && next.kind() == Kind.WORD
+                && Set.of("SHARE", "NO", "KEY", "UPDATE").contains(next.upper())) {
+            throw new Rejected("locking read 'FOR " + next.text() + "' at position " + t.start()
+                    + " is not accepted.");
+        }
+        if (word.equals("NEXT") && next != null && next.isWord("VALUE")) {
+            throw new Rejected("'NEXT VALUE FOR' at position " + t.start() + " advances a sequence — not accepted.");
+        }
+    }
+
+    /**
+     * The name a token contributes as a qualifier ({@code x} in {@code x.y}), or null. On MySQL/MariaDB a
+     * double-quoted token is lexed as a string, but under ANSI_QUOTES it is an identifier — so it counts here too.
+     */
+    private static String qualifierName(Token t, DbVendor vendor) {
+        if (t.kind() == Kind.WORD || t.kind() == Kind.QUOTED) {
+            return t.name();
+        }
+        if (vendor.isMySqlFamily() && t.kind() == Kind.STRING && t.text().startsWith("\"")) {
+            return t.text().substring(1, t.text().length() - 1).replace("\"\"", "\"");
+        }
+        return null;
+    }
+
+    /** {@code a.b.c} ending at index {@code i}, unquoted, upper-cased. */
+    private static String qualifiedName(List<Token> tokens, int i) {
+        StringBuilder sb = new StringBuilder(tokens.get(i).name());
+        int j = i;
+        while (j >= 2 && tokens.get(j - 1).isSymbol(".")
+                && (tokens.get(j - 2).kind() == Kind.WORD || tokens.get(j - 2).kind() == Kind.QUOTED)) {
+            sb.insert(0, tokens.get(j - 2).name() + ".");
+            j -= 2;
+        }
+        return sb.toString().toUpperCase(Locale.ROOT);
+    }
+
+    private static void checkFunction(Token t, String qualified, DbVendor vendor) {
+        String name = t.name().toUpperCase(Locale.ROOT);
+        boolean denied = switch (vendor) {
+            case MYSQL, MARIADB -> DENIED_FUNCTIONS_MYSQL.contains(name);
+            case POSTGRESQL -> DENIED_FUNCTIONS_POSTGRESQL.contains(name)
+                    || DENIED_PREFIXES_POSTGRESQL.stream().anyMatch(name::startsWith);
+            case H2 -> DENIED_FUNCTIONS_H2.contains(name);
+            case ORACLE -> DENIED_FUNCTIONS_ORACLE.contains(name)
+                    || DENIED_PREFIXES_ORACLE.stream().anyMatch(p -> name.startsWith(p) || qualified.startsWith(p)
+                    || qualified.contains("." + p));
+            case SQLSERVER -> DENIED_FUNCTIONS_SQLSERVER.contains(name)
+                    || DENIED_PREFIXES_SQLSERVER.stream().anyMatch(name::startsWith);
+            default -> true;
+        };
+        if (denied) {
+            throw new Rejected("function '" + qualified + "' at position " + t.start() + " is not accepted: it has "
+                    + "side effects or reaches outside the query.");
+        }
+    }
+}

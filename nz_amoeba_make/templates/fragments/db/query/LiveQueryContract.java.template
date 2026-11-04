@@ -1,0 +1,289 @@
+// What the query tools must do against every real vendor — the behaviour H2 cannot stand in for:
+//   · the vendor's own plan form comes back (JSON / XML / DBMS_XPLAN text)
+//   · rows keep their precision and Korean text
+//   · a write that got past the guard is refused by the SERVER where the vendor has a read-only transaction, and
+//     rolled back where it does not (SQL Server)
+//   · the pooled connection comes back clean: no row limit left (MySQL SQL_SELECT_LIMIT, SQL Server ROWCOUNT), not
+//     read-only, autocommit on, SHOWPLAN off, same catalog/schema — checked on the SAME physical connection (pool of
+//     one), because that is the connection the next module query would get
+//
+// SELF-SKIPS without the vendor's DB_TOOLS_TEST_* URL (same variables and containers as the metadata live tests).
+package {{PKG}}.db.query;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+
+import {{PKG}}.db.DbFixtures;
+import {{PKG}}.db.DbVendor;
+
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+
+import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+import static {{PKG}}.db.query.QueryFixtures.MAPPER;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+abstract class LiveQueryContract {
+
+    static final String PROBE = "zz_dbquery_probe";
+
+    protected HikariDataSource pool;
+    protected DbVendor vendor;
+
+    abstract String envPrefix();
+
+    /** CREATE TABLE PROBE (id PK, name national text, amount decimal(10,2)) in the vendor's types. */
+    abstract String createProbe();
+
+    /** The plan format explain_query must report. */
+    abstract String planFormat();
+
+    /** Whether the server itself refuses a write inside the envelope (a read-only transaction exists). */
+    boolean serverEnforcesReadOnly() {
+        return true;
+    }
+
+    String prepareUrl(String url, String user, String password) throws SQLException {
+        return url;
+    }
+
+    /** True when {@code e} is the server refusing a write because the transaction is read-only. */
+    abstract boolean isReadOnlyRefusal(SQLException e);
+
+    /** Runs after the probe table exists, before any test. */
+    void probeCreated() throws SQLException {
+    }
+
+    /**
+     * DDL for a function {@code zz_dbquery_write()} that INSERTs into PROBE and returns 1, or null where the vendor
+     * cannot have one (a SQL Server UDF cannot modify tables). The guard cannot see inside a function — this is the
+     * case only the server's read-only transaction stops.
+     */
+    String writingFunction() {
+        return null;
+    }
+
+    String dropWritingFunction() {
+        return "DROP FUNCTION zz_dbquery_write";
+    }
+
+    @BeforeAll
+    void setUp() throws SQLException {
+        String url = System.getenv(envPrefix() + "_URL");
+        assumeTrue(url != null && !url.isBlank(), envPrefix() + "_URL not set — live query check skipped");
+        String user = System.getenv(envPrefix() + "_USER");
+        String password = System.getenv(envPrefix() + "_PASSWORD");
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(prepareUrl(url, user, password));
+        config.setUsername(user);
+        config.setPassword(password);
+        config.setMaximumPoolSize(1);
+        config.setMinimumIdle(1);
+        pool = new HikariDataSource(config);
+        try (Connection conn = pool.getConnection()) {
+            vendor = DbVendor.detect(conn.getMetaData());
+        }
+        dropProbe();
+        DbFixtures.exec(pool, createProbe(),
+                "INSERT INTO " + PROBE + " (id, name, amount) VALUES (1, N'한글 이름', 12.50)",
+                "INSERT INTO " + PROBE + " (id, name, amount) VALUES (2, N'b', NULL)",
+                "INSERT INTO " + PROBE + " (id, name, amount) VALUES (3, N'c', 3.00)");
+        probeCreated();
+    }
+
+    @AfterAll
+    void tearDown() {
+        if (pool != null) {
+            dropProbe();
+            pool.close();
+        }
+    }
+
+    private void dropProbe() {
+        try (Connection conn = pool.getConnection(); Statement st = conn.createStatement()) {
+            st.execute("DROP TABLE " + PROBE);
+        } catch (SQLException e) {
+            // not there
+        }
+    }
+
+    private static ObjectNode args(String sql) {
+        return MAPPER.createObjectNode().put("sql", sql);
+    }
+
+    @Test
+    void explainReturnsTheVendorsPlan() {
+        ExplainQueryTool tool = QueryFixtures.explain(pool);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(args("SELECT name FROM " + PROBE + " WHERE id = 2"), null));
+        assertEquals(vendor.name().toLowerCase(Locale.ROOT), s.path("vendor").asText(), s.toString());
+        assertEquals(planFormat(), s.path("format").asText(), s.toString());
+        assertTrue(s.path("text").asText().toLowerCase(Locale.ROOT).contains(PROBE)
+                        || s.path("plan").toString().toLowerCase(Locale.ROOT).contains(PROBE),
+                "the plan names the table: " + s);
+        assertClean();
+    }
+
+    @Test
+    void selectKeepsPrecisionAndText() {
+        SelectQueryTool tool = QueryFixtures.select(pool);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(args("SELECT id, name, amount FROM " + PROBE
+                + " ORDER BY id"), null));
+        assertEquals(3, s.path("rowCount").asInt(), s.toString());
+        JsonNode first = s.path("rows").get(0);
+        assertEquals(1, first.get(0).asInt(), s.toString());
+        assertEquals("한글 이름", first.get(1).asText(), s.toString());
+        assertEquals(0, new BigDecimal("12.5").compareTo(new BigDecimal(first.get(2).asText())), s.toString());
+        assertTrue(s.path("rows").get(1).get(2).isNull(), s.toString());
+        assertClean();
+    }
+
+    @Test
+    void aRowLimitDoesNotOutliveTheCall() throws SQLException {
+        SelectQueryTool tool = QueryFixtures.select(pool);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(args("SELECT id FROM " + PROBE).put("maxRows", 1), null));
+        assertEquals("rows", s.path("truncatedBy").asText(), s.toString());
+        assertClean();
+    }
+
+    /** Query shapes every vendor gets a row limit written into; each must still be valid SQL on the real server. */
+    List<String> limitShapes() {
+        List<String> shapes = new ArrayList<>(List.of(
+                "SELECT id FROM " + PROBE,
+                "SELECT id FROM " + PROBE + " ORDER BY id DESC",
+                "SELECT id FROM " + PROBE + " UNION ALL SELECT id FROM " + PROBE,
+                "WITH x AS (SELECT id FROM " + PROBE + ") SELECT id FROM x",
+                "SELECT id FROM " + PROBE + " -- trailing comment"));
+        shapes.addAll(ownLimitShapes());
+        return shapes;
+    }
+
+    /** The vendor's own row-limit syntax, larger than the cap — it must come back lowered. */
+    abstract List<String> ownLimitShapes();
+
+    @Test
+    void everyQueryIsSentWithARowLimitTheServerAccepts() {
+        SelectQueryTool tool = QueryFixtures.select(pool);
+        for (String sql : limitShapes()) {
+            JsonNode s = QueryFixtures.ok(tool, tool.call(args(sql).put("maxRows", 2), null));
+            assertTrue(s.path("rowCount").asInt() <= 2, sql + " → " + s);
+            assertEquals(3, s.path("limit").asInt(), "maxRows + 1 is written into the statement: " + s);
+            assertTrue(s.path("limitApplied").asText().matches("added|lowered"), sql + " → " + s);
+            assertFalse(s.path("executedSql").asText().equals(sql), "the sent statement carries the limit: " + s);
+            assertTrue(s.path("truncated").asBoolean(), "every shape has more than two rows: " + s);
+        }
+        assertClean();
+    }
+
+    @Test
+    void aWritePastTheGuardIsRefusedOrRolledBack() throws Exception {
+        QueryEnvelope envelope = QueryFixtures.envelope(pool, DbQuerySettings.defaults());
+        QueryEnvelope.Body<Integer> insert = session -> {
+            try (Statement st = session.statement()) {
+                return st.executeUpdate(session.sql());
+            }
+        };
+        String sql = "INSERT INTO " + PROBE + " (id, name) VALUES (99, N'x')";
+        if (serverEnforcesReadOnly()) {
+            SQLException refused = assertThrows(SQLException.class,
+                    () -> envelope.runUnguardedForTest(sql, null, null, insert),
+                    "the server must refuse a write in the read-only transaction");
+            assertTrue(isReadOnlyRefusal(refused), "refused, but not as a read-only violation: [" + refused.getSQLState()
+                    + "/" + refused.getErrorCode() + "] " + refused.getMessage());
+        } else {
+            assertEquals(1, envelope.runUnguardedForTest(sql, null, null, insert));
+        }
+        assertEquals(3, count(), "nothing the envelope ran may survive it");
+        assertClean();
+    }
+
+    @Test
+    void aWriteHiddenInAFunctionPassesTheGuardAndIsStoppedByTheServer() throws SQLException {
+        String ddl = writingFunction();
+        assumeTrue(ddl != null, vendor + " functions cannot write");
+        dropQuietly(dropWritingFunction());
+        DbFixtures.exec(pool, ddl);
+        try {
+            SelectQueryTool tool = QueryFixtures.select(pool);
+            String text = QueryFixtures.refused(tool.call(args(selectWritingFunction()), null), "database error");
+            assertFalse(text.contains("not run"), "the guard has no reason to refuse it — the server must: " + text);
+            assertEquals(3, count(), "the function's insert must not survive");
+            assertClean();
+        } finally {
+            dropQuietly(dropWritingFunction());
+        }
+    }
+
+    String selectWritingFunction() {
+        return "SELECT zz_dbquery_write()";
+    }
+
+    void dropQuietly(String sql) {
+        try (Connection conn = pool.getConnection(); Statement st = conn.createStatement()) {
+            st.execute(sql);
+        } catch (SQLException e) {
+            // not there
+        }
+    }
+
+    // ---- the pooled connection after a call -----------------------------------------------------------------
+
+    /** The one pooled connection reads every row, accepts a committed write, and is where it was. */
+    void assertClean() {
+        try (Connection conn = pool.getConnection()) {
+            assertTrue(conn.getAutoCommit(), "autocommit restored");
+            assertFalse(conn.isReadOnly(), "read-only restored");
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery("SELECT id FROM " + PROBE + " ORDER BY id")) {
+                int rows = 0;
+                while (rs.next()) {
+                    rows++;
+                    assertTrue(rs.getObject(1) != null, "a row, not a plan document (SHOWPLAN left on?)");
+                }
+                assertEquals(3, rows, "a row limit was left on the session");
+            }
+            try (Statement st = conn.createStatement()) {
+                st.executeUpdate("INSERT INTO " + PROBE + " (id, name) VALUES (98, N'w')");
+                st.executeUpdate("DELETE FROM " + PROBE + " WHERE id = 98");
+            }
+            assertCleanVendor(conn);
+        } catch (SQLException e) {
+            throw new AssertionError("the pooled connection is not usable after a call: " + e, e);
+        }
+    }
+
+    /** Vendor-specific session state; the default checks nothing more. */
+    void assertCleanVendor(Connection conn) throws SQLException {
+    }
+
+    int count() throws SQLException {
+        try (Connection conn = pool.getConnection(); Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + PROBE)) {
+            rs.next();
+            return rs.getInt(1);
+        }
+    }
+
+    static String single(Connection conn, String sql) throws SQLException {
+        try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            rs.next();
+            return rs.getString(1);
+        }
+    }
+}

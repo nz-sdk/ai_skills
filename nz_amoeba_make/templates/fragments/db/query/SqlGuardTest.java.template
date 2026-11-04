@@ -1,0 +1,161 @@
+// SqlGuard + SqlLexer against a corpus of bypass attempts and of ordinary queries that must NOT be refused. Every
+// case names the vendors it applies to, because what is a comment, a string or a statement boundary differs.
+package {{PKG}}.db.query;
+
+import {{PKG}}.db.DbVendor;
+import {{PKG}}.db.SystemNamespaces;
+
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Stream;
+
+import static {{PKG}}.db.DbVendor.H2;
+import static {{PKG}}.db.DbVendor.MARIADB;
+import static {{PKG}}.db.DbVendor.MYSQL;
+import static {{PKG}}.db.DbVendor.ORACLE;
+import static {{PKG}}.db.DbVendor.POSTGRESQL;
+import static {{PKG}}.db.DbVendor.SQLSERVER;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+class SqlGuardTest {
+
+    private static final Set<DbVendor> ALL = EnumSet.of(MYSQL, MARIADB, POSTGRESQL, H2, ORACLE, SQLSERVER);
+    private static final Set<DbVendor> MY = EnumSet.of(MYSQL, MARIADB);
+
+    private static String check(String sql, DbVendor vendor) {
+        return SqlGuard.check(sql, vendor, SystemNamespaces.forVendor(vendor));
+    }
+
+    // ---- refused ------------------------------------------------------------------------------------------
+
+    static Stream<Arguments> refused() {
+        List<Arguments> cases = new ArrayList<>();
+        // not a query, or more than one statement
+        each(cases, ALL, "DELETE FROM t", "UPDATE t SET a = 1", "INSERT INTO t VALUES (1)", "DROP TABLE t",
+                "TRUNCATE TABLE t", "EXPLAIN SELECT 1", "TABLE t", "VALUES (1)", "", "   ", "/* only a comment */",
+                "SELECT 1; DELETE FROM t", "SELECT 1;;", "SELECT 1; SELECT 2", "(SELECT 1));",
+                "SELECT (1", "SELECT 1)");
+        // T-SQL batches need no ';' at all
+        each(cases, EnumSet.of(SQLSERVER), "SELECT 1 DELETE FROM t", "SELECT 1 EXEC xp_cmdshell 'dir'",
+                "SELECT 1 SELECT 2", "SELECT 1 WITH x AS (SELECT 2) SELECT * FROM x", "SELECT 1 USE master",
+                "SELECT 1 WAITFOR DELAY '00:01'", "SELECT 1 BEGIN TRAN", "SELECT * FROM t WITH (UPDLOCK)",
+                "SELECT * FROM t WITH (TABLOCKX, HOLDLOCK)", "SELECT 1 DBCC CHECKDB",
+                "SELECT * FROM OPENROWSET(BULK 'c:\\x', SINGLE_CLOB) AS x", "SELECT NEXT VALUE FOR s",
+                "SELECT * FROM master.dbo.sysdatabases", "SELECT * FROM [master].[sys].[databases]");
+        // writes hidden inside a query
+        each(cases, ALL, "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+                "WITH x AS (SELECT 1) UPDATE t SET a = 1", "SELECT * INTO t2 FROM t",
+                "WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x");
+        each(cases, MY, "SELECT * FROM t INTO OUTFILE '/tmp/x'", "SELECT * FROM t INTO DUMPFILE '/tmp/x'",
+                "SELECT a FROM t INTO @v", "SELECT @a := 1", "SELECT * FROM t LOCK IN SHARE MODE");
+        // locking reads
+        each(cases, ALL, "SELECT * FROM t FOR UPDATE", "SELECT * FROM t FOR UPDATE SKIP LOCKED");
+        each(cases, EnumSet.of(POSTGRESQL, MYSQL, MARIADB), "SELECT * FROM t FOR SHARE");
+        each(cases, EnumSet.of(POSTGRESQL), "SELECT * FROM t FOR NO KEY UPDATE", "SELECT * FROM t FOR KEY SHARE");
+        // comment tricks
+        each(cases, MY, "SELECT 1 /*!50000 ; DROP TABLE t */", "SELECT 1 /*M! , SLEEP(5) */", "SELECT 1--1",
+                "SELECT 1 #x\n; DROP TABLE t");
+        each(cases, ALL, "SELECT 1 /* /* */ ; DELETE FROM t; */", "SELECT 1 /* unterminated");
+        each(cases, EnumSet.of(H2), "SELECT 1 // '\nDELETE FROM t");
+        // quoting: where a literal ends must not depend on server settings
+        each(cases, MY, "SELECT 'a\\'; DELETE FROM t; -- '");
+        each(cases, EnumSet.of(POSTGRESQL), "SELECT 'a\\'; DELETE FROM t; -- '", "SELECT $q$ unterminated",
+                "SELECT $1", "SELECT * FROM t WHERE a = $1");
+        each(cases, EnumSet.of(ORACLE), "SELECT q'[x' FROM dual", "SELECT :x FROM dual", "SELECT :1 FROM dual");
+        each(cases, ALL, "SELECT 'unterminated", "SELECT * FROM t WHERE a = ?", "SELECT {fn now()}",
+                "SELECT * FROM t WHERE a = :name");
+        each(cases, EnumSet.of(POSTGRESQL, ORACLE, SQLSERVER), "SELECT `a` FROM t");
+        // side-effect functions — bare, quoted, qualified
+        each(cases, MY, "SELECT SLEEP(5)", "SELECT sleep (5)", "SELECT BENCHMARK(1000000, MD5('x'))",
+                "SELECT GET_LOCK('x', 10)", "SELECT LOAD_FILE('/etc/passwd')");
+        each(cases, EnumSet.of(POSTGRESQL), "SELECT pg_sleep(5)", "SELECT \"pg_sleep\"(5)",
+                "SELECT pg_catalog.pg_sleep(1)", "SELECT pg_read_file('/etc/passwd')", "SELECT nextval('s')",
+                "SELECT set_config('a', 'b', false)", "SELECT pg_advisory_lock(1)", "SELECT lo_import('/x')",
+                "SELECT * FROM dblink('c', 'select 1') AS t(a int)", "SELECT dblink_exec('c', 'delete from t')",
+                "SELECT query_to_xml('delete from t', true, true, '')", "SELECT * FROM pg_shadow",
+                "SELECT * FROM pg_stat_activity", "SELECT * FROM \"pg_authid\"");
+        each(cases, EnumSet.of(H2), "SELECT FILE_READ('/etc/passwd')", "SELECT * FROM CSVREAD('/x.csv')",
+                "CALL CSVWRITE('/x.csv', 'SELECT 1')");
+        each(cases, EnumSet.of(ORACLE), "SELECT UTL_HTTP.REQUEST('http://x') FROM dual",
+                "SELECT DBMS_PIPE.RECEIVE_MESSAGE('x', 10) FROM dual", "SELECT sys.dbms_lock.sleep(5) FROM dual",
+                "SELECT DBMS_RANDOM.VALUE FROM dual", "SELECT s.NEXTVAL FROM dual",
+                "SELECT HTTPURITYPE('http://x').getclob() FROM dual", "SELECT * FROM SYS.USER$");
+        // system namespaces
+        each(cases, MY, "SELECT * FROM mysql.user", "SELECT * FROM `mysql`.`user`", "SELECT * FROM \"mysql\".user",
+                "SELECT * FROM information_schema.tables", "SELECT * FROM performance_schema.threads");
+        each(cases, EnumSet.of(POSTGRESQL), "SELECT * FROM \"pg_catalog\".\"pg_authid\"",
+                "SELECT * FROM information_schema.tables");
+        // characters a server may read differently
+        each(cases, ALL, "SELECT 1\u0000", "SELECT\u00a01", "SELECT 1\u2028", "SELECT 1\ufeff");
+        return cases.stream();
+    }
+
+    @ParameterizedTest(name = "{0}: {1}")
+    @MethodSource
+    void refused(DbVendor vendor, String sql) {
+        assertThrows(SqlLexer.Rejected.class, () -> check(sql, vendor), sql);
+    }
+
+    // ---- accepted -----------------------------------------------------------------------------------------
+
+    static Stream<Arguments> accepted() {
+        List<Arguments> cases = new ArrayList<>();
+        each(cases, ALL, "SELECT 1", "select 1;", "  SELECT 1 ;  ", "SELECT update_dt, deleted_yn FROM t",
+                "SELECT \"delete\" FROM t", "SELECT REPLACE(a, 'x', 'y') FROM t", "/*hi*/ SELECT 1",
+                "SELECT 1 -- trailing comment", "(SELECT 1) UNION ALL (SELECT 2)", "SELECT 1 UNION SELECT 2",
+                "WITH x AS (SELECT 1 AS a), y AS (SELECT 2 AS b) SELECT * FROM x, y",
+                "SELECT * FROM t WHERE a IN (SELECT b FROM u)", "SELECT 회사명, 사원명 FROM 사원 WHERE 회사코드 = 'A01'",
+                "SELECT 'it''s' FROM t", "SELECT COUNT(*) FROM t GROUP BY a HAVING COUNT(*) > 1 ORDER BY 1",
+                "SELECT a FROM t WHERE b LIKE '%x_%'", "SELECT 1 /*+ hint */");
+        each(cases, EnumSet.of(MYSQL, MARIADB, POSTGRESQL, H2), "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL "
+                + "SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r");
+        each(cases, MY, "SELECT `order` FROM t USE INDEX (ix_a)", "SELECT CAST(a AS CHAR CHARACTER SET utf8mb4) "
+                + "FROM t", "SELECT 1 # comment", "SELECT 1 - -1", "SELECT \"double quoted string\"",
+                "SELECT N'유니코드'", "SELECT X'4142'", "SELECT @@version");
+        each(cases, EnumSet.of(POSTGRESQL), "SELECT E'a\\'b'", "SELECT $$;DELETE$$", "SELECT $tag$ x $tag$",
+                "SELECT a::int FROM t", "SELECT pg_size_pretty(pg_total_relation_size('t'))",
+                "SELECT (arr)[1:2] FROM t", "SELECT * FROM generate_series(1, 3)");
+        each(cases, EnumSet.of(SQLSERVER), "SELECT [a'], 1 FROM [t]", "SELECT TOP 10 * FROM t WITH (NOLOCK)",
+                "SELECT * FROM #tmp", "SELECT $12.50", "SELECT a FROM t FOR XML PATH('')",
+                "SELECT a FROM t FOR JSON AUTO", "SELECT * FROM dbo.t");
+        each(cases, EnumSet.of(ORACLE), "SELECT q'[it's; DELETE]' FROM dual", "SELECT nq'{x}' FROM dual",
+                "SELECT * FROM v$session_x", "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM dual",
+                "SELECT * FROM t FETCH FIRST 10 ROWS ONLY", "SELECT 1 FROM dual MINUS SELECT 2 FROM dual");
+        each(cases, EnumSet.of(H2), "SELECT * FROM SYSTEM_RANGE(1, 3)", "SELECT $$x$$", "SELECT 1 // comment");
+        return cases.stream();
+    }
+
+    @ParameterizedTest(name = "{0}: {1}")
+    @MethodSource
+    void accepted(DbVendor vendor, String sql) {
+        check(sql, vendor);
+    }
+
+    @Test
+    void theTrailingSemicolonIsDroppedAndTheTextKept() {
+        assertEquals("SELECT 1", check("SELECT 1;", MYSQL));
+        assertEquals("SELECT 1", check("  SELECT 1  ;  ", ORACLE));
+        assertEquals("SELECT ';' FROM t", check("SELECT ';' FROM t;", POSTGRESQL));
+    }
+
+    @Test
+    void anUnknownVendorIsRefusedOutright() {
+        assertThrows(SqlLexer.Rejected.class, () -> check("SELECT 1", DbVendor.OTHER));
+    }
+
+    private static void each(List<Arguments> cases, Set<DbVendor> vendors, String... sqls) {
+        for (DbVendor vendor : vendors) {
+            for (String sql : sqls) {
+                cases.add(Arguments.of(vendor, sql));
+            }
+        }
+    }
+}

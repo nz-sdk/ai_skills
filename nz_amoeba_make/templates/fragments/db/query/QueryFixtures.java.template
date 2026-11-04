@@ -1,0 +1,75 @@
+// Wiring for the db.query tests: the tools over any DataSource, and the full output-schema check.
+//
+// The schema check is the networknt engine at the draft the dispatcher's strict-schema mode uses, over the WHOLE
+// result — not just `required` — because a successful result that violates its declared schema is rewritten into
+// an OUTPUT_SCHEMA_VIOLATION error on the wire while looking perfect in-process.
+package {{PKG}}.db.query;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion;
+import com.networknt.schema.ValidationMessage;
+
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolResult;
+
+import javax.sql.DataSource;
+import java.time.Duration;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+final class QueryFixtures {
+
+    static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private QueryFixtures() {
+    }
+
+    static DbQuerySettings settings(Integer maxBytes, Integer maxCellChars, Duration timeout) {
+        return new DbQuerySettings(null, null, maxBytes, maxCellChars, timeout, null, null);
+    }
+
+    static QueryEnvelope envelope(DataSource ds, DbQuerySettings settings) {
+        return new QueryEnvelope(new QueryConnections(ds, settings), settings);
+    }
+
+    static ExplainQueryTool explain(DataSource ds) {
+        return new ExplainQueryTool(MAPPER, envelope(ds, DbQuerySettings.defaults()));
+    }
+
+    static SelectQueryTool select(DataSource ds) {
+        return select(ds, DbQuerySettings.defaults());
+    }
+
+    static SelectQueryTool select(DataSource ds, DbQuerySettings settings) {
+        return new SelectQueryTool(MAPPER, envelope(ds, settings));
+    }
+
+    /** A successful result whose structuredContent satisfies the tool's whole outputSchema. */
+    static JsonNode ok(McpTool tool, McpToolResult result) {
+        assertFalse(result.isError(), () -> "expected success, got: " + result.text());
+        JsonNode structured = result.structured();
+        assertNotNull(structured, "a tool with an outputSchema must return structuredContent");
+        Set<ValidationMessage> errors = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012)
+                .getSchema(tool.outputSchema()).validate(structured);
+        assertTrue(errors.isEmpty(), () -> "outputSchema violated: " + errors + " in " + structured);
+        return structured;
+    }
+
+    /** An error result whose text contains {@code fragment}. */
+    static String refused(McpToolResult result, String fragment) {
+        assertTrue(result.isError(), () -> "expected an error, got: " + result.text());
+        assertTrue(result.text().contains(fragment), () -> "'" + fragment + "' not in: " + result.text());
+        return result.text();
+    }
+
+    /** Arguments validate against the tool's inputSchema (what strict-schema enforces before call()). */
+    static Set<ValidationMessage> validateInput(McpTool tool, JsonNode args) {
+        return JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012).getSchema(tool.inputSchema())
+                .validate(args);
+    }
+}

@@ -1,0 +1,268 @@
+// [DB QUERY] Every statement amoeba.select_query sends carries a row limit IN ITS TEXT.
+//
+// Why the text and not only JDBC setMaxRows: setMaxRows reaches the server on MySQL (SQL_SELECT_LIMIT) and SQL
+// Server (ROWCOUNT) only; on PostgreSQL, Oracle and H2 the driver merely stops reading while the server finishes the
+// sort or scan behind it. A limit written into the query lets the optimizer plan a top-N and stop early. The tools
+// are for development, so a query is never allowed to ask for "everything". setMaxRows stays as the second layer.
+//
+// Only the TOP-LEVEL (parenthesis depth 0) row-limiting clause counts — a LIMIT inside a subquery limits that
+// subquery, not the result. If there is none, one is added; if there is one, its count is lowered to the cap. A count
+// that is not a plain number, or a PERCENT, is refused rather than guessed at.
+//
+//   MySQL/MariaDB  LIMIT n               — existing LIMIT c / LIMIT o, c / LIMIT c OFFSET o (MariaDB also FETCH)
+//   PostgreSQL/H2  FETCH FIRST n ROWS ONLY — existing LIMIT c / LIMIT ALL / FETCH FIRST|NEXT c (valid after OFFSET)
+//   Oracle         FETCH FIRST n ROWS ONLY — existing FETCH FIRST|NEXT c (a ROWNUM filter is left alone)
+//   SQL Server     with a top-level ORDER BY: OFFSET 0 ROWS FETCH NEXT n ROWS ONLY; with a top-level UNION/EXCEPT/
+//                  INTERSECT and no ORDER BY: ORDER BY 1 OFFSET 0 ROWS FETCH NEXT n ROWS ONLY (T-SQL has no other
+//                  limit for a whole set operation); otherwise TOP (n) after the first SELECT [ALL|DISTINCT].
+//                  Existing TOP c / TOP (c) / FETCH NEXT c are lowered. Inserted BEFORE a top-level FOR XML/JSON or
+//                  OPTION (…), which must stay last.
+//
+// Added text goes right after the last token, not at the end of the string — a trailing `-- comment` would
+// otherwise swallow it.
+package {{PKG}}.db.query;
+
+import {{PKG}}.db.DbVendor;
+import {{PKG}}.db.query.QueryEnvelope.Refused;
+import {{PKG}}.db.query.SqlLexer.Kind;
+import {{PKG}}.db.query.SqlLexer.Token;
+
+import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+final class RowLimit {
+
+    /** What happened to the statement's row limit. */
+    enum How {
+        ADDED, LOWERED, KEPT;
+
+        String wire() {
+            return name().toLowerCase(Locale.ROOT);
+        }
+    }
+
+    /** {@code sql} is what is sent; {@code limit} the row count it can return at most. */
+    record Limited(String sql, int limit, How how) {
+    }
+
+    private static final Set<String> SET_OPERATORS = Set.of("UNION", "EXCEPT", "INTERSECT", "MINUS");
+
+    private RowLimit() {
+    }
+
+    /** {@code sql} must already have passed SqlGuard for {@code vendor}. {@code cap} ≥ 1. */
+    static Limited apply(String sql, DbVendor vendor, int cap) throws Refused {
+        List<Token> tokens = SqlLexer.lex(sql, vendor);
+        List<Token> top = topLevel(tokens);
+        return switch (vendor) {
+            case MYSQL, MARIADB -> {
+                int limit = indexOfWord(top, "LIMIT");
+                if (limit >= 0) {
+                    yield mysqlLimit(sql, top, limit, cap);
+                }
+                int fetch = indexOfWord(top, "FETCH");
+                yield fetch >= 0 ? fetch(sql, top, fetch, cap) : append(sql, tokens, " LIMIT " + cap, cap);
+            }
+            case POSTGRESQL, H2 -> {
+                int limit = indexOfWord(top, "LIMIT");
+                if (limit >= 0) {
+                    yield standardLimit(sql, top, limit, cap);
+                }
+                int fetch = indexOfWord(top, "FETCH");
+                yield fetch >= 0 ? fetch(sql, top, fetch, cap)
+                        : append(sql, tokens, " FETCH FIRST " + cap + " ROWS ONLY", cap);
+            }
+            case ORACLE -> {
+                int fetch = indexOfWord(top, "FETCH");
+                yield fetch >= 0 ? fetch(sql, top, fetch, cap)
+                        : append(sql, tokens, " FETCH FIRST " + cap + " ROWS ONLY", cap);
+            }
+            case SQLSERVER -> sqlServer(sql, tokens, top, cap);
+            default -> throw new Refused("no row-limit syntax is known for " + vendor + ".");
+        };
+    }
+
+    // ---- per dialect --------------------------------------------------------------------------------------
+
+    /** LIMIT c · LIMIT o, c · LIMIT c OFFSET o — the count is the last number before a comma, if any. */
+    private static Limited mysqlLimit(String sql, List<Token> top, int at, int cap) throws Refused {
+        int count = at + 1;
+        if (at(top, at + 2) != null && at(top, at + 2).isSymbol(",")) {
+            count = at + 3;
+        }
+        return lower(sql, at(top, count), at(top, count + 1), cap, "LIMIT");
+    }
+
+    /** PostgreSQL/H2: LIMIT c or LIMIT ALL. */
+    private static Limited standardLimit(String sql, List<Token> top, int at, int cap) throws Refused {
+        Token count = at(top, at + 1);
+        if (count != null && count.isWord("ALL")) {
+            return new Limited(replace(sql, count, String.valueOf(cap)), cap, How.LOWERED);
+        }
+        return lower(sql, count, at(top, at + 2), cap, "LIMIT");
+    }
+
+    /** FETCH FIRST|NEXT [c] ROW|ROWS ONLY|WITH TIES. No count means one row. PERCENT is refused. */
+    private static Limited fetch(String sql, List<Token> top, int at, int cap) throws Refused {
+        Token next = at(top, at + 2);
+        if (next != null && (next.isWord("ROW") || next.isWord("ROWS"))) {
+            return new Limited(sql, 1, How.KEPT);
+        }
+        Token after = at(top, at + 3);
+        if (after != null && after.isWord("PERCENT")) {
+            throw new Refused("FETCH … PERCENT is not accepted — select_query needs a row count it can bound.");
+        }
+        return lower(sql, next, after, cap, "FETCH");
+    }
+
+    private static Limited sqlServer(String sql, List<Token> tokens, List<Token> top, int cap) throws Refused {
+        int select = indexOfWord(top, "SELECT");
+        if (select < 0) {
+            throw new Refused("SQL Server: write the query without outer parentheses so a row limit can be added.");
+        }
+        int afterSelect = select + 1;
+        Token modifier = at(top, afterSelect);
+        if (modifier != null && (modifier.isWord("ALL") || modifier.isWord("DISTINCT"))) {
+            afterSelect++;
+        }
+        Token topWord = at(top, afterSelect);
+        if (topWord != null && topWord.isWord("TOP")) {
+            return sqlServerTop(sql, tokens, topWord, cap);
+        }
+        int fetch = indexOfWord(top, "FETCH");
+        if (fetch >= 0) {
+            return fetch(sql, top, fetch, cap);
+        }
+        int insertAt = trailingClauseStart(top);
+        int lastEnd = tokens.get(tokens.size() - 1).end();
+        boolean ordered = false;
+        boolean offset = false;
+        boolean setOperation = false;
+        for (int i = 0; i < top.size(); i++) {
+            Token t = top.get(i);
+            ordered |= t.isWord("ORDER") && at(top, i + 1) != null && at(top, i + 1).isWord("BY");
+            offset |= t.isWord("OFFSET");
+            setOperation |= t.kind() == Kind.WORD && SET_OPERATORS.contains(t.upper());
+        }
+        if (ordered) {
+            String clause = offset ? "FETCH NEXT " + cap + " ROWS ONLY" : "OFFSET 0 ROWS FETCH NEXT " + cap
+                    + " ROWS ONLY";
+            return new Limited(insert(sql, insertAt, lastEnd, clause), cap, How.ADDED);
+        }
+        if (setOperation) {
+            return new Limited(insert(sql, insertAt, lastEnd, "ORDER BY 1 OFFSET 0 ROWS FETCH NEXT " + cap
+                    + " ROWS ONLY"), cap, How.ADDED);
+        }
+        Token anchor = top.get(afterSelect - 1);
+        return new Limited(sql.substring(0, anchor.end()) + " TOP (" + cap + ")" + sql.substring(anchor.end()), cap,
+                How.ADDED);
+    }
+
+    /** TOP c or TOP (c); PERCENT refused. */
+    private static Limited sqlServerTop(String sql, List<Token> tokens, Token topWord, int cap) throws Refused {
+        int i = tokens.indexOf(topWord);
+        Token count = at(tokens, i + 1);
+        int next = i + 2;
+        if (count != null && count.isSymbol("(")) {
+            count = at(tokens, i + 2);
+            if (at(tokens, i + 3) == null || !at(tokens, i + 3).isSymbol(")")) {
+                throw new Refused("TOP must be a plain number (TOP n or TOP (n)).");
+            }
+            next = i + 4;
+        }
+        if (at(tokens, next) != null && at(tokens, next).isWord("PERCENT")) {
+            throw new Refused("TOP … PERCENT is not accepted — select_query needs a row count it can bound.");
+        }
+        // Unparenthesized TOP takes a constant only, so what follows is the select list (`TOP 10 *` is legal).
+        return lower(sql, count, null, cap, "TOP");
+    }
+
+    /** Start of a top-level FOR XML/JSON/BROWSE or OPTION (…) — SQL Server's clauses that must stay last — or -1. */
+    private static int trailingClauseStart(List<Token> top) {
+        for (int i = 0; i < top.size(); i++) {
+            Token t = top.get(i);
+            Token next = at(top, i + 1);
+            if (next == null) {
+                continue;
+            }
+            if ((t.isWord("FOR") && (next.isWord("XML") || next.isWord("JSON") || next.isWord("BROWSE")))
+                    || (t.isWord("OPTION") && next.isSymbol("("))) {
+                return t.start();
+            }
+        }
+        return -1;
+    }
+
+    // ---- editing ------------------------------------------------------------------------------------------
+
+    /** The count token lowered to {@code cap} when larger; refused when it is not a plain integer. */
+    private static Limited lower(String sql, Token count, Token after, int cap, String clause) throws Refused {
+        // A symbol right after the number makes it an expression — `LIMIT 10 + 5000` is legal on PostgreSQL and must
+        // not pass as "10". A comma (MySQL's LIMIT o, c) and a closing parenthesis are not operators.
+        boolean expression = after != null && after.kind() == Kind.SYMBOL && !after.isSymbol(",")
+                && !after.isSymbol(")");
+        if (count == null || count.kind() != Kind.NUMBER || !count.text().chars().allMatch(Character::isDigit)
+                || expression) {
+            throw new Refused(clause + " must be a plain number (" + clause + " n) — select_query bounds every "
+                    + "query and cannot bound an expression.");
+        }
+        BigInteger value = new BigInteger(count.text());
+        if (value.compareTo(BigInteger.valueOf(cap)) <= 0) {
+            return new Limited(sql, value.intValueExact(), How.KEPT);
+        }
+        return new Limited(replace(sql, count, String.valueOf(cap)), cap, How.LOWERED);
+    }
+
+    private static Limited append(String sql, List<Token> tokens, String clause, int cap) {
+        Token last = tokens.get(tokens.size() - 1);
+        return new Limited(sql.substring(0, last.end()) + clause + sql.substring(last.end()), cap, How.ADDED);
+    }
+
+    /** {@code clause} before the token starting at {@code before}, or after the last token when {@code before} is -1. */
+    private static String insert(String sql, int before, int lastEnd, String clause) {
+        if (before < 0) {
+            return sql.substring(0, lastEnd) + " " + clause + sql.substring(lastEnd);
+        }
+        return sql.substring(0, before) + clause + " " + sql.substring(before);
+    }
+
+    private static String replace(String sql, Token token, String text) {
+        return sql.substring(0, token.start()) + text + sql.substring(token.end());
+    }
+
+    // ---- token helpers ------------------------------------------------------------------------------------
+
+    /** The tokens at parenthesis depth 0, in order. A "(" and its ")" are both depth 0 when they open at depth 0. */
+    private static List<Token> topLevel(List<Token> tokens) {
+        List<Token> top = new ArrayList<>();
+        int depth = 0;
+        for (Token t : tokens) {
+            if (t.isSymbol(")")) {
+                depth--;
+            }
+            if (depth == 0) {
+                top.add(t);
+            }
+            if (t.isSymbol("(")) {
+                depth++;
+            }
+        }
+        return top;
+    }
+
+    private static int indexOfWord(List<Token> tokens, String word) {
+        for (int i = 0; i < tokens.size(); i++) {
+            if (tokens.get(i).isWord(word)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static Token at(List<Token> tokens, int i) {
+        return i >= 0 && i < tokens.size() ? tokens.get(i) : null;
+    }
+}

@@ -1,0 +1,84 @@
+// LiveQueryContract on PostgreSQL, plus opening another schema through SET LOCAL search_path and leaving it.
+package {{PKG}}.db.query;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
+import {{PKG}}.db.DbFixtures;
+
+import org.junit.jupiter.api.Test;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.List;
+
+import static {{PKG}}.db.query.QueryFixtures.MAPPER;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class LivePostgresQueryTest extends LiveQueryContract {
+
+    private static final String OTHER_SCHEMA = "zz_dbquery_s";
+
+    @Override
+    String envPrefix() {
+        return "DB_TOOLS_TEST_POSTGRES";
+    }
+
+    @Override
+    String createProbe() {
+        return "CREATE TABLE " + PROBE + " (id BIGINT PRIMARY KEY, name VARCHAR(50), amount NUMERIC(10,2))";
+    }
+
+    /** read_only_sql_transaction. */
+    @Override
+    boolean isReadOnlyRefusal(SQLException e) {
+        return "25006".equals(e.getSQLState());
+    }
+
+    @Override
+    String writingFunction() {
+        return "CREATE FUNCTION zz_dbquery_write() RETURNS int LANGUAGE sql AS $$"
+                + " INSERT INTO " + PROBE + " (id, name) VALUES (97, 'f'); SELECT 1 $$";
+    }
+
+    @Override
+    List<String> ownLimitShapes() {
+        return List.of("SELECT id FROM " + PROBE + " LIMIT ALL",
+                "SELECT id FROM " + PROBE + " ORDER BY id FETCH FIRST 5000 ROWS ONLY",
+                "SELECT id FROM " + PROBE + " OFFSET 0");
+    }
+
+    @Override
+    String planFormat() {
+        return "json";
+    }
+
+    /** SET LOCAL lasts until the rollback — never longer. */
+    @Override
+    void assertCleanVendor(Connection conn) throws SQLException {
+        assertEquals("0", single(conn, "SHOW statement_timeout"));
+        assertEquals("off", single(conn, "SHOW transaction_read_only"));
+    }
+
+    @Test
+    void anotherSchemaIsOpenedAndLeftBehind() throws SQLException {
+        DbFixtures.exec(pool, "DROP SCHEMA IF EXISTS " + OTHER_SCHEMA + " CASCADE", "CREATE SCHEMA " + OTHER_SCHEMA,
+                "CREATE TABLE " + OTHER_SCHEMA + ".ledger (x INT)",
+                "INSERT INTO " + OTHER_SCHEMA + ".ledger VALUES (7)");
+        String before;
+        try (Connection conn = pool.getConnection()) {
+            before = single(conn, "SHOW search_path");
+        }
+        try {
+            SelectQueryTool tool = QueryFixtures.select(pool);
+            JsonNode s = QueryFixtures.ok(tool, tool.call(MAPPER.createObjectNode()
+                    .put("sql", "SELECT x FROM ledger").put("schema", OTHER_SCHEMA), null));
+            assertEquals(7, s.path("rows").get(0).get(0).asInt(), s.toString());
+            try (Connection conn = pool.getConnection()) {
+                assertEquals(before, single(conn, "SHOW search_path"));
+            }
+            assertClean();
+        } finally {
+            DbFixtures.exec(pool, "DROP SCHEMA IF EXISTS " + OTHER_SCHEMA + " CASCADE");
+        }
+    }
+}

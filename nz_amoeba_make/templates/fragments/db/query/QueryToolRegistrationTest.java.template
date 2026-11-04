@@ -1,0 +1,91 @@
+// How the two query tools present themselves to the dispatcher and the authorizer — the parts that fail silently:
+// a missing @Component means the tool never appears; READ would open SQL to every mcp.read holder; CUSTOM would demand
+// mcp.admin. And an `ext` REST gateway, which bypasses the authorizer, must never name them.
+package {{PKG}}.db.query;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
+import {{PKG}}.ExampleAuthorizer;
+
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.junit.jupiter.api.Test;
+import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.stereotype.Component;
+
+import javax.sql.DataSource;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.Mockito.mock;
+
+class QueryToolRegistrationTest {
+
+    private final DataSource ds = mock(DataSource.class);
+    private final List<McpTool> tools = List.of(QueryFixtures.explain(ds), QueryFixtures.select(ds));
+
+    @Test
+    void bothAreComponentsWithTheirNames() {
+        for (McpTool tool : tools) {
+            assertNotNull(tool.getClass().getAnnotation(Component.class), tool.name());
+        }
+        assertEquals(List.of("amoeba.explain_query", "amoeba.select_query"), tools.stream().map(McpTool::name).toList());
+        for (Class<?> c : List.of(QueryEnvelope.class, QueryConnections.class)) {
+            assertNotNull(c.getAnnotation(Component.class), c.getSimpleName());
+        }
+    }
+
+    @Test
+    void bothClassifyAsAWriteActionSoMcpReadCannotReachThem() {
+        ExampleAuthorizer authorizer = new ExampleAuthorizer();
+        for (McpTool tool : tools) {
+            assertEquals(ModuleActionAuthorizer.ModuleAction.UPDATE, tool.action(), tool.name());
+            assertEquals(null, tool.targetModuleId(QueryFixtures.MAPPER.createObjectNode()), tool.name());
+
+            ModuleActionAuthorizer.Decision read = authorizer.authorize(
+                    new TestingAuthenticationToken("reader", null, "SCOPE_mcp.read"), tool.action(), null);
+            assertFalse(read.allowed(), tool.name() + " must not be reachable on mcp.read");
+            assertTrue(read.reason().contains("mcp.write"), "the denial names the missing scope: " + read.reason());
+
+            ModuleActionAuthorizer.Decision write = authorizer.authorize(
+                    new TestingAuthenticationToken("writer", null, "SCOPE_mcp.write"), tool.action(), null);
+            assertTrue(write.allowed(), tool.name() + " is an mcp.write tool");
+        }
+    }
+
+    @Test
+    void bothDeclareThemselvesReadOnlyWithClosedInputs() {
+        for (McpTool tool : tools) {
+            assertEquals(Boolean.TRUE, tool.annotations().readOnlyHint(), tool.name());
+            JsonNode in = tool.inputSchema();
+            assertFalse(in.path("additionalProperties").asBoolean(true), tool.name());
+            assertEquals("sql", in.path("required").get(0).asText(), tool.name());
+            assertTrue(in.path("properties").has("database") && in.path("properties").has("schema"), tool.name());
+            assertFalse(tool.description().isBlank(), tool.name());
+            assertTrue(tool.description().contains("mcp.write"), tool.name());
+        }
+    }
+
+    @Test
+    void theExtGatewayNeverNamesThem() throws IOException {
+        Path ext = Path.of("src/main/java/{{PKG_PATH}}/ext");
+        assumeTrue(Files.isDirectory(ext), "no ext package in this project");
+        try (Stream<Path> files = Files.list(ext)) {
+            for (Path file : files.filter(p -> p.toString().endsWith(".java")).toList()) {
+                String source = Files.readString(file);
+                String code = source.replaceAll("(?m)^\\s*//.*$", "");   // the warning comment may name them
+                for (McpTool tool : tools) {
+                    assertFalse(code.contains(tool.name()), file + " wires " + tool.name() + " into /ext");
+                }
+            }
+        }
+    }
+}

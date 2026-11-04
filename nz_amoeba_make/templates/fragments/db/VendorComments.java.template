@@ -1,0 +1,95 @@
+// [DB METADATA] Table and column comments on the two vendors whose JDBC driver never reports them.
+//
+//   · Oracle — ojdbc fills REMARKS only when the connection sets remarksReporting=true, which makes every metadata
+//     call slower and would have to go into the shared URL every deployed module uses. The comments are in
+//     ALL_TAB_COMMENTS / ALL_COL_COMMENTS, filtered by OWNER (= the schema).
+//   · SQL Server — there is no COMMENT statement; tools (SSMS included) store descriptions as the extended property
+//     MS_Description. mssql-jdbc does not surface it at all. sys.extended_properties is per database, so the query is
+//     qualified with the resolved catalog — a name taken from getCatalogs(), quoted with ]] escaping.
+//
+// Best effort, deliberately: a refused read (no VIEW DEFINITION, a locked-down dictionary) leaves comments null, the
+// same as an uncommented table. A metadata tool that failed outright because comments were unreadable would be
+// worse than one that shows a table without them. Every other vendor gets an empty map and no query.
+//
+// Bind parameters for every value; the only text spliced into SQL is the SQL Server catalog, which is an identifier
+// (it cannot be bound) and has already been matched against the server's own catalog list.
+package {{PKG}}.db;
+
+import {{PKG}}.db.DbMetadataReader.Location;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
+
+final class VendorComments {
+
+    private VendorComments() {
+    }
+
+    /** Table/view name → comment for one location. Empty when the vendor needs no fallback or the read failed. */
+    static Map<String, String> tables(Connection conn, DbVendor vendor, Location location) {
+        return switch (vendor) {
+            case ORACLE -> location.schema() == null ? Map.of() : read(conn,
+                    "SELECT TABLE_NAME, COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER = ? AND COMMENTS IS NOT NULL",
+                    location.schema());
+            case SQLSERVER -> location.database() == null || location.schema() == null ? Map.of() : read(conn,
+                    "SELECT o.name, CAST(ep.value AS NVARCHAR(4000))"
+                            + " FROM " + bracket(location.database()) + ".sys.extended_properties ep"
+                            + " JOIN " + bracket(location.database()) + ".sys.objects o ON o.object_id = ep.major_id"
+                            + " JOIN " + bracket(location.database()) + ".sys.schemas s ON s.schema_id = o.schema_id"
+                            + " WHERE ep.class = 1 AND ep.minor_id = 0 AND ep.name = 'MS_Description'"
+                            + " AND s.name = ?",
+                    location.schema());
+            default -> Map.of();
+        };
+    }
+
+    /** Column name → comment for one table. Empty when the vendor needs no fallback or the read failed. */
+    static Map<String, String> columns(Connection conn, DbVendor vendor, Location location, String table) {
+        return switch (vendor) {
+            case ORACLE -> location.schema() == null ? Map.of() : read(conn,
+                    "SELECT COLUMN_NAME, COMMENTS FROM ALL_COL_COMMENTS"
+                            + " WHERE OWNER = ? AND TABLE_NAME = ? AND COMMENTS IS NOT NULL",
+                    location.schema(), table);
+            case SQLSERVER -> location.database() == null || location.schema() == null ? Map.of() : read(conn,
+                    "SELECT c.name, CAST(ep.value AS NVARCHAR(4000))"
+                            + " FROM " + bracket(location.database()) + ".sys.extended_properties ep"
+                            + " JOIN " + bracket(location.database()) + ".sys.objects o ON o.object_id = ep.major_id"
+                            + " JOIN " + bracket(location.database()) + ".sys.schemas s ON s.schema_id = o.schema_id"
+                            + " JOIN " + bracket(location.database()) + ".sys.columns c"
+                            + "   ON c.object_id = ep.major_id AND c.column_id = ep.minor_id"
+                            + " WHERE ep.class = 1 AND ep.name = 'MS_Description' AND s.name = ? AND o.name = ?",
+                    location.schema(), table);
+            default -> Map.of();
+        };
+    }
+
+    private static Map<String, String> read(Connection conn, String sql, String... params) {
+        Map<String, String> out = new HashMap<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            for (int i = 0; i < params.length; i++) {
+                ps.setString(i + 1, params[i]);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String name = rs.getString(1);
+                    String comment = rs.getString(2);
+                    if (name != null && comment != null && !comment.isBlank()) {
+                        out.put(name, comment.strip());
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            return Map.of();   // see the header: unreadable comments are absent comments, not a failed call
+        }
+        return out;
+    }
+
+    /** A SQL Server delimited identifier: [name] with every ] doubled. */
+    static String bracket(String identifier) {
+        return "[" + identifier.replace("]", "]]") + "]";
+    }
+}

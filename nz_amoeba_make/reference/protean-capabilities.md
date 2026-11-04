@@ -223,7 +223,8 @@ On each selection the skill auto-includes companions, asks follow-ups, or inject
 |---|---|---|
 | custom / override MCP tool | `mcp.enabled=true` | MCP config absent otherwise → tool never collected |
 | `interface_spec_validator` | nothing (core is JDK + Jackson annotations only); its example MCP tool member is gated by `mcp.enabled=true` | Consumer code, not a protean SPI. Emitted as a fragment BUNDLE into `{{PKG}}.interfacedef` — members reference each other, so they are not renamed. See "Checking a declared interface" |
-| `db_metadata_tools` | `mcp.enabled=true` + `data_access` (the host `DataSource` and `spring-boot-starter-jdbc`) | Consumer code, not a protean SPI — protean has no schema-lookup tool, so without it the only read path is deploying a throwaway module. Bundle into `{{PKG}}.db`: `amoeba.list_tables` / `amoeba.describe_table` read JDBC `DatabaseMetaData` — the current database by default, another one the DB account can see with `database`/`schema` (system databases refused) — take no SQL, return no rows. Both override `action()`→`READ`; left at `CUSTOM` they would demand `mcp.admin` |
+| `db_metadata_tools` | `mcp.enabled=true` + `data_access` (the host `DataSource` and `spring-boot-starter-jdbc`) | Consumer code, not a protean SPI — protean has no schema-lookup tool, so without it the only read path is deploying a throwaway module. Bundle into `{{PKG}}.db`: `amoeba.list_tables` / `amoeba.describe_table` read JDBC `DatabaseMetaData` — the current database by default, another one the DB account can see with `database`/`schema` (system namespaces refused, per vendor) — take no SQL, return no rows. Vendor-generic (MySQL, MariaDB, PostgreSQL, H2, Oracle, SQL Server — detected from the connection). Both override `action()`→`READ`; left at `CUSTOM` they would demand `mcp.admin` |
+| `db_query_tools` | `db_metadata_tools` + `authorizer` (both step-5 capabilities — selecting this turns them on) | Consumer code. Bundle into `{{PKG}}.db.query`: `amoeba.explain_query` (estimated plan, never executed) / `amoeba.select_query` (capped rows). Both override `action()`→`UPDATE` = `mcp.write` — they take SQL, and even a MySQL plan can reveal a row. `SqlGuard` is a safety layer; the read-only transaction, the unconditional rollback and an optional dedicated account (`amoeba.db-query.datasource.*`, a private pool — never a `DataSource` bean) are what hold |
 | `mcp.debug.enabled` | `mcp.enabled=true` (+ idle-timeout 30m default) | debug is a sub-gate of the MCP surface |
 | `mcp.strict-schema` | `runtimeOnly 'com.networknt:json-schema-validator'` | core keeps it compileOnly; absent → silent degrade |
 | `mcp.authorization.resource` | consumer `SecurityConfig` `permitAll` + 401 `resource_metadata` | protean does not implement auth; delegates |
@@ -296,6 +297,9 @@ Common non-axis toggles: `admin.enabled`(true, `/platform/*` REST), `trace.enabl
   `ModuleActionAuthorizer` policy.
 - Admin REST (`/platform/*`) is unauthenticated by default; `worker.admin-auth.enabled` (hmac/token) hardens the
   worker control plane — chiefly for the container track whose port is more exposed.
+- `db_query_tools` puts SQL on the MCP surface. It stays on `mcp.write` (never `mcp.read`), and its real boundary
+  is the database account: on SQL Server and H2 there is no server-side read-only transaction, and an Oracle
+  `PRAGMA AUTONOMOUS_TRANSACTION` function commits on its own. Recommend the dedicated SELECT-only account.
 
 ## Jar consumption (build.gradle shape)
 

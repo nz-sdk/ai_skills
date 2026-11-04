@@ -16,6 +16,7 @@
 * **nz_amoeba_make:** `db_metadata_tools` 에 `database` 인자 — 계정이 보는 다른 DB 조회 ([#8](https://github.com/nz-sdk/ai_skills/pull/8))
 * **nz_amoeba_make:** `interface_spec_validator` 에 deprecation 표시(오퍼레이션 · 파라미터 · 필드)와 호환성 게이트 `amoeba.compat-gate.enabled` — 같은 major 안에서는 추가만, `Deprecation` · `Sunset` · `Link` 응답 헤더, OpenAPI `x-sunset`, 웹훅 `{{deprecations}}` ([#10](https://github.com/nz-sdk/ai_skills/pull/10))
 * **create-frontend:** API 호환 장치 — 새 버전 안내(`version.json`), 청크 실패 1회 새로고침, 개발 빌드 Deprecation 경고, (조건부) OpenAPI → TS 타입 생성과 CI 타입 동기화 · oasdiff ([#10](https://github.com/nz-sdk/ai_skills/pull/10))
+* **nz_amoeba_make:** capability `db_query_tools` — 쿼리 계획 · read-only 조회 MCP 도구 `amoeba.explain_query` · `select_query`(mcp.write, vendor 범용), 그리고 `db_metadata_tools` 의 Oracle · SQL Server 지원 ([#13](https://github.com/nz-sdk/ai_skills/pull/13))
 
 
 ### 버그 수정

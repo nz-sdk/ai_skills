@@ -7,9 +7,14 @@ dependencies, and (3) emit the right config, dependencies, and code fragments.
 **Grounding:** derived from `protean/docs/guide/{03-configuration,05-isolation-modes,06-promotion-gates,07-data-access,08-mcp-integration,10-spi-extension,11-operations,12-security}.md`
 and `org/htcom/protean/autoconfigure/ProteanProperties.java`. Guides exist as EN (`NN-*.md`) + KO (`NN-*.ko.md`) pairs.
 
-Coordinate: `org.htcom:protean`, default `0.0.1` — released to Maven Central on 2026-08-09 (published set: plain
-+ sources + javadoc + `worker` classifier; the sidecar image is `ghcr.io/htcom-code/protean-worker:0.0.1`). A
-`0.0.1-SNAPSHOT` build from the protean repo (`-Pversion=<ver>` for a release) still resolves via `mavenLocal()`.
+Coordinate: `org.htcom:protean`, default `0.0.2` — released to Maven Central on 2026-10-31 (published set: plain
++ sources + javadoc + `worker` classifier; the sidecar image is `ghcr.io/htcom-code/protean-worker:0.0.2`). `0.0.1`
+(2026-08-09) is still on Central but lacks the fixes for MCP advisories GHSA-3wwm-m437-9pmp and GHSA-82hq-333x-wffq.
+A development build from the protean repo is `0.1.0-SNAPSHOT` since 0.0.2 (was `0.0.1-SNAPSHOT`; `-Pversion=<ver>`
+for a release) and still resolves via `mavenLocal()`.
+0.0.2 changes the MCP wire contract in one place a generated server documents: a coded tool error carries its problem
+in the result `_meta` under `org.htcom.protean/problem` (`McpToolResult.PROBLEM_META_KEY`), not in
+`structuredContent`. The Java `McpToolResult.problem()` is unchanged, so server code that reads it needs no change.
 Modules are compiled at runtime with `javac` → the server **must run on a JDK 21, not a JRE**.
 
 ---

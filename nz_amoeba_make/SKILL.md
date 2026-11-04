@@ -6,7 +6,7 @@ compatibility:
   agents:
     - claude
 metadata:
-  version: 0.2.0
+  version: 0.3.0
 ---
 
 # Amoeba Maker
@@ -148,8 +148,11 @@ keys are asked HERE — step 7 walks `groups:`, and these are not in a group, so
 never asked at all. Same rules as step 7: show each option's **full property key + default**, translate only the
 `desc`, split into ≤4-option questions, and honour `advanced`/`requires`/`requires_when`. Run it after any
 `subflow:` the capability also declares, so the sub-flow's answer is already known.
-**One capability carries `options:` today.** Recount in the yaml rather than trusting this list — it goes
-stale the moment a second is added, which is the same failure mode rule 4 below exists to prevent.
+**Two capabilities carry `options:` today.** Recount in the yaml rather than trusting this list — it goes
+stale the moment another is added, which is the same failure mode rule 4 below exists to prevent.
+- `db_query_tools` — six `options:` under `amoeba.db-query.*` (rows, bytes, cell length, timeout, concurrency; three
+  are `advanced`), plus its `emit`: the dedicated-account keys are always written as `${DB_QUERY_URL:}` /
+  `${DB_QUERY_USER:}` / `${DB_QUERY_PASSWORD:}` and never asked as literals.
 - `interface_spec_validator` — twelve `options:` under `amoeba.skeleton.*`, `amoeba.interface.*`,
   `amoeba.compat-gate.*` and `amoeba.deploy-callback.*`. Four decide the generated shape: the service-layer shape,
   the skeleton's data access, whether a spec may override either, and the L3 rule's kill switch.
@@ -164,6 +167,12 @@ stale the moment a second is added, which is the same failure mode rule 4 below 
   six ONLY on a yes — they are meaningless while it is off, and its default is off. The class ships either way
   (SpecBearingDeployTool takes it as a constructor argument), so "no" costs one disabled bean, not a code branch.
 
+**A capability may require another step-5 capability** (`db_query_tools` requires `db_metadata_tools` and
+`authorizer`). Such a `requires` entry does **not** filter it out of the offering — offer it whenever everything
+else it requires is satisfiable, and when it is selected, **turn the other one on and say so** in the same turn
+("`db_query_tools` needs `authorizer` — added"). Ask the other one's own questions (a name for the authorizer) as
+if it had been picked.
+
 AskUserQuestion caps 4 options per question, so make the offering **deterministic** rather than improvising a
 split — that is what keeps an entry from silently vanishing:
 
@@ -174,10 +183,10 @@ split — that is what keeps an entry from silently vanishing:
    Without the count the user cannot tell whether anything is still coming, which is the only real guard against
    dropping one.
 
-Worked example, in-process + MCP enabled + data access (the common case): eight survive — `custom_mcp_tool`,
-`builtin_tool_override`, `module_source_tools`, `db_metadata_tools`, `code_rule`, `authorizer`,
-`interface_spec_validator`, `unload_callback` → two questions, 4 + 4. (`db_metadata_tools` needs `data_access`,
-so without data access it drops out → 4 + 3. `db_dialect`/`scope_admin` need `worker.db.auto-provision`,
+Worked example, in-process + MCP enabled + data access (the common case): nine survive — `custom_mcp_tool`,
+`builtin_tool_override`, `module_source_tools`, `db_metadata_tools`, `db_query_tools`, `code_rule`, `authorizer`,
+`interface_spec_validator`, `unload_callback` → three questions, 4 + 4 + 1. (`db_metadata_tools` and
+`db_query_tools` need `data_access`, so without data access both drop out → 4 + 3. `db_dialect`/`scope_admin` need `worker.db.auto-provision`,
 `module_store_dialect` needs the jdbc module-store backend, so all three are filtered out.)
 
 Recount this list against the yaml rather than trusting the number written here — the count moves whenever a
@@ -338,6 +347,11 @@ Check, and fix or stop on each:
   them all and module deployment silently stops working. Offer the two ways out — add authentication (set
   `mcp.authorization.resource`, which forces the issuer prompt), or relax `authorize()` to `Decision.allow()` for
   a local demo. Warning, not blocking: "deny everything" is a legitimate safe default for a local sample.
+- **query tools without a server-side read-only layer** — if `db_query_tools` is selected and the step 4 vendor is
+  `h2` or `other` (SQL Server, Oracle, …), **warn**: SQL Server and H2 have no read-only transaction, and an Oracle
+  `PRAGMA AUTONOMOUS_TRANSACTION` function commits on its own, so the database account is the only boundary. Point
+  at `DB_QUERY_URL` / `DB_QUERY_USER` / `DB_QUERY_PASSWORD` (a SELECT-only account). On any vendor, say the same
+  when the database also holds an authorization server's tables. Warning, not blocking.
 
 Produce a short **validation report** (OK / 경고 / 차단) **in Korean** — but quote every offending key, value,
 class name and file path exactly as written, so the user can act on it. On a blocking error, do not generate —
@@ -457,6 +471,8 @@ Engine:
   Substitute `{{NAME}}`, `{{NAME_KEBAB}}` (= `{{NAME}}` with `_`→`-`; it names containers, volumes and the
   compose project), `{{PKG}}`, `{{PORT}}`, `{{DB}}`, and at the `full` level `{{REPO_URL}}`.
   Four things to get right:
+  - **Drop every `[db_query_tools ONLY]` block when that capability is not selected** — `env.example.template`,
+    `docker-compose.app.yml.template` and `docs/docker.md.template` carry one each, like the README's.
   - **★ PRUNE EVERY `[OPTIONAL local-db]` BLOCK WHEN NO OVERLAY IS EMITTED.** `docker-compose.local-db.yml` is
     written only for a **docker-managed** database at infra ≥ `container`. For an existing server, `h2`, `other`,
     or no data access at all, the overlay does not exist — but four templates reference it anyway, and they are
@@ -471,7 +487,8 @@ Engine:
     `<<fragment-checks>>`. After emitting, grep the generated tree for the template placeholder names
     (`ExampleTool`, `ExampleAuthorizer`, `ExampleCodeRule`, `ExampleUnloadCallback`, `ExampleToolOverride`) and
     replace each with the name you actually used — `README.md`, `SecurityConfig.java` and the
-    `module_source_tools` bundle's tests all mention the authorizer or the custom tool. A leftover placeholder
+    `module_source_tools` bundle's tests all mention the authorizer or the custom tool, and the
+    `db_query_tools` bundle's `QueryToolRegistrationTest` imports and instantiates `ExampleAuthorizer`. A leftover placeholder
     name is a reference to a class that does not exist. (`fragment_bundle` members are the opposite: `rename:
     false`, so never touch those.)
   - **`{{...}}` is not always a placeholder.** `ci.yml` contains `{{.State.Health.Status}}`, which is docker

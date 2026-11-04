@@ -12,7 +12,7 @@
 |---|---|
 | `name` | `nz_amoeba_make` |
 | 표시 이름 | Amoeba Maker |
-| `metadata.version` | `0.2.0` |
+| `metadata.version` | `0.3.0` |
 | `license` | `AGPL-3.0-only` |
 | `description` | `prototype/<name>` 아래에 실행 가능한 Protean 소비 샘플 서버를 처음부터 스캐폴딩한다. **Protean 옵션 표면 전체**(모든 `protean.*` 설정 + 모든 소비자 확장 지점 + 데이터베이스 서브플로우)를 사용자와 함께 훑고, 그에 맞는 build·config·code·infra·README 를 생성한다. Protean 을 모르는 사용자를 위해 만들어졌다 — 어떤 설정이든 기본값과 평이한 설명을 곁들여 스킬을 통해 구성할 수 있다. 새 Protean 샘플/예제 서버를 만들거나, capability 를 시험해 보거나, 다운스트림 Protean 통합을 부트스트랩할 때 사용한다. 트리거: "make a protean sample", "scaffold a protean server", "new protean example", "protean sample 만들어" |
 
@@ -153,8 +153,11 @@
 옵션마다 **전체 프로퍼티 키 + 기본값**을 표시하고, `desc` 만 한국어로 옮기고, 질문당 4개 이하로 쪼개고,
 `advanced`/`requires`/`requires_when` 을 지킨다. 같은 capability 가 `subflow:` 도 선언했다면 **그것을 먼저** 돌려
 서브플로우의 답이 이미 정해진 뒤에 옵션을 묻는다.
-**현재 `options:` 를 가진 capability 는 하나다.** 이 목록을 믿지 말고 yaml 에서 다시 세라 — 두 번째가 추가되는
+**현재 `options:` 를 가진 capability 는 둘이다.** 이 목록을 믿지 말고 yaml 에서 다시 세라 — 또 하나가 추가되는
 순간 낡은 정보가 되며, 그것이 아래 규칙 4가 막으려는 바로 그 실패다.
+- `db_query_tools` — `amoeba.db-query.*` 아래 `options:` 6개(행 · 바이트 · 셀 길이 · 타임아웃 · 동시 실행. 셋은
+  `advanced`). 그리고 `emit`: 전용 계정 키는 언제나 `${DB_QUERY_URL:}` · `${DB_QUERY_USER:}` ·
+  `${DB_QUERY_PASSWORD:}` 로 쓰고, 값을 리터럴로 묻지 않는다.
 - `interface_spec_validator` — `amoeba.skeleton.*`, `amoeba.interface.*`, `amoeba.compat-gate.*`,
   `amoeba.deploy-callback.*` 아래 `options:` 12개. 그중 4개가 생성물의 형태를 정한다: 서비스 계층 형태, 스켈레톤의
   데이터 접근, 스펙이 그 둘을 덮어쓸 수 있는지, 그리고 L3 규칙의 킬 스위치.
@@ -178,10 +181,15 @@ AskUserQuestion 은 질문당 선택지 4개가 상한이므로, 나누기를 �
 4. **총 개수와 현재 위치를 미리 밝힌다** — "여기 적용 가능한 확장 기능 — 7개 중 1/2". 개수를 밝히지 않으면
    사용자는 아직 남은 것이 있는지 알 수 없고, 그것이 누락을 막는 유일한 실질적 장치다.
 
-워크드 예시, in-process + MCP 활성 + 데이터 접근(흔한 경우): 8개가 남는다 — `custom_mcp_tool`,
-`builtin_tool_override`, `module_source_tools`, `db_metadata_tools`, `code_rule`, `authorizer`,
-`interface_spec_validator`, `unload_callback` → 두 질문, 4 + 4. (`db_metadata_tools` 는 `data_access` 가
-필요하므로 데이터 접근이 없으면 빠진다 → 4 + 3. `db_dialect`/`scope_admin` 은 `worker.db.auto-provision` 이
+**capability 가 다른 step-5 capability 를 requires 할 수 있다**(`db_query_tools` 는 `db_metadata_tools` 와
+`authorizer` 를 requires 한다). 그런 `requires` 항목은 제시 목록에서 걸러내는 조건이 **아니다** — 그 밖의 requires 가
+충족되면 제시하고, 선택되면 **그 다른 capability 를 켜고 같은 턴에 그렇게 말한다**("`db_query_tools` 에 `authorizer`
+가 필요해 함께 켰다"). 켜진 쪽의 질문(authorizer 이름 등)은 직접 고른 것처럼 묻는다.
+
+워크드 예시, in-process + MCP 활성 + 데이터 접근(흔한 경우): 9개가 남는다 — `custom_mcp_tool`,
+`builtin_tool_override`, `module_source_tools`, `db_metadata_tools`, `db_query_tools`, `code_rule`, `authorizer`,
+`interface_spec_validator`, `unload_callback` → 세 질문, 4 + 4 + 1. (`db_metadata_tools` 와 `db_query_tools` 는
+`data_access` 가 필요하므로 데이터 접근이 없으면 둘 다 빠진다 → 4 + 3. `db_dialect`/`scope_admin` 은 `worker.db.auto-provision` 이
 필요하고 `module_store_dialect` 는 jdbc module-store 백엔드가 필요하므로, 셋 다 걸러진다.)
 
 여기 적힌 숫자를 믿지 말고 yaml 을 세라 — capability 가 추가될 때마다 개수가 움직이고, 낡은 총계는 바로 규칙 4가
@@ -346,6 +354,11 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   분기가 전부 거부하고, 모듈 배포가 조용히 멈춘다. 두 가지 탈출구를 제시한다 — 인증을 붙이거나
   (`mcp.authorization.resource` 를 설정하면 issuer 프롬프트가 강제된다), 로컬 데모라면 `authorize()` 를
   `Decision.allow()` 로 완화한다. 차단이 아니라 경고다: "전부 거부"는 로컬 샘플에서 정당한 안전 기본값이다.
+- **서버 쪽 read-only 층이 없는 쿼리 도구** — `db_query_tools` 를 골랐고 4 단계 vendor 가 `h2` 또는 `other`(SQL
+  Server, Oracle …)이면 **경고**한다: SQL Server 와 H2 에는 read-only 트랜잭션이 없고, Oracle 의 `PRAGMA
+  AUTONOMOUS_TRANSACTION` 함수는 스스로 커밋하므로 DB 계정이 유일한 경계다. `DB_QUERY_URL` · `DB_QUERY_USER` ·
+  `DB_QUERY_PASSWORD`(SELECT 만 가진 계정)를 안내한다. vendor 와 무관하게 DB 에 인증 서버 테이블이 함께 있으면
+  같은 말을 한다. 차단이 아니라 경고다.
 
 짧은 **검증 리포트**(OK / 경고 / 차단)를 **한국어로** 낸다 — 단, 문제를 일으킨 키·값·클래스명·파일 경로는
 원문 그대로 인용해 사용자가 조치할 수 있게 한다. 차단 오류가 있으면 생성하지 말고 돌아가 수정을 요청한다. 그다음
@@ -468,6 +481,8 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   `{{NAME}}`, `{{NAME_KEBAB}}`(= `{{NAME}}` 의 `_`→`-`. 컨테이너·볼륨·compose 프로젝트 이름을 만든다),
   `{{PKG}}`, `{{PORT}}`, `{{DB}}`, 그리고 `full` 수준에서는 `{{REPO_URL}}` 을 치환한다.
   틀리기 쉬운 것 넷:
+  - **`db_query_tools` 를 고르지 않았다면 `[db_query_tools ONLY]` 블록을 모두 지운다** — README 처럼
+    `env.example.template`, `docker-compose.app.yml.template`, `docs/docker.md.template` 에 하나씩 있다.
   - **★ 오버레이를 만들지 않았다면 `[OPTIONAL local-db]` 블록을 모두 지운다.** `docker-compose.local-db.yml` 은
     인프라 ≥ `container` 이면서 **docker 로 관리하는** DB 일 때만 나간다. 기존 서버·`h2`·`other`·데이터 접근
     없음이면 그 파일은 존재하지 않는데, 네 템플릿이 그것을 참조하며 찾기 쉽도록 `[OPTIONAL local-db]` 로
@@ -480,7 +495,8 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
     클래스명으로 바뀌는데(9 단계), 다른 템플릿이 그 클래스를 산문과 `<<fragment-checks>>` 에서 언급한다. 생성
     후 생성물 트리에서 템플릿의 자리표시 이름(`ExampleTool`, `ExampleAuthorizer`, `ExampleCodeRule`,
     `ExampleUnloadCallback`, `ExampleToolOverride`)을 grep 해서 실제 사용한 이름으로 바꾼다 — `README.md`,
-    `SecurityConfig.java`, `module_source_tools` 번들의 테스트가 authorizer 나 커스텀 툴을 언급한다. 남은
+    `SecurityConfig.java`, `module_source_tools` 번들의 테스트가 authorizer 나 커스텀 툴을 언급하고,
+    `db_query_tools` 번들의 `QueryToolRegistrationTest` 는 `ExampleAuthorizer` 를 import 해 생성한다. 남은
     자리표시 이름은 존재하지 않는 클래스를 가리키는 참조다. (`fragment_bundle` 멤버는 반대다: `rename: false`
     이므로 절대 건드리지 않는다.)
   - **`{{...}}` 가 항상 플레이스홀더는 아니다.** `ci.yml` 에는 `{{.State.Health.Status}}` 가 있고 이것은

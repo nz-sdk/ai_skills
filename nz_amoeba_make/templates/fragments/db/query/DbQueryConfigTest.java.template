@@ -1,0 +1,68 @@
+// The trap QueryConnections exists to avoid: a second DataSource BEAN makes Boot's DataSourceAutoConfiguration back
+// off, and the module store, every module and the audit log would silently move onto the read-only account. With or
+// without a dedicated account there must be exactly one DataSource bean — the host's — and the binding must apply.
+package {{PKG}}.db.query;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+
+import javax.sql.DataSource;
+import java.time.Duration;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class DbQueryConfigTest {
+
+    private final ApplicationContextRunner runner = new ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(DataSourceAutoConfiguration.class))
+            .withUserConfiguration(DbQueryConfig.class, QueryConnections.class)
+            .withPropertyValues("spring.datasource.url=jdbc:h2:mem:host_" + id() + ";DB_CLOSE_DELAY=-1");
+
+    private static String id() {
+        return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    @Test
+    void withoutADedicatedAccountTheHostDataSourceIsUsed() {
+        runner.run(ctx -> {
+            assertEquals(1, ctx.getBeansOfType(DataSource.class).size());
+            assertFalse(ctx.getBean(QueryConnections.class).dedicated());
+            DbQuerySettings s = ctx.getBean(DbQuerySettings.class);
+            assertEquals(100, s.defaultRows());
+            assertEquals(Duration.ofSeconds(10), s.timeout());
+        });
+    }
+
+    @Test
+    void aDedicatedAccountAddsAPoolButNoDataSourceBean() {
+        runner.withPropertyValues(
+                        "amoeba.db-query.datasource.url=jdbc:h2:mem:ro_" + id() + ";DB_CLOSE_DELAY=-1",
+                        "amoeba.db-query.datasource.username=sa",
+                        "amoeba.db-query.max-rows=50",
+                        "amoeba.db-query.default-rows=500",
+                        "amoeba.db-query.timeout=3s")
+                .run(ctx -> {
+                    assertEquals(1, ctx.getBeansOfType(DataSource.class).size(),
+                            "a second DataSource bean would make Boot drop the host pool");
+                    assertTrue(ctx.getBean(QueryConnections.class).dedicated());
+                    DbQuerySettings s = ctx.getBean(DbQuerySettings.class);
+                    assertEquals(50, s.maxRows());
+                    assertEquals(50, s.defaultRows(), "the default never exceeds the ceiling");
+                    assertEquals(3, s.timeoutSeconds());
+                });
+    }
+
+    @Test
+    void anUnreachableDedicatedDatabaseDoesNotStopTheApp() {
+        runner.withPropertyValues("amoeba.db-query.datasource.url=jdbc:mysql://127.0.0.1:1/none")
+                .run(ctx -> {
+                    assertTrue(ctx.getStartupFailure() == null, () -> "startup failed: " + ctx.getStartupFailure());
+                    assertTrue(ctx.getBean(QueryConnections.class).dedicated());
+                });
+    }
+}

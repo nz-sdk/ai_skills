@@ -18,6 +18,7 @@
 #                  their library default is empty. Read it in step 9; it is not a user-facing question.
 #   fragment_bundle  a MULTI-FILE fragment: a whole templates/fragments/<dir>/ emitted into a SUB-PACKAGE.
 #                  {dir, package, rename: false, files: [{src, to: main|test, when: <k=v, optional>}]}
+#                  A `when` written as a BARE KEY means "that key is set to a non-empty value", as in requires_when.
 #                  `src` MAY CARRY A RELATIVE PATH (e.g. `deploy/SpecResource.java.template`). The template
 #                  directory then mirrors the emitted package tree, and the destination package is `package` plus
 #                  that directory: {{PKG}}.interfacedef.deploy. Written this way so the sub-package a file lands in
@@ -698,15 +699,31 @@ capabilities:
       package: "{{PKG}}.db"
       rename: false
       files:
-        - { src: DbToolSchemas.java.template,          to: main }
-        - { src: DbMetadataReader.java.template,       to: main }
-        - { src: ListTablesTool.java.template,         to: main }
-        - { src: DescribeTableTool.java.template,      to: main }
-        - { src: DbFixtures.java.template,             to: test }
-        - { src: ListTablesToolTest.java.template,     to: test }
-        - { src: DescribeTableToolTest.java.template,  to: test }
-        - { src: DbToolRegistrationTest.java.template, to: test }
-        - { src: LiveMetadataTest.java.template,       to: test }
+        - { src: DbVendor.java.template,                   to: main }
+        - { src: SystemNamespaces.java.template,           to: main }
+        - { src: VendorComments.java.template,             to: main }
+        - { src: DbToolSchemas.java.template,              to: main }
+        - { src: DbMetadataReader.java.template,           to: main }
+        - { src: ListTablesTool.java.template,             to: main }
+        - { src: DescribeTableTool.java.template,          to: main }
+        - { src: DbFixtures.java.template,                 to: test }
+        - { src: VendorRulesTest.java.template,            to: test }
+        - { src: ListTablesToolTest.java.template,         to: test }
+        - { src: DescribeTableToolTest.java.template,      to: test }
+        - { src: DbToolRegistrationTest.java.template,     to: test }
+        - { src: LiveMetadataTest.java.template,           to: test }
+        - { src: LiveVendorMetadataContract.java.template, to: test }
+        - { src: LivePostgresMetadataTest.java.template,   to: test }
+        - { src: LiveOracleMetadataTest.java.template,     to: test }
+        - { src: LiveSqlServerMetadataTest.java.template,  to: test }
+    # The drivers of the live vendor tests. TEST runtime only: the module compile classpath is java.class.path under
+    # `./gradlew run`, which test scopes never reach, so a deployed module still sees only the app's own driver.
+    # Versions come from the Spring Boot BOM. Every live test self-skips without its DB_TOOLS_TEST_<VENDOR>_URL.
+    build_deps:
+      - "testRuntimeOnly 'org.postgresql:postgresql'"
+      - "testRuntimeOnly 'com.oracle.database.jdbc:ojdbc11'"
+      - "testRuntimeOnly 'com.microsoft.sqlserver:mssql-jdbc'"
+      - "testRuntimeOnly 'org.mariadb.jdbc:mariadb-java-client'"
     desc: >-
       Two @Component McpTools that show the structure of the host database over MCP, on mcp.read. Without them an
       agent that needs a column name has no read path at all, and ends up deploying a throwaway module that queries
@@ -714,20 +731,26 @@ capabilities:
       (its `pattern` matches the name OR the comment, so a concept word finds a Korean-commented table);
       amoeba.describe_table returns one table's columns (type, nullability, default, auto-increment, comment), its
       primary key, unique and non-unique indexes, and foreign keys in both directions. Both default to the database
-      the modules use and take an optional `database` (JDBC catalog — the MySQL database) / `schema` (PostgreSQL, H2)
-      to open another one the DB account can see; list_tables reports those names in `databases`/`schemas`.
+      the modules use and take an optional `database` (JDBC catalog — the MySQL/SQL Server database) / `schema`
+      (PostgreSQL, H2, SQL Server, Oracle) to open another one the DB account can see; list_tables reports those
+      names in `databases`/`schemas`. Vendor-generic: the vendor is DETECTED from the connection (DbVendor) —
+      MySQL, MariaDB, PostgreSQL, H2, Oracle, SQL Server.
     note: >-
       NO SQL IN, NO ROWS OUT — THAT IS THE DESIGN. Both tools take names only and read JDBC DatabaseMetaData, so
       there is no injection surface and no business data can leave. Do not add a "query" argument to either — a
       read-only SQL tool is a different capability with a different threat model (statement scanning, read-only
-      connection, row/time caps), not an extension of this one.
+      connection, row/time caps): that is `db_query_tools`, which builds on this bundle.
 
       THE DB ACCOUNT IS THE BOUNDARY. `database`/`schema` are resolved against getCatalogs()/getSchemas(), i.e.
       against what the host DataSource's account can see — so an mcp.read holder sees the STRUCTURE of every database
       that account is granted, never its rows. To narrow it, narrow the grants; there is deliberately no allowlist
-      setting. System namespaces (mysql, information_schema, performance_schema, sys, pg_catalog, pg_toast —
-      DbMetadataReader.SYSTEM_NAMESPACES) are refused even when visible, as an argument and as a `db.table`
-      qualifier, and are never offered in the visible lists. Unknown names error WITH the visible list. H2 has one
+      setting. System namespaces are refused even when visible, as an argument and as a `db.table` qualifier, and
+      are never offered in the visible lists — per vendor (SystemNamespaces): mysql, information_schema,
+      performance_schema, sys, pg_catalog, pg_toast on every vendor; pg_* on PostgreSQL; master, model, msdb,
+      tempdb, guest and the fixed-role db_* schemas on SQL Server; Oracle-maintained users (ALL_USERS.
+      ORACLE_MAINTAINED) on Oracle. Vendor location rules: Oracle has no database level (`database` is refused with
+      a pointer to `schema`); SQL Server opens another database at dbo; PostgreSQL offers and opens only the
+      connected database (pgjdbc lists every database, but a connection cannot leave its own). Unknown names error WITH the visible list. H2 has one
       catalog per database, so offline tests switch SCHEMA (DbFixtures puts a same-named table with a different
       column in other_app); switching CATALOG is pinned only by LiveMetadataTest, which needs CREATE DATABASE and
       skips that one test without it.
@@ -745,15 +768,143 @@ capabilities:
       COMMENTS COME FROM THE DRIVER. Connector/J 9.x reports table and column REMARKS on MySQL 8.4 with the
       connection URL unchanged — measured. There is deliberately no information_schema fallback (it would run on
       every call against any database with one uncommented table), and the shared spring.datasource.url is not
-      touched (every deployed module uses it). LiveMetadataTest is what pins this; it SELF-SKIPS unless
-      DB_TOOLS_TEST_URL points at a disposable MySQL/MariaDB, so `./gradlew test` stays offline.
+      touched (every deployed module uses it). The exceptions are the two drivers that NEVER report them (measured):
+      ojdbc (REMARKS null without remarksReporting) and mssql-jdbc (SQL Server keeps MS_Description extended
+      properties). On those two only, VendorComments reads ALL_*_COMMENTS / sys.extended_properties, best effort.
+      ojdbc also reports UPDATE_RULE as NULL, which getInt turns into 0 = importedKeyCascade — read as a nullable
+      int. getIndexInfo keeps approximate=true: with false, ojdbc runs ANALYZE TABLE.
+
+      LIVE TESTS PER VENDOR, each SELF-SKIPPING without its URL so `./gradlew test` stays offline:
+      LiveMetadataTest (DB_TOOLS_TEST_URL — MySQL/MariaDB), and LiveVendorMetadataContract's subclasses
+      LivePostgres/LiveOracle/LiveSqlServerMetadataTest (DB_TOOLS_TEST_<POSTGRES|ORACLE|SQLSERVER>_URL). Each test
+      header carries its one-line `docker run`.
 
       Known gap: ENUM/SET columns come back as ENUM/SET without their values — DatabaseMetaData does not expose them.
 
       SELF-CONTAINED BY DESIGN, like module_source_tools: DbToolSchemas duplicates text/clampLimit/cursor instead of
-      importing SourceToolSchemas, because the two are independent optional capabilities. No build_deps: `requires:
-      data_access` guarantees spring-boot-starter-jdbc + a driver, and H2 (used by the tests through a JDBC URL,
-      never an org.h2 import) reaches the test runtime classpath through protean's own runtime-scope dependency.
+      importing SourceToolSchemas, because the two are independent optional capabilities. `requires: data_access`
+      guarantees spring-boot-starter-jdbc + a driver, and H2 (used by the tests through a JDBC URL, never an org.h2
+      import) reaches the test runtime classpath through protean's own runtime-scope dependency. The only build_deps
+      are the live tests' drivers, test runtime only. DbToolSchemas, DbFixtures and DbMetadataReader.resolveLocation
+      are public because db_query_tools builds on them.
+  - id: db_query_tools
+    title: Query plan and read-only query tools (amoeba.explain_query / select_query)
+    # Builds on db_metadata_tools (resolveLocation, DbToolSchemas, DbFixtures — a real compile dependency) and needs a
+    # scope policy, without which "mcp.write only" means nothing — both are other STEP-5 capabilities, so selecting
+    # this one turns them on (SKILL.md step 5).
+    requires: [protean.mcp.enabled=true, data_access, db_metadata_tools, authorizer]
+    fragment_bundle:
+      dir: db
+      package: "{{PKG}}.db"
+      rename: false
+      files:
+        - { src: query/DbQuerySettings.java.template,             to: main }
+        - { src: query/DbQueryConfig.java.template,               to: main }
+        - { src: query/QueryConnections.java.template,            to: main }
+        - { src: query/SqlLexer.java.template,                    to: main }
+        - { src: query/SqlGuard.java.template,                    to: main }
+        - { src: query/QueryEnvelope.java.template,               to: main }
+        - { src: query/PlanReader.java.template,                  to: main }
+        - { src: query/RowReader.java.template,                   to: main }
+        - { src: query/QueryToolSupport.java.template,            to: main }
+        - { src: query/ExplainQueryTool.java.template,            to: main }
+        - { src: query/SelectQueryTool.java.template,             to: main }
+        - { src: query/QueryFixtures.java.template,               to: test }
+        - { src: query/SqlGuardTest.java.template,                to: test }
+        - { src: query/QueryEnvelopeTest.java.template,           to: test }
+        - { src: query/QueryToolsTest.java.template,              to: test }
+        - { src: query/QueryToolRegistrationTest.java.template,   to: test }
+        - { src: query/DbQueryConfigTest.java.template,           to: test }
+        - { src: query/QueryToolsMcpEndToEndTest.java.template,   to: test, when: protean.mcp.authorization.resource }
+        - { src: query/LiveQueryContract.java.template,           to: test }
+        - { src: query/LiveMySqlQueryTest.java.template,          to: test }
+        - { src: query/LivePostgresQueryTest.java.template,       to: test }
+        - { src: query/LiveOracleQueryTest.java.template,         to: test }
+        - { src: query/LiveSqlServerQueryTest.java.template,      to: test }
+    # jwt() for QueryToolsMcpEndToEndTest, which drives the real /platform/mcp through the security chain. Harmless
+    # when that member is skipped (no secured_mcp).
+    build_deps:
+      - "testImplementation 'org.springframework.security:spring-security-test'"
+    options:
+      - key: amoeba.db-query.default-rows
+        type: int
+        default: 100
+        desc: Rows select_query returns when the caller names no maxRows.
+      - key: amoeba.db-query.max-rows
+        type: int
+        default: 1000
+        desc: Ceiling for a caller's maxRows.
+      - key: amoeba.db-query.max-bytes
+        type: int
+        default: 262144
+        advanced: true
+        desc: Approximate size of one result (rows, or a plan) before it is cut.
+      - key: amoeba.db-query.max-cell-chars
+        type: int
+        default: 2000
+        advanced: true
+        desc: Characters kept per cell; longer text/LOB/binary values are cut and counted.
+      - key: amoeba.db-query.timeout
+        type: duration
+        default: 10s
+        desc: Statement timeout, and the budget for reading rows.
+      - key: amoeba.db-query.max-concurrent
+        type: int
+        default: 2
+        advanced: true
+        desc: Calls at once — borrowed from the HOST pool when no dedicated account is set.
+    emit: >-
+      ★ ALWAYS WRITE THE DEDICATED-ACCOUNT KEYS, as environment references with an EMPTY fallback, never a literal:
+        amoeba.db-query.datasource.url: ${DB_QUERY_URL:}
+        amoeba.db-query.datasource.username: ${DB_QUERY_USER:}
+        amoeba.db-query.datasource.password: ${DB_QUERY_PASSWORD:}
+      Blank url = the tools use the host DataSource's account; set = a private read-only pool for them. Keep every
+      `[db_query_tools ONLY]` block of the infra templates (env.example, docker-compose.app.yml, docs/docker.md)
+      and the README; drop them when this capability is not selected. Assert the three keys in
+      ConfigMatchesSelectionTest exactly as written, plus Class.forName("{{PKG}}.db.query.SelectQueryTool").
+    desc: >-
+      Two @Component McpTools that run SQL — the step db_metadata_tools deliberately stops short of — on whichever
+      vendor the DataSource is (MySQL, MariaDB, PostgreSQL, H2, Oracle, SQL Server; detected, not configured).
+      amoeba.explain_query returns the optimizer's ESTIMATED plan and never executes the statement (EXPLAIN
+      FORMAT=JSON/TREE, EXPLAIN (FORMAT JSON), EXPLAIN PLAN + DBMS_XPLAN, SHOWPLAN_XML). amoeba.select_query returns
+      one read-only query's rows, capped by rows, bytes, time and cell length, decimals kept exact. Both take the
+      same `database`/`schema` as the metadata tools. Without them an agent that needs to see rows or check an index
+      deploys a throwaway module.
+    note: >-
+      MCP.WRITE, NOT MCP.READ. Both declare action() UPDATE (the way amoeba.define_interface lands on mcp.write
+      without touching the authorizer). They take SQL, the database the modules use often holds more than business
+      data (an authorization server's tables: token values, password hashes), and mcp.read is the most widely
+      granted scope. Even a plan is not an mcp.read answer: MySQL reads const tables while planning and reports
+      "Impossible WHERE noticed after reading const tables", a yes/no oracle over a row's contents. mcp.write
+      holders can already deploy in-process Java with the host DataSource, so the tools grant them nothing new.
+      QueryToolRegistrationTest pins UPDATE and checks the generated authorizer (ExampleAuthorizer — renamed with
+      it, step 9) denies mcp.read and allows mcp.write.
+
+      THE GUARD IS NOT THE BOUNDARY. SqlGuard refuses all but one SELECT/WITH statement (also a SQL Server batch
+      without `;`), writes hidden in a CTE, SELECT INTO / INTO OUTFILE, locking reads, sequences, side-effect
+      functions per vendor, binds, JDBC escapes and system schemas; SqlLexer refuses SQL whose literals end in
+      different places under NO_BACKSLASH_ESCAPES / standard_conforming_strings. Below it, QueryEnvelope opens a
+      read-only transaction where the vendor has one, ALWAYS rolls back, and puts the pooled connection back
+      (catalog, schema, SQL_SELECT_LIMIT / ROWCOUNT, SHOWPLAN) or evicts it — Hikari resets catalog/schema only
+      when the pool configures them. A write hidden in a FUNCTION passes any guard; the server's read-only
+      transaction stops it (measured on MySQL, MariaDB, PostgreSQL; Oracle refuses DML in a query outright).
+      SQL Server and H2 have no server-side read-only mode, and an Oracle PRAGMA AUTONOMOUS_TRANSACTION function
+      commits on its own: there the ACCOUNT is the boundary.
+
+      THE DEDICATED ACCOUNT IS A PRIVATE POOL, NEVER A DataSource BEAN. Boot's DataSourceAutoConfiguration is
+      @ConditionalOnMissingBean(DataSource): a second DataSource bean makes the host pool disappear and moves the
+      module store and every module onto the read-only account, silently. QueryConnections owns a HikariDataSource
+      (readOnly, minIdle 0, initializationFailTimeout -1 so a down database does not stop the app);
+      DbQueryConfigTest pins "exactly one DataSource bean". Recommend it whenever the vendor is SQL Server / H2 /
+      `other`, or the database holds anything an mcp.write holder should not read (step 8).
+
+      ORACLE SPECIFICS (measured): EXPLAIN PLAN inside READ ONLY fails (ORA-00604 — it writes PLAN_TABLE), so plans
+      run in an ordinary transaction that is still rolled back (QueryEnvelope.Mode.PLAN); a READ ONLY transaction
+      answers ORA-01466 for a few seconds after a table's DDL changed.
+
+      LIVE TESTS per vendor on the same DB_TOOLS_TEST_* variables as db_metadata_tools (LiveMySqlQueryTest uses
+      DB_TOOLS_TEST_URL for MySQL or MariaDB): plan form, precision, a write past the guard (and one hidden in a
+      function) refused by the server or rolled back, and the SAME pooled connection coming back clean.
   - id: code_rule
     title: Custom code-review rule (CodeRule SPI)
     requires: [protean.gate.review-enabled=true]

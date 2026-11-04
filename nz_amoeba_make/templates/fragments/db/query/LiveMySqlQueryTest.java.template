@@ -1,0 +1,89 @@
+// LiveQueryContract on MySQL or MariaDB (whichever DB_TOOLS_TEST_URL points at — the same variable and container
+// recipe as db/LiveMetadataTest), plus moving to another database and back.
+package {{PKG}}.db.query;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
+import {{PKG}}.db.DbFixtures;
+
+import org.junit.jupiter.api.Test;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+
+import static {{PKG}}.db.query.QueryFixtures.MAPPER;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+class LiveMySqlQueryTest extends LiveQueryContract {
+
+    private static final String OTHER_DB = "zz_dbquery_other";
+
+    @Override
+    String envPrefix() {
+        return "DB_TOOLS_TEST";
+    }
+
+    @Override
+    String createProbe() {
+        return "CREATE TABLE " + PROBE + " (id BIGINT PRIMARY KEY, name VARCHAR(50) CHARACTER SET utf8mb4,"
+                + " amount DECIMAL(10,2))";
+    }
+
+    /**
+     * ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION from the server — or, with Connector/J, its own client-side refusal
+     * (S1009 "Connection is read-only") for a statement it can SEE is a write. That one never reaches the server;
+     * the server layer is pinned by aWriteHiddenInAFunctionPassesTheGuardAndIsStoppedByTheServer, which the driver
+     * cannot see.
+     */
+    @Override
+    boolean isReadOnlyRefusal(SQLException e) {
+        return e.getErrorCode() == 1792
+                || ("S1009".equals(e.getSQLState()) && e.getMessage().contains("read-only"));
+    }
+
+    @Override
+    String writingFunction() {
+        return "CREATE FUNCTION zz_dbquery_write() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN"
+                + " INSERT INTO " + PROBE + " (id, name) VALUES (97, 'f'); RETURN 1; END";
+    }
+
+    @Override
+    String planFormat() {
+        return "json";
+    }
+
+    /** Connector/J implements setMaxRows with SET SQL_SELECT_LIMIT — it must be back at the default. */
+    @Override
+    void assertCleanVendor(Connection conn) throws SQLException {
+        assertEquals("18446744073709551615", single(conn, "SELECT @@SESSION.sql_select_limit"));
+    }
+
+    @Test
+    void anotherDatabaseIsOpenedAndLeftBehind() throws SQLException {
+        try {
+            DbFixtures.exec(pool, "CREATE DATABASE IF NOT EXISTS " + OTHER_DB,
+                    "CREATE TABLE IF NOT EXISTS " + OTHER_DB + ".ledger (x INT)",
+                    "DELETE FROM " + OTHER_DB + ".ledger", "INSERT INTO " + OTHER_DB + ".ledger VALUES (7)");
+        } catch (IllegalStateException e) {
+            assumeTrue(false, "account cannot CREATE DATABASE");
+        }
+        String before;
+        try (Connection conn = pool.getConnection()) {
+            before = conn.getCatalog();
+        }
+        try {
+            SelectQueryTool tool = QueryFixtures.select(pool);
+            JsonNode s = QueryFixtures.ok(tool, tool.call(MAPPER.createObjectNode()
+                    .put("sql", "SELECT x FROM ledger").put("database", OTHER_DB), null));
+            assertEquals(7, s.path("rows").get(0).get(0).asInt(), s.toString());
+            assertEquals(OTHER_DB, s.path("database").asText(), s.toString());
+            try (Connection conn = pool.getConnection()) {
+                assertEquals(before, conn.getCatalog(), "the pooled connection went back to its database");
+            }
+            assertClean();
+        } finally {
+            DbFixtures.exec(pool, "DROP DATABASE IF EXISTS " + OTHER_DB);
+        }
+    }
+}

@@ -1,4 +1,6 @@
-// [DB METADATA] Schema fragments and argument parsing shared by the two database-metadata tools.
+// [DB METADATA] Schema fragments and argument parsing shared by the two database-metadata tools — and, through the
+// public members, by the db.query tools, which require this bundle (a real compile dependency, unlike the source/
+// bundle below).
 //
 // Same role as SourceToolSchemas in the source/ bundle — and deliberately NOT shared with it. The two bundles are
 // separate optional capabilities, so an import across them would make these tools fail to compile whenever the
@@ -20,10 +22,10 @@ import java.util.Base64;
 import java.util.EnumSet;
 import java.util.Set;
 
-final class DbToolSchemas {
+public final class DbToolSchemas {
 
     /** Upper bound on any identifier argument. Generous for every vendor (MySQL 64, PostgreSQL 63, H2 256). */
-    static final int MAX_NAME_LENGTH = 256;
+    public static final int MAX_NAME_LENGTH = 256;
 
     private DbToolSchemas() {
     }
@@ -52,17 +54,20 @@ final class DbToolSchemas {
      * the modules use. Resolution — against what the DB account can see, system namespaces refused — lives in
      * DbMetadataReader; these are only the declared shapes.
      */
-    static void putLocationArgs(ObjectNode properties) {
+    public static void putLocationArgs(ObjectNode properties) {
         properties.putObject("database").put("type", "string")
                 .put("maxLength", MAX_NAME_LENGTH)
-                .put("description", "Optional. Another database this server's DB account can see (on MySQL, a "
-                        + "database name). Defaults to the one the modules use. System databases (mysql, "
-                        + "information_schema, performance_schema, sys) are refused. amoeba.list_tables reports the "
-                        + "visible names in 'databases'.");
+                .put("description", "Optional. Another database this server's DB account can see (the JDBC "
+                        + "catalog: a database name on MySQL/MariaDB and SQL Server). Defaults to the one the modules "
+                        + "use. System databases (mysql, information_schema, performance_schema, sys; master, model, "
+                        + "msdb, tempdb) are refused. Oracle has no database level — use 'schema'. "
+                        + "amoeba.list_tables reports the visible names in 'databases'.");
         properties.putObject("schema").put("type", "string")
                 .put("maxLength", MAX_NAME_LENGTH)
                 .put("description", "Optional. A schema below the database, for vendors that have one "
-                        + "(PostgreSQL, H2). Not used on MySQL. Defaults to the current schema.");
+                        + "(PostgreSQL, H2, SQL Server, and Oracle, where it is the owning user). Not used on "
+                        + "MySQL/MariaDB. Defaults to the current schema (dbo when 'database' moves SQL Server to "
+                        + "another database). System schemas are refused.");
     }
 
     // ---- output fragments ---------------------------------------------------------------------------------
@@ -87,7 +92,7 @@ final class DbToolSchemas {
      * as null (MySQL has no schema below the database; some drivers report no catalog), and the dispatcher
      * rewrites a successful result into an {@code OUTPUT_SCHEMA_VIOLATION} error when a required field is missing.
      */
-    static void putLocation(ObjectNode properties) {
+    public static void putLocation(ObjectNode properties) {
         properties.putObject("database").put("type", "string")
                 .put("description", "The connection's current catalog — on MySQL, the database name.");
         properties.putObject("schema").put("type", "string")
@@ -123,7 +128,7 @@ final class DbToolSchemas {
     }
 
     /** A string argument, or {@code null} when absent or blank. */
-    static String text(JsonNode args, String field) {
+    public static String text(JsonNode args, String field) {
         String value = args.path(field).asText(null);
         return (value == null || value.isBlank()) ? null : value.strip();
     }
@@ -132,7 +137,7 @@ final class DbToolSchemas {
      * Resolves a requested limit the way {@code protean.list_modules} does: absent/non-numeric → {@code def},
      * {@code 0} → unbounded, negative → {@code def}, positive → capped at {@code max}.
      */
-    static int clampLimit(JsonNode node, int def, int max) {
+    public static int clampLimit(JsonNode node, int def, int max) {
         if (node == null || !node.isNumber()) {
             return def;
         }

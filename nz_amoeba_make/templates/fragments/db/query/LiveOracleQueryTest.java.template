@@ -1,0 +1,71 @@
+// LiveQueryContract on Oracle — EXPLAIN PLAN writes PLAN_TABLE (QueryEnvelope.Mode.PLAN), queries run in
+// SET TRANSACTION READ ONLY, and the session's CURRENT_SCHEMA is where it was afterwards.
+package {{PKG}}.db.query;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class LiveOracleQueryTest extends LiveQueryContract {
+
+    @Override
+    String envPrefix() {
+        return "DB_TOOLS_TEST_ORACLE";
+    }
+
+    @Override
+    String createProbe() {
+        return "CREATE TABLE " + PROBE + " (id NUMBER(19) PRIMARY KEY, name NVARCHAR2(50), amount NUMBER(10,2))";
+    }
+
+    /** ORA-01456: may not perform insert/delete/update operation inside a READ ONLY transaction. */
+    @Override
+    boolean isReadOnlyRefusal(SQLException e) {
+        return e.getErrorCode() == 1456;
+    }
+
+    /**
+     * Oracle refuses DML in a function called from a query on its own (ORA-14551) — before the read-only transaction
+     * is even consulted. The one thing neither stops is a function declared PRAGMA AUTONOMOUS_TRANSACTION, which
+     * commits in a transaction of its own: that is a residual risk only the account's EXECUTE grants close.
+     */
+    @Override
+    String writingFunction() {
+        return "CREATE OR REPLACE FUNCTION zz_dbquery_write RETURN NUMBER IS BEGIN"
+                + " INSERT INTO " + PROBE + " (id, name) VALUES (97, 'f'); RETURN 1; END;";
+    }
+
+    @Override
+    String selectWritingFunction() {
+        return "SELECT zz_dbquery_write() FROM dual";
+    }
+
+    /**
+     * A READ ONLY transaction reads a snapshot, and Oracle maps SCNs to time only every few seconds: a table created
+     * moments before the transaction starts answers ORA-01466 ("table definition has changed"). Real tables are older
+     * than that; this probe is not, so it is given time to settle. (The same error can meet a query sent seconds
+     * after a DDL change in production — retrying shortly after is the remedy.)
+     */
+    @Override
+    void probeCreated() throws SQLException {
+        try {
+            Thread.sleep(6_000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    @Override
+    String planFormat() {
+        return "json";
+    }
+
+    @Override
+    void assertCleanVendor(Connection conn) throws SQLException {
+        assertEquals(single(conn, "SELECT USER FROM dual"),
+                single(conn, "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM dual"));
+        assertEquals("0", single(conn, "SELECT COUNT(*) FROM PLAN_TABLE WHERE STATEMENT_ID LIKE 'AMOEBA%'"),
+                "explain leaves no rows in PLAN_TABLE");
+    }
+}

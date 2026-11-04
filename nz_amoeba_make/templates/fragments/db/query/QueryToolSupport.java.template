@@ -1,0 +1,133 @@
+// [DB QUERY] What amoeba.explain_query and amoeba.select_query share: the authorization classification, the common
+// argument/result schema pieces, error mapping, and the one log line every call leaves.
+//
+// ★ AUTHORIZATION — action() is UPDATE, so the scope policy (ExampleAuthorizer) demands mcp.write. Not READ:
+//   these tools take SQL, the database the modules use often holds more than business data (an authorization
+//   server's tables carry token values and password hashes), and mcp.read is the scope handed out most widely. Even
+//   EXPLAIN is not enough to stay on mcp.read: MySQL reads const tables while planning and reports "Impossible WHERE
+//   noticed after reading const tables" — a yes/no answer about a row's contents, repeatable until the value is out.
+//   mcp.write holders can already deploy in-process Java with the host DataSource, so this grants them nothing new.
+//   UPDATE rather than DEPLOY for the same reason amoeba.define_interface returns it: it lands on mcp.write without
+//   touching the authorizer. Not CUSTOM, which would demand mcp.admin. QueryToolRegistrationTest pins it.
+//
+// ★ NEVER EXPOSE THESE THROUGH A PATH THAT SKIPS THE AUTHORIZER — a REST gateway that calls tool beans directly (an
+//   `ext` package) is read-only only because it names each tool it serves; QueryToolRegistrationTest fails if either
+//   name appears in such a package.
+package {{PKG}}.db.query;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import {{PKG}}.db.DbMetadataReader.Location;
+import {{PKG}}.db.DbToolSchemas;
+import {{PKG}}.db.DbVendor;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.sql.SQLException;
+import java.util.Locale;
+
+final class QueryToolSupport {
+
+    private static final Logger log = LoggerFactory.getLogger("{{PKG}}.db.query.audit");
+
+    /** Upper bound on the SQL text itself; a statement longer than this is not something to hand-check. */
+    static final int MAX_SQL_LENGTH = 100_000;
+
+    static final ModuleActionAuthorizer.ModuleAction ACTION = ModuleActionAuthorizer.ModuleAction.UPDATE;
+
+    private QueryToolSupport() {
+    }
+
+    static void putSqlArgs(ObjectNode properties, String what) {
+        properties.putObject("sql").put("type", "string")
+                .put("minLength", 1)
+                .put("maxLength", MAX_SQL_LENGTH)
+                .put("description", what + " One statement starting with SELECT or WITH … SELECT; a trailing ';' "
+                        + "is fine. Refused before it is sent: a second statement, INSERT/UPDATE/DELETE/MERGE (also "
+                        + "inside a CTE), SELECT INTO, locking reads, sequences, side-effect functions (SLEEP, "
+                        + "pg_sleep, DBMS_*, xp_* …), bind markers, and system schemas (information_schema, "
+                        + "mysql, pg_catalog, sys, master …). A column named like a refused keyword must be quoted.");
+        DbToolSchemas.putLocationArgs(properties);
+    }
+
+    static void putVendor(ObjectNode properties) {
+        ObjectNode vendor = properties.putObject("vendor");
+        vendor.put("type", "string").put("description", "The database product, detected from the connection.");
+        ArrayNode values = vendor.putArray("enum");
+        for (DbVendor v : DbVendor.values()) {
+            if (v != DbVendor.OTHER) {
+                values.add(wire(v));
+            }
+        }
+    }
+
+    static String wire(DbVendor vendor) {
+        return vendor.name().toLowerCase(Locale.ROOT);
+    }
+
+    static void putLocation(ObjectNode out, Location location) {
+        if (location.database() != null) {
+            out.put("database", location.database());
+        }
+        if (location.schema() != null) {
+            out.put("schema", location.schema());
+        }
+    }
+
+    static String text(JsonNode args, String field) {
+        return DbToolSchemas.text(args, field);
+    }
+
+    /** The SQL argument verbatim (not stripped — positions in refusal messages refer to it as sent). */
+    static String sql(JsonNode args) {
+        JsonNode node = args.path("sql");
+        return node.isTextual() ? node.asText() : null;
+    }
+
+    static McpToolResult refused(String tool, McpCallContext ctx, String sql, String reason) {
+        audit(tool, ctx, null, sql, "refused", -1, 0);
+        return McpToolResult.error("not run: " + reason);
+    }
+
+    static McpToolResult failed(String tool, McpCallContext ctx, String sql, SQLException e, long started) {
+        audit(tool, ctx, null, sql, "error", -1, elapsed(started));
+        if (e instanceof QueryConnections.Busy) {
+            return McpToolResult.error(e.getMessage());
+        }
+        String state = e.getSQLState() == null ? "" : "[" + e.getSQLState() + "] ";
+        return McpToolResult.error("database error: " + state + e.getMessage());
+    }
+
+    static long elapsed(long startedNanos) {
+        return (System.nanoTime() - startedNanos) / 1_000_000;
+    }
+
+    /** One line per call: who, which tool, where, what (first 300 chars, one line), how it ended, how long. */
+    static void audit(String tool, McpCallContext ctx, String where, String sql, String outcome, int rows,
+                      long millis) {
+        String caller = ctx == null || ctx.caller() == null ? "-" : ctx.caller().getName();
+        String oneLine = sql == null ? "" : sql.replaceAll("\\s+", " ").strip();
+        if (oneLine.length() > 300) {
+            oneLine = oneLine.substring(0, 300) + "…";
+        }
+        log.info("tool={} caller={} location={} outcome={} rows={} ms={} sql={}", tool, caller,
+                where == null ? "-" : where, outcome, rows, millis, oneLine);
+    }
+
+    static String where(DbVendor vendor, Location location) {
+        StringBuilder sb = new StringBuilder(wire(vendor));
+        if (location.database() != null) {
+            sb.append(':').append(location.database());
+        }
+        if (location.schema() != null) {
+            sb.append(location.database() == null ? ':' : '.').append(location.schema());
+        }
+        return sb.toString();
+    }
+}

@@ -101,11 +101,32 @@ curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '
 
 They take **no SQL** and return **no rows** — everything comes from JDBC `DatabaseMetaData`. `database` (and
 `schema` on PostgreSQL/H2) reaches any database the account is granted, so **the account's grants are the
-boundary** — narrow them to narrow what `mcp.read` holders see. System databases (`mysql`, `information_schema`,
-`performance_schema`, `sys`) are refused even when visible. ENUM/SET columns come back without their allowed
-values (`DatabaseMetaData` does not expose them). `LiveMetadataTest` checks the MySQL behaviour against a
-disposable database when `DB_TOOLS_TEST_URL` is set, and skips otherwise.
+boundary** — narrow them to narrow what `mcp.read` holders see. System namespaces are refused even when visible
+(`mysql`, `information_schema`, `performance_schema`, `sys`; `pg_*`; `master`/`model`/`msdb`/`tempdb`;
+Oracle-maintained users). The vendor is detected from the connection — MySQL, MariaDB, PostgreSQL, H2, Oracle and
+SQL Server all work; Oracle takes `schema` instead of `database`. ENUM/SET columns come back without their allowed
+values (`DatabaseMetaData` does not expose them). The live tests (`LiveMetadataTest` for MySQL/MariaDB,
+`Live{Postgres,Oracle,SqlServer}MetadataTest`) run against a disposable database when their `DB_TOOLS_TEST_*_URL` is
+set, and skip otherwise.
 <!-- [/db_metadata_tools ONLY] -->
+
+<!-- [db_query_tools ONLY] Drop this block when that capability was not selected. -->
+### Check a plan — or look at rows — without deploying anything
+
+Two tools take SQL, so they need **`mcp.write`**, not `mcp.read`:
+
+| Tool | Returns |
+|---|---|
+| `amoeba.explain_query` | the optimizer's **estimated** plan for one query, never executed — JSON (MySQL/MariaDB/PostgreSQL/Oracle), SHOWPLAN XML (SQL Server) or text (H2), plus a readable `text` |
+| `amoeba.select_query` | one read-only query's rows — `maxRows` (default 100, max 1000), ~256 KiB, 10 s, 2000 characters per cell |
+
+Each statement is checked before it is sent (one `SELECT`/`WITH` statement; no writes, locks, sequences,
+side-effect functions or system schemas — quote a column that is named like a refused keyword), then runs in a
+read-only transaction where the vendor has one and is **always rolled back**. The check is a safety layer, **not the
+boundary — the account is**: set `DB_QUERY_URL` / `DB_QUERY_USER` / `DB_QUERY_PASSWORD` to an account granted
+`SELECT` on the business tables only (docs/docker.md). Without it the tools run as the app's own account. SQL Server
+and H2 have no server-side read-only mode, so there the account is all that stops a function that writes.
+<!-- [/db_query_tools ONLY] -->
 
 ### Module authoring rules
 

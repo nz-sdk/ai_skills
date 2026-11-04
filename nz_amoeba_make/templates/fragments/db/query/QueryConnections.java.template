@@ -1,0 +1,162 @@
+// [DB QUERY] Where amoeba.explain_query / amoeba.select_query get a connection, and how many at once.
+//
+// ★ NEVER A DataSource @Bean. Boot's DataSourceAutoConfiguration is @ConditionalOnMissingBean(DataSource): declaring a
+//   second DataSource as a bean makes the HOST pool disappear, and the module store, every deployed module and the
+//   admin audit log would then run on the read-only account — starting cleanly and failing at their first write. Two
+//   DataSource beans also switch off the JdbcTemplate/transaction auto-configs (@ConditionalOnSingleCandidate) and
+//   make a generated MyBatis module's sqlSessionFactory(DataSource) ambiguous. So the dedicated pool is a plain field
+//   of this component, created and closed by it. DbQueryConfigTest pins "exactly one DataSource bean".
+//
+// Dedicated account (amoeba.db-query.datasource.url set): its own small Hikari pool — readOnly at pool level, minIdle
+// 0, and initializationFailTimeout -1 so a down or misconfigured read-only database never stops the app (the tools
+// then answer with the connection error). Otherwise: the host DataSource, borrowed behind the same semaphore, which
+// is what protects the modules' pool from a burst of queries.
+//
+// A connection whose state could not be restored (QueryEnvelope) is EVICTED rather than returned: a pooled connection
+// left on another catalog, in SHOWPLAN mode or with a row limit would silently change the next module query on it.
+package {{PKG}}.db.query;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.stereotype.Component;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+
+@Component
+public class QueryConnections implements DisposableBean {
+
+    private static final Logger log = LoggerFactory.getLogger(QueryConnections.class);
+
+    /** How long a call waits for a free slot before answering "busy". */
+    static final long ACQUIRE_TIMEOUT_MS = 5_000;
+
+    private final DataSource host;
+    private final HikariDataSource dedicated;
+    private final Semaphore permits;
+
+    public QueryConnections(DataSource host, DbQuerySettings settings) {
+        this.host = host;
+        this.permits = new Semaphore(settings.maxConcurrent(), true);
+        this.dedicated = settings.datasource().configured() ? pool(settings) : null;
+    }
+
+    private static HikariDataSource pool(DbQuerySettings settings) {
+        DbQuerySettings.Datasource ds = settings.datasource();
+        HikariConfig config = new HikariConfig();
+        config.setPoolName("amoeba-db-query");
+        config.setJdbcUrl(ds.url());
+        config.setUsername(ds.username());
+        config.setPassword(ds.password());
+        if (!ds.driverClassName().isEmpty()) {
+            config.setDriverClassName(ds.driverClassName());
+        }
+        config.setMaximumPoolSize(settings.maxConcurrent());
+        config.setMinimumIdle(0);
+        config.setReadOnly(true);
+        config.setInitializationFailTimeout(-1);
+        config.setConnectionTimeout(ACQUIRE_TIMEOUT_MS);
+        return new HikariDataSource(config);
+    }
+
+    /** True when a dedicated account is configured — reported by the tools so a caller knows which account ran. */
+    public boolean dedicated() {
+        return dedicated != null;
+    }
+
+    /** A connection plus a slot; close it to give both back. Throws {@link Busy} when no slot frees up in time. */
+    public Lease lease() throws SQLException {
+        try {
+            if (!permits.tryAcquire(ACQUIRE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                throw new Busy();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new Busy();
+        }
+        try {
+            return new Lease((dedicated != null ? dedicated : host).getConnection());
+        } catch (SQLException | RuntimeException e) {
+            permits.release();
+            throw e;
+        }
+    }
+
+    @Override
+    public void destroy() {
+        if (dedicated != null) {
+            dedicated.close();
+        }
+    }
+
+    /** Every query slot is taken. */
+    public static final class Busy extends SQLException {
+        Busy() {
+            super("the query tools are busy (amoeba.db-query.max-concurrent reached) — try again shortly");
+        }
+    }
+
+    public final class Lease implements AutoCloseable {
+
+        private final Connection connection;
+        private boolean broken;
+        private boolean closed;
+
+        private Lease(Connection connection) {
+            this.connection = connection;
+        }
+
+        public Connection connection() {
+            return connection;
+        }
+
+        /** The connection's state is unknown: evict it instead of returning it to the pool. */
+        public void markBroken() {
+            broken = true;
+        }
+
+        boolean broken() {
+            return broken;
+        }
+
+        @Override
+        public void close() {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            try {
+                if (broken) {
+                    evict();
+                } else {
+                    connection.close();
+                }
+            } catch (SQLException | RuntimeException e) {
+                log.warn("db-query: releasing a connection failed: {}", e.toString());
+            } finally {
+                permits.release();
+            }
+        }
+
+        private void evict() throws SQLException {
+            DataSource source = dedicated != null ? dedicated : host;
+            if (source.isWrapperFor(HikariDataSource.class)) {
+                source.unwrap(HikariDataSource.class).evictConnection(connection);
+                log.warn("db-query: evicted a pooled connection whose session state could not be restored");
+                return;
+            }
+            try {
+                connection.abort(Runnable::run);
+            } finally {
+                connection.close();
+            }
+        }
+    }
+}

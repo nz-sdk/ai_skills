@@ -22,6 +22,7 @@
 
 * **nz_amoeba_make:** 생성되는 서버에 VS Code MCP 클라이언트가 붙지 못하던 문제 — path-appended protected resource metadata 와 401 의 `resource_metadata`(RFC 9728) ([#10](https://github.com/nz-sdk/ai_skills/pull/10))
 * **nz_amoeba_make:** 생성 CI 가 bootjar(~35 MB)를 커밋마다 artifact 로 올려(14일 보관) 무료 플랜 조직 Actions 저장 한도(500 MB)를 채우던 문제 — 업로드를 뺀다 ([#11](https://github.com/nz-sdk/ai_skills/pull/11))
+* **nz_amoeba_make:** 생성되는 서버의 기본 protean 을 0.0.2 로 — MCP 보안 권고 2건(GHSA-3wwm-m437-9pmp · GHSA-82hq-333x-wffq)과 `list_runtimes` · `trustTier` 필터 버그가 고쳐진 버전 ([#12](https://github.com/nz-sdk/ai_skills/pull/12))
 
 
 ### 문서

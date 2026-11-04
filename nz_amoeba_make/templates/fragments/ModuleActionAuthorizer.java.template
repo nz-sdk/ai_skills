@@ -24,6 +24,9 @@
 // SCOPE OF THIS BEAN: the MCP surface only. protean calls authorize() from exactly one place (McpDispatcher), so
 // the /platform/** admin REST controllers never reach it — that second deploy path has to be gated in the security
 // filter chain itself, which is what SecurityConfig's method rules do.
+// Since protean 0.0.2 (GHSA-3wwm-m437-9pmp) McpDispatcher also asks READ for resources/read, resources/subscribe and
+// resource completion/complete, with moduleId == null for the module-less resources (protean://modules, ://traces).
+// This policy never reads moduleId, so null needs no handling — but reading resources now needs mcp.read too.
 //
 // PRECONDITION — authentication must exist. With no authenticating filter chain every caller arrives scope-less and
 // EVERYTHING below is denied: module deployment simply stops working, and it reads as a bug rather than as policy.

@@ -92,8 +92,9 @@ a name list).
    variable drives the bind port and the advertised discovery address, so the two cannot drift.
 
 ### 2. Coordinate / version (typed) + maven-central check
-Ask them to **type** the coordinate/version (default `org.htcom:protean:0.0.1` — the released version, live on
-Maven Central since 2026-08-09). Then determine the dependency source:
+Ask them to **type** the coordinate/version (default `org.htcom:protean:0.0.2` — the latest released version, live on
+Maven Central since 2026-10-31; `0.0.1` (2026-08-09) lacks the fixes for two MCP security advisories, so do not
+default to it). Then determine the dependency source:
 - `-SNAPSHOT` → Central never hosts snapshots → **mavenLocal path**; tell them to `./gradlew publishToMavenLocal`
   in the protean repo first.
 - else probe: `curl -sfI https://repo1.maven.org/maven2/org/htcom/protean/<ver>/protean-<ver>.pom` → 2xx =
@@ -282,7 +283,7 @@ Check, and fix or stop on each:
   bootJar-exploding embed runtime with an external artifact, and the required key differs by isolation mode:
   `worker` (process track) ⇒ **`worker.sidecar.jar`** (a flat `-worker` uber-jar; a Boot fat jar will not work —
   the release publishes one as the `worker` classifier artifact, so the user need not build it with shadow),
-  `container` ⇒ **`worker.sidecar.image`** (`ghcr.io/htcom-code/protean-worker:<ver>`, e.g. `:0.0.1`). The other
+  `container` ⇒ **`worker.sidecar.image`** (`ghcr.io/htcom-code/protean-worker:<ver>`, e.g. `:0.0.2`). The other
   key is inert for that track. Protean resolves this at the **first worker spawn (first deploy)**, not at
   startup — a missing value throws
   `IllegalStateException` there, so validate it here and let `setup.sh` re-check it before anything is deployed.
@@ -349,11 +350,11 @@ Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (
 `{{PORT}}` (the port typed in step 1), `{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`.
 
 **★ `{{COORD}}` IS `group:artifact` — WITHOUT THE VERSION.** Step 2 asks the user for a *coordinate* that
-includes it (`org.htcom:protean:0.0.1`), so the two are not the same string and you must split before
-substituting: `{{COORD}}` = `org.htcom:protean`, `{{VERSION}}` = `0.0.1`. Templates combine them themselves —
+includes it (`org.htcom:protean:0.0.2`), so the two are not the same string and you must split before
+substituting: `{{COORD}}` = `org.htcom:protean`, `{{VERSION}}` = `0.0.2`. Templates combine them themselves —
 `build.gradle.template` writes `'{{COORD}}:{{VERSION}}'`, and `setup.sh.template` re-splits `{{COORD}}` with
 `${COORD%%:*}` / `${COORD##*:}` to locate the mavenLocal pom. Substituting the full three-part coordinate yields
-`org.htcom:protean:0.0.1:0.0.1` in `build.gradle` and a broken mavenLocal path in `setup.sh`.
+`org.htcom:protean:0.0.2:0.0.2` in `build.gradle` and a broken mavenLocal path in `setup.sh`.
 
 **★ Placeholders the generator must fill that are NOT typed by the user**, listed here because each is a boolean
 the templates branch on and an unset one silently reads as "false": `{{NAME_KEBAB}}`, `{{IS_SNAPSHOT}}`,

@@ -794,7 +794,9 @@ capabilities:
     note: >-
       Guards the MCP surface ONLY. protean calls authorize() from exactly one place (McpDispatcher), so the
       /platform/** admin REST controllers are a SECOND deploy path that never reaches this bean — gate those in
-      the security filter chain itself (secured_mcp's SecurityConfig does, by HTTP method).
+      the security filter chain itself (secured_mcp's SecurityConfig does, by HTTP method). Since protean 0.0.2 the
+      dispatcher also asks READ for resources/read, resources/subscribe and resource completion/complete, with a
+      null moduleId for module-less resources — a policy that keys on moduleId must handle null.
   - id: interface_spec_validator
     title: Interface-driven module authoring (declare the contract, generate the skeleton, enforce it everywhere)
     requires: [swagger_annotations]

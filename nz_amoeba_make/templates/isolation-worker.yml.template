@@ -24,7 +24,7 @@
     # `jar`; the container track (isolation.mode: container) needs `image` instead. `shared-api` is process-only.
     # sidecar:
     #   jar: /path/to/protean-worker.jar
-    #   image: ghcr.io/htcom-code/protean-worker:0.0.1
+    #   image: ghcr.io/htcom-code/protean-worker:0.0.2
     #   shared-api: /path/to/shared-api.jar
     #
     # [OPTIONAL worker admin-auth] harden the main→worker control plane (hmac|token)

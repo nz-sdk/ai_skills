@@ -16,7 +16,7 @@ selected capabilities. The option surface itself lives in `../reference/protean-
 | `{{PKG_PATH}}` | `{{PKG}}` as a path (`.`→`/`) | `prototype/orders` |
 | `{{PORT}}` | HTTP port — **typed by the user** (default `8080`). Only ever the default in `${SERVER_PORT:{{PORT}}}` | `9200` |
 | `{{COORD}}` | Protean group:artifact | `org.htcom:protean` |
-| `{{VERSION}}` | Protean version | `0.0.1` |
+| `{{VERSION}}` | Protean version | `0.0.2` |
 | `{{DB}}` | database/schema name (default = `<name>`) | `orders` |
 | `{{PW}}` | DB password (default = `<DB>1234`) | `orders1234` |
 

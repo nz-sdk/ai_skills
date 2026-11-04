@@ -806,11 +806,13 @@ capabilities:
         - { src: query/QueryEnvelope.java.template,               to: main }
         - { src: query/PlanReader.java.template,                  to: main }
         - { src: query/RowReader.java.template,                   to: main }
+        - { src: query/RowLimit.java.template,                    to: main }
         - { src: query/QueryToolSupport.java.template,            to: main }
         - { src: query/ExplainQueryTool.java.template,            to: main }
         - { src: query/SelectQueryTool.java.template,             to: main }
         - { src: query/QueryFixtures.java.template,               to: test }
         - { src: query/SqlGuardTest.java.template,                to: test }
+        - { src: query/RowLimitTest.java.template,                to: test }
         - { src: query/QueryEnvelopeTest.java.template,           to: test }
         - { src: query/QueryToolsTest.java.template,              to: test }
         - { src: query/QueryToolRegistrationTest.java.template,   to: test }
@@ -867,7 +869,9 @@ capabilities:
       vendor the DataSource is (MySQL, MariaDB, PostgreSQL, H2, Oracle, SQL Server; detected, not configured).
       amoeba.explain_query returns the optimizer's ESTIMATED plan and never executes the statement (EXPLAIN
       FORMAT=JSON/TREE, EXPLAIN (FORMAT JSON), EXPLAIN PLAN + DBMS_XPLAN, SHOWPLAN_XML). amoeba.select_query returns
-      one read-only query's rows, capped by rows, bytes, time and cell length, decimals kept exact. Both take the
+      one read-only query's rows, capped by rows, bytes, time and cell length, decimals kept exact — and, being a
+      DEVELOPMENT tool, always sends the query with a row limit written into it (RowLimit: LIMIT / FETCH FIRST /
+      TOP or OFFSET-FETCH, added when missing, lowered to maxRows + 1 when larger; `executedSql` shows it). Both take the
       same `database`/`schema` as the metadata tools. Without them an agent that needs to see rows or check an index
       deploys a throwaway module.
     note: >-
@@ -897,6 +901,13 @@ capabilities:
       (readOnly, minIdle 0, initializationFailTimeout -1 so a down database does not stop the app);
       DbQueryConfigTest pins "exactly one DataSource bean". Recommend it whenever the vendor is SQL Server / H2 /
       `other`, or the database holds anything an mcp.write holder should not read (step 8).
+
+      THE ROW LIMIT IS IN THE TEXT, not only setMaxRows: setMaxRows reaches the server on MySQL (SQL_SELECT_LIMIT)
+      and SQL Server (ROWCOUNT) only, so PostgreSQL/Oracle/H2 would still run the whole sort or scan. RowLimit reads
+      the TOP-LEVEL clause only (a subquery's LIMIT limits the subquery); a count that is not a plain number (an
+      expression such as PostgreSQL's LIMIT 10 + 5000) or a PERCENT is refused. SQL Server takes TOP (n), or
+      OFFSET 0 ROWS FETCH NEXT n ROWS ONLY with an ORDER BY, or ORDER BY 1 … for a top-level UNION, inserted before
+      FOR XML/JSON and OPTION (…). explain_query is left as written. Measured on all five vendors.
 
       ORACLE SPECIFICS (measured): EXPLAIN PLAN inside READ ONLY fails (ORA-00604 — it writes PLAN_TABLE), so plans
       run in an ordinary transaction that is still rolled back (QueryEnvelope.Mode.PLAN); a READ ONLY transaction

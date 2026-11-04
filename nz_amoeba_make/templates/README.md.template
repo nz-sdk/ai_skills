@@ -118,7 +118,7 @@ Two tools take SQL, so they need **`mcp.write`**, not `mcp.read`:
 | Tool | Returns |
 |---|---|
 | `amoeba.explain_query` | the optimizer's **estimated** plan for one query, never executed — JSON (MySQL/MariaDB/PostgreSQL/Oracle), SHOWPLAN XML (SQL Server) or text (H2), plus a readable `text` |
-| `amoeba.select_query` | one read-only query's rows — `maxRows` (default 100, max 1000), ~256 KiB, 10 s, 2000 characters per cell |
+| `amoeba.select_query` | one read-only query's rows — `maxRows` (default 100, max 1000), ~256 KiB, 10 s, 2000 characters per cell; the query is always sent with a row limit written in (`LIMIT` / `FETCH FIRST` / `TOP`, shown in `executedSql`) |
 
 Each statement is checked before it is sent (one `SELECT`/`WITH` statement; no writes, locks, sequences,
 side-effect functions or system schemas — quote a column that is named like a refused keyword), then runs in a

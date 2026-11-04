@@ -1,8 +1,9 @@
 // [DB QUERY] Reads a query's rows into JSON inside the caps, without ever holding more than the caps in memory.
 //
-//   · rows   — setMaxRows(limit + 1): the server (MySQL SQL_SELECT_LIMIT, SQL Server ROWCOUNT) or the driver stops
-//              there, so a SELECT * over a large table is never buffered whole — Connector/J would otherwise read
-//              the entire result into memory. The one extra row is how "there was more" is known.
+//   · rows   — the statement already carries a row limit in its text (RowLimit). setMaxRows(limit + 1) is the second
+//              layer: the server (MySQL SQL_SELECT_LIMIT, SQL Server ROWCOUNT) or the driver stops there, so a
+//              result is never buffered whole — Connector/J would otherwise read all of it into memory. The one
+//              extra row is how "there was more" is known.
 //   · bytes  — the serialized size of the rows so far; the row that would cross maxBytes is not added.
 //   · time   — the JDBC timeout bounds the query; the deadline also bounds the reading.
 //   · cells  — text and LOBs are read through bounded streams, binaries as hex; anything longer than maxCellChars is
@@ -45,7 +46,8 @@ final class RowReader {
     private RowReader() {
     }
 
-    static Rows read(Session s, int limit, int maxBytes, int maxCellChars, ObjectMapper mapper) throws SQLException {
+    static Rows read(Session s, String sql, int limit, int maxBytes, int maxCellChars, ObjectMapper mapper)
+            throws SQLException {
         JsonNodeFactory f = mapper.getNodeFactory();
         ArrayNode columns = f.arrayNode();
         ArrayNode rows = f.arrayNode();
@@ -56,7 +58,7 @@ final class RowReader {
         try (Statement st = s.statement()) {
             st.setMaxRows(limit + 1);
             st.setFetchSize(Math.min(limit + 1, 500));
-            if (!st.execute(s.sql())) {
+            if (!st.execute(sql)) {
                 throw new SQLException("the statement returned no result set");
             }
             try (ResultSet rs = st.getResultSet()) {

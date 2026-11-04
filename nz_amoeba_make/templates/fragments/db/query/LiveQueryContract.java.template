@@ -28,6 +28,8 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 import static {{PKG}}.db.query.QueryFixtures.MAPPER;
@@ -157,6 +159,35 @@ abstract class LiveQueryContract {
         SelectQueryTool tool = QueryFixtures.select(pool);
         JsonNode s = QueryFixtures.ok(tool, tool.call(args("SELECT id FROM " + PROBE).put("maxRows", 1), null));
         assertEquals("rows", s.path("truncatedBy").asText(), s.toString());
+        assertClean();
+    }
+
+    /** Query shapes every vendor gets a row limit written into; each must still be valid SQL on the real server. */
+    List<String> limitShapes() {
+        List<String> shapes = new ArrayList<>(List.of(
+                "SELECT id FROM " + PROBE,
+                "SELECT id FROM " + PROBE + " ORDER BY id DESC",
+                "SELECT id FROM " + PROBE + " UNION ALL SELECT id FROM " + PROBE,
+                "WITH x AS (SELECT id FROM " + PROBE + ") SELECT id FROM x",
+                "SELECT id FROM " + PROBE + " -- trailing comment"));
+        shapes.addAll(ownLimitShapes());
+        return shapes;
+    }
+
+    /** The vendor's own row-limit syntax, larger than the cap — it must come back lowered. */
+    abstract List<String> ownLimitShapes();
+
+    @Test
+    void everyQueryIsSentWithARowLimitTheServerAccepts() {
+        SelectQueryTool tool = QueryFixtures.select(pool);
+        for (String sql : limitShapes()) {
+            JsonNode s = QueryFixtures.ok(tool, tool.call(args(sql).put("maxRows", 2), null));
+            assertTrue(s.path("rowCount").asInt() <= 2, sql + " → " + s);
+            assertEquals(3, s.path("limit").asInt(), "maxRows + 1 is written into the statement: " + s);
+            assertTrue(s.path("limitApplied").asText().matches("added|lowered"), sql + " → " + s);
+            assertFalse(s.path("executedSql").asText().equals(sql), "the sent statement carries the limit: " + s);
+            assertTrue(s.path("truncated").asBoolean(), "every shape has more than two rows: " + s);
+        }
         assertClean();
     }
 

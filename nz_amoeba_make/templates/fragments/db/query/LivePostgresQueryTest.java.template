@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.List;
 
 import static {{PKG}}.db.query.QueryFixtures.MAPPER;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -37,6 +38,13 @@ class LivePostgresQueryTest extends LiveQueryContract {
     String writingFunction() {
         return "CREATE FUNCTION zz_dbquery_write() RETURNS int LANGUAGE sql AS $$"
                 + " INSERT INTO " + PROBE + " (id, name) VALUES (97, 'f'); SELECT 1 $$";
+    }
+
+    @Override
+    List<String> ownLimitShapes() {
+        return List.of("SELECT id FROM " + PROBE + " LIMIT ALL",
+                "SELECT id FROM " + PROBE + " ORDER BY id FETCH FIRST 5000 ROWS ONLY",
+                "SELECT id FROM " + PROBE + " OFFSET 0");
     }
 
     @Override

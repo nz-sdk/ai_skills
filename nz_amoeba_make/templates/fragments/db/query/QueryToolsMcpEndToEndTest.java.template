@@ -132,6 +132,8 @@ class QueryToolsMcpEndToEndTest {
         assertFalse(rows.path("isError").asBoolean(), rows.toString());
         assertEquals(1, rows.path("structuredContent").path("rowCount").asInt(), rows.toString());
         assertEquals("회사A", rows.path("structuredContent").path("rows").get(0).get(1).asText(), rows.toString());
+        assertEquals("SELECT comp_cd, comp_nm FROM comp_mst FETCH FIRST 101 ROWS ONLY",
+                rows.path("structuredContent").path("executedSql").asText(), "the sent statement carries a limit");
 
         JsonNode plan = call(agent("mcp.write"), "amoeba.explain_query", sql("SELECT comp_nm FROM comp_mst"));
         assertFalse(plan.path("isError").asBoolean(), plan.toString());

@@ -4,6 +4,7 @@ package {{PKG}}.db.query;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -54,6 +55,13 @@ class LiveOracleQueryTest extends LiveQueryContract {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    @Override
+    List<String> ownLimitShapes() {
+        return List.of("SELECT id FROM " + PROBE + " FETCH FIRST 5000 ROWS ONLY",
+                "SELECT id FROM " + PROBE + " ORDER BY id OFFSET 0 ROWS FETCH NEXT 5000 ROWS ONLY",
+                "SELECT id FROM " + PROBE + " WHERE ROWNUM <= 5000");
     }
 
     @Override

@@ -11,6 +11,7 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.List;
 
 import static {{PKG}}.db.query.QueryFixtures.MAPPER;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -42,6 +43,13 @@ class LiveSqlServerQueryTest extends LiveQueryContract {
     @Override
     boolean isReadOnlyRefusal(SQLException e) {
         return false;
+    }
+
+    @Override
+    List<String> ownLimitShapes() {
+        return List.of("SELECT TOP 5000 id FROM " + PROBE,
+                "SELECT id FROM " + PROBE + " ORDER BY id OFFSET 0 ROWS FETCH NEXT 5000 ROWS ONLY",
+                "SELECT DISTINCT id FROM " + PROBE);
     }
 
     @Override

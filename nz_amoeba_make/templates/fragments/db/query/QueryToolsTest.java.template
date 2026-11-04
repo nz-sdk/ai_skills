@@ -136,6 +136,49 @@ class QueryToolsTest {
         assertEquals(2, s.path("rows").get(0).get(0).asInt());
     }
 
+    // ---- the row limit written into every statement ---------------------------------------------------------
+
+    @Test
+    void aQueryWithoutALimitIsSentWithOne() {
+        SelectQueryTool tool = QueryFixtures.select(db);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp ORDER BY emp_id"), null));
+        assertEquals("SELECT emp_nm FROM emp ORDER BY emp_id FETCH FIRST 101 ROWS ONLY", s.path("executedSql").asText());
+        assertEquals(101, s.path("limit").asInt(), "default maxRows 100, plus the row that tells 'truncated'");
+        assertEquals("added", s.path("limitApplied").asText());
+        assertEquals(3, s.path("rowCount").asInt());
+
+        JsonNode two = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp").put("maxRows", 2), null));
+        assertTrue(two.path("executedSql").asText().endsWith("FETCH FIRST 3 ROWS ONLY"), two.toString());
+        assertTrue(two.path("truncated").asBoolean(), two.toString());
+    }
+
+    @Test
+    void aLargerLimitIsLoweredASmallerOneKept() {
+        SelectQueryTool tool = QueryFixtures.select(db);
+        JsonNode lowered = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp LIMIT 100000"), null));
+        assertEquals("SELECT emp_nm FROM emp LIMIT 101", lowered.path("executedSql").asText());
+        assertEquals("lowered", lowered.path("limitApplied").asText());
+
+        JsonNode kept = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp LIMIT 1"), null));
+        assertEquals("SELECT emp_nm FROM emp LIMIT 1", kept.path("executedSql").asText());
+        assertEquals("kept", kept.path("limitApplied").asText());
+        assertEquals(1, kept.path("rowCount").asInt());
+        assertFalse(kept.path("truncated").asBoolean(), "the query's own limit is not a truncation: " + kept);
+    }
+
+    @Test
+    void aLimitThatIsNotAPlainNumberIsRefused() {
+        SelectQueryTool tool = QueryFixtures.select(db);
+        QueryFixtures.refused(tool.call(args("SELECT emp_nm FROM emp LIMIT 1 + 100000"), null), "plain number");
+    }
+
+    @Test
+    void explainKeepsTheQueryAsWritten() {
+        ExplainQueryTool tool = QueryFixtures.explain(db);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(args("SELECT emp_nm FROM emp"), null));
+        assertFalse(s.path("text").asText().toUpperCase().contains("FETCH FIRST"), "no limit added to a plan: " + s);
+    }
+
     @Test
     void theInputSchemaCapsMaxRowsAndRequiresSql() {
         SelectQueryTool tool = QueryFixtures.select(db);

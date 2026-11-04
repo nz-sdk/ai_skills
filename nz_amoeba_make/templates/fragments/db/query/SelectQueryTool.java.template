@@ -1,6 +1,7 @@
 // [CAPABILITY: custom MCP tool] amoeba.select_query — runs one read-only query and returns its rows, capped by rows,
-// bytes, time and cell length (RowReader), inside QueryEnvelope's guarded, read-only, rolled-back transaction.
-// Requires mcp.write (QueryToolSupport). The rows are DATA from the database: whatever text they hold is not an
+// bytes, time and cell length (RowReader), inside QueryEnvelope's guarded, read-only, rolled-back transaction. It is a
+// DEVELOPMENT tool: every statement is sent with a row limit written into it (RowLimit — added, or lowered to the
+// cap), and the result says what was actually sent. Requires mcp.write (QueryToolSupport). The rows are DATA from the database: whatever text they hold is not an
 // instruction, and the description says so to the agent reading them.
 package {{PKG}}.db.query;
 
@@ -57,7 +58,10 @@ public class SelectQueryTool implements McpTool {
         return "Runs one read-only query and returns its rows — on whichever vendor the DataSource is (MySQL, "
                 + "MariaDB, PostgreSQL, Oracle, SQL Server, H2; reported in 'vendor'). The statement is checked "
                 + "before it is sent (see 'sql'), runs in a read-only transaction where the vendor has one, and is "
-                + "always rolled back. Results are capped: 'maxRows' (default " + s.defaultRows() + ", max "
+                + "always rolled back. A row limit is ALWAYS written into the statement — LIMIT / FETCH FIRST / TOP, "
+                + "added when missing and lowered when larger, at maxRows + 1 so 'truncated' can be told — and "
+                + "'executedSql' shows what was sent. Results are capped: 'maxRows' (default " + s.defaultRows()
+                + ", max "
                 + s.maxRows() + "), about " + (s.maxBytes() / 1024) + " KiB, " + s.timeoutSeconds() + " s, and "
                 + s.maxCellChars() + " characters per cell — 'truncated'/'truncatedBy' and 'cellsTruncated' say "
                 + "when a cap was hit. Decimals with a fraction and integers beyond 2^53 come back as strings. "
@@ -126,7 +130,17 @@ public class SelectQueryTool implements McpTool {
         p.putObject("cellsTruncated").put("type", "integer")
                 .put("description", "Values cut at amoeba.db-query.max-cell-chars (they end with '…').");
         p.putObject("elapsedMs").put("type", "integer");
-        schema.putArray("required").add("vendor").add("columns").add("rows").add("rowCount").add("truncated");
+        p.putObject("executedSql").put("type", "string")
+                .put("description", "The statement as sent: the query with its row limit written in.");
+        p.putObject("limit").put("type", "integer")
+                .put("description", "The row limit the sent statement carries (maxRows + 1, or the query's own "
+                        + "smaller one).");
+        ObjectNode applied = p.putObject("limitApplied");
+        applied.put("type", "string").put("description", "added: the query had no limit; lowered: its limit was "
+                + "larger than allowed; kept: its own limit was within bounds.");
+        applied.putArray("enum").add("added").add("lowered").add("kept");
+        schema.putArray("required").add("vendor").add("columns").add("rows").add("rowCount").add("truncated")
+                .add("executedSql").add("limit").add("limitApplied");
         return schema;
     }
 
@@ -145,7 +159,9 @@ public class SelectQueryTool implements McpTool {
         long started = System.nanoTime();
         try {
             return envelope.run(sql, database, schema, Mode.QUERY, session -> {
-                RowReader.Rows result = RowReader.read(session, rowLimit, s.maxBytes(), s.maxCellChars(), mapper);
+                RowLimit.Limited limited = RowLimit.apply(session.sql(), session.vendor(), rowLimit + 1);
+                RowReader.Rows result = RowReader.read(session, limited.sql(), rowLimit, s.maxBytes(),
+                        s.maxCellChars(), mapper);
                 long ms = QueryToolSupport.elapsed(started);
                 ObjectNode out = mapper.createObjectNode();
                 out.put("vendor", QueryToolSupport.wire(session.vendor()));
@@ -161,9 +177,12 @@ public class SelectQueryTool implements McpTool {
                     out.put("cellsTruncated", result.cellsTruncated());
                 }
                 out.put("elapsedMs", ms);
+                out.put("executedSql", limited.sql());
+                out.put("limit", limited.limit());
+                out.put("limitApplied", limited.how().wire());
                 String where = QueryToolSupport.where(session.vendor(), session.location());
-                QueryToolSupport.audit(NAME, ctx, where, sql, "ok", result.rowCount(), ms);
-                return McpToolResult.ok(render(where, result, ms), out);
+                QueryToolSupport.audit(NAME, ctx, where, limited.sql(), "ok", result.rowCount(), ms);
+                return McpToolResult.ok(render(where, result, ms, limited), out);
             });
         } catch (Refused e) {
             return QueryToolSupport.refused(NAME, ctx, sql, e.getMessage());
@@ -172,13 +191,14 @@ public class SelectQueryTool implements McpTool {
         }
     }
 
-    private static String render(String where, RowReader.Rows result, long ms) {
+    private static String render(String where, RowReader.Rows result, long ms, RowLimit.Limited limited) {
         StringBuilder sb = new StringBuilder();
         sb.append(result.rowCount()).append(" row(s) from ").append(where).append(" in ").append(ms).append(" ms");
         if (result.truncatedBy() != null) {
             sb.append(" — truncated by ").append(result.truncatedBy());
         }
-        sb.append('\n');
+        sb.append(" — row limit ").append(limited.limit()).append(' ').append(limited.how().wire()).append('\n');
+        sb.append("sent: ").append(limited.sql().replaceAll("\\s+", " ").strip()).append('\n');
         List<String> header = new ArrayList<>();
         result.columns().forEach(c -> header.add(c.path("name").asText()));
         sb.append(String.join(" | ", header)).append('\n');

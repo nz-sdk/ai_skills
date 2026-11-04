@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.List;
 
 import static {{PKG}}.db.query.QueryFixtures.MAPPER;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -46,6 +47,12 @@ class LiveMySqlQueryTest extends LiveQueryContract {
     String writingFunction() {
         return "CREATE FUNCTION zz_dbquery_write() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN"
                 + " INSERT INTO " + PROBE + " (id, name) VALUES (97, 'f'); RETURN 1; END";
+    }
+
+    @Override
+    List<String> ownLimitShapes() {
+        return List.of("SELECT id FROM " + PROBE + " LIMIT 5000",
+                "SELECT id FROM " + PROBE + " LIMIT 0, 5000");
     }
 
     @Override

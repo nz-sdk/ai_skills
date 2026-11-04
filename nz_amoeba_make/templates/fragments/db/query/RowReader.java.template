@@ -1,0 +1,188 @@
+// [DB QUERY] Reads a query's rows into JSON inside the caps, without ever holding more than the caps in memory.
+//
+//   · rows   — the statement already carries a row limit in its text (RowLimit). setMaxRows(limit + 1) is the second
+//              layer: the server (MySQL SQL_SELECT_LIMIT, SQL Server ROWCOUNT) or the driver stops there, so a
+//              result is never buffered whole — Connector/J would otherwise read all of it into memory. The one
+//              extra row is how "there was more" is known.
+//   · bytes  — the serialized size of the rows so far; the row that would cross maxBytes is not added.
+//   · time   — the JDBC timeout bounds the query; the deadline also bounds the reading.
+//   · cells  — text and LOBs are read through bounded streams, binaries as hex; anything longer than maxCellChars is
+//              cut and counted in cellsTruncated.
+//
+// Value mapping keeps precision: integers within ±2^53 as JSON numbers (JavaScript's exact range), larger ones and
+// every decimal with a fractional scale as strings (1500.00 stays "1500.00"), doubles as numbers except NaN/±Inf,
+// dates/times as the driver's string, binaries as "0x…".
+package {{PKG}}.db.query;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.NullNode;
+
+import {{PKG}}.db.query.QueryEnvelope.Session;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.Reader;
+import java.math.BigDecimal;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Types;
+import java.util.HexFormat;
+
+final class RowReader {
+
+    /** 2^53: the largest magnitude a JSON number keeps exactly in JavaScript clients. */
+    static final BigDecimal EXACT = BigDecimal.valueOf(9_007_199_254_740_992L);
+
+    /** {@code truncatedBy} is null when every row was read. */
+    record Rows(ArrayNode columns, ArrayNode rows, int rowCount, String truncatedBy, int cellsTruncated) {
+    }
+
+    private RowReader() {
+    }
+
+    static Rows read(Session s, String sql, int limit, int maxBytes, int maxCellChars, ObjectMapper mapper)
+            throws SQLException {
+        JsonNodeFactory f = mapper.getNodeFactory();
+        ArrayNode columns = f.arrayNode();
+        ArrayNode rows = f.arrayNode();
+        int count = 0;
+        long bytes = 0;
+        String truncatedBy = null;
+        int[] cut = {0};
+        try (Statement st = s.statement()) {
+            st.setMaxRows(limit + 1);
+            st.setFetchSize(Math.min(limit + 1, 500));
+            if (!st.execute(sql)) {
+                throw new SQLException("the statement returned no result set");
+            }
+            try (ResultSet rs = st.getResultSet()) {
+                ResultSetMetaData md = rs.getMetaData();
+                int n = md.getColumnCount();
+                int[] types = new int[n + 1];
+                for (int i = 1; i <= n; i++) {
+                    types[i] = md.getColumnType(i);
+                    columns.addObject().put("name", md.getColumnLabel(i)).put("type", md.getColumnTypeName(i));
+                }
+                while (rs.next()) {
+                    if (count == limit) {
+                        truncatedBy = "rows";
+                        break;
+                    }
+                    if (s.pastDeadline()) {
+                        truncatedBy = "time";
+                        break;
+                    }
+                    ArrayNode row = f.arrayNode(n);
+                    for (int i = 1; i <= n; i++) {
+                        row.add(value(rs, i, types[i], maxCellChars, f, cut));
+                    }
+                    long size = size(mapper, row);
+                    if (bytes + size > maxBytes && count > 0) {
+                        truncatedBy = "bytes";
+                        break;
+                    }
+                    bytes += size;
+                    rows.add(row);
+                    count++;
+                }
+            }
+        }
+        return new Rows(columns, rows, count, truncatedBy, cut[0]);
+    }
+
+    private static long size(ObjectMapper mapper, JsonNode row) {
+        try {
+            return mapper.writeValueAsBytes(row).length;
+        } catch (JsonProcessingException e) {
+            return row.toString().length();
+        }
+    }
+
+    static JsonNode value(ResultSet rs, int i, int type, int maxChars, JsonNodeFactory f, int[] cut)
+            throws SQLException {
+        switch (type) {
+            case Types.BIT, Types.BOOLEAN -> {
+                boolean b = rs.getBoolean(i);
+                return rs.wasNull() ? NullNode.getInstance() : f.booleanNode(b);
+            }
+            case Types.TINYINT, Types.SMALLINT, Types.INTEGER, Types.BIGINT, Types.DECIMAL, Types.NUMERIC -> {
+                BigDecimal d = rs.getBigDecimal(i);
+                if (d == null) {
+                    return NullNode.getInstance();
+                }
+                if (d.scale() <= 0 && d.abs().compareTo(EXACT) <= 0) {
+                    return f.numberNode(d.longValueExact());
+                }
+                return f.textNode(d.toPlainString());
+            }
+            case Types.REAL, Types.FLOAT, Types.DOUBLE -> {
+                double d = rs.getDouble(i);
+                if (rs.wasNull()) {
+                    return NullNode.getInstance();
+                }
+                return Double.isFinite(d) ? f.numberNode(d) : f.textNode(Double.toString(d));
+            }
+            case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY, Types.BLOB -> {
+                try (InputStream in = rs.getBinaryStream(i)) {
+                    if (in == null) {
+                        return NullNode.getInstance();
+                    }
+                    int maxBytes = Math.max(1, maxChars / 2);
+                    byte[] buf = in.readNBytes(maxBytes + 1);
+                    boolean longer = buf.length > maxBytes;
+                    String hex = "0x" + HexFormat.of().formatHex(buf, 0, Math.min(buf.length, maxBytes));
+                    if (longer) {
+                        cut[0]++;
+                        return f.textNode(hex + "…");
+                    }
+                    return f.textNode(hex);
+                } catch (IOException e) {
+                    throw new SQLException("reading a binary value failed: " + e.getMessage(), e);
+                }
+            }
+            case Types.CLOB, Types.NCLOB, Types.LONGVARCHAR, Types.LONGNVARCHAR -> {
+                try (Reader in = rs.getCharacterStream(i)) {
+                    if (in == null) {
+                        return NullNode.getInstance();
+                    }
+                    char[] buf = new char[maxChars + 1];
+                    int read = 0;
+                    while (read < buf.length) {
+                        int r = in.read(buf, read, buf.length - read);
+                        if (r < 0) {
+                            break;
+                        }
+                        read += r;
+                    }
+                    return text(new String(buf, 0, read), maxChars, f, cut);
+                } catch (IOException e) {
+                    throw new SQLException("reading a text value failed: " + e.getMessage(), e);
+                }
+            }
+            default -> {
+                String v;
+                try {
+                    v = rs.getString(i);
+                } catch (SQLException e) {
+                    Object o = rs.getObject(i);
+                    v = o == null ? null : o.toString();
+                }
+                return v == null ? NullNode.getInstance() : text(v, maxChars, f, cut);
+            }
+        }
+    }
+
+    private static JsonNode text(String v, int maxChars, JsonNodeFactory f, int[] cut) {
+        if (v.length() <= maxChars) {
+            return f.textNode(v);
+        }
+        cut[0]++;
+        return f.textNode(v.substring(0, maxChars) + "…");
+    }
+}

@@ -1,0 +1,55 @@
+// [DB METADATA] Which database product a connection talks to.
+//
+// The metadata tools read JDBC DatabaseMetaData, which is portable — but not uniformly: system namespaces, where
+// comments live, and a few type codes differ per product. Those differences are keyed on this enum, detected from
+// the connection itself rather than configured, because the DataSource is the deployment's and may be any vendor.
+//
+// OTHER is not an error for the metadata tools — they keep working with the generic rules. Anything that must
+// understand the vendor's SQL dialect has to refuse OTHER instead of guessing.
+package {{PKG}}.db;
+
+import java.sql.DatabaseMetaData;
+import java.sql.SQLException;
+import java.util.Locale;
+
+public enum DbVendor {
+
+    MYSQL, MARIADB, POSTGRESQL, H2, ORACLE, SQLSERVER, OTHER;
+
+    /**
+     * Reads the product from the driver. MariaDB is recognized both by its own driver ("MariaDB") and through
+     * Connector/J, which reports "MySQL" with a version string such as {@code 11.4.2-MariaDB}.
+     */
+    public static DbVendor detect(DatabaseMetaData meta) throws SQLException {
+        return fromProduct(meta.getDatabaseProductName(), meta.getDatabaseProductVersion());
+    }
+
+    static DbVendor fromProduct(String productName, String productVersion) {
+        String product = productName == null ? "" : productName.toLowerCase(Locale.ROOT);
+        String version = productVersion == null ? "" : productVersion.toLowerCase(Locale.ROOT);
+        if (product.contains("mariadb") || (product.contains("mysql") && version.contains("mariadb"))) {
+            return MARIADB;
+        }
+        if (product.contains("mysql")) {
+            return MYSQL;
+        }
+        if (product.contains("postgresql")) {
+            return POSTGRESQL;
+        }
+        if (product.equals("h2")) {
+            return H2;
+        }
+        if (product.contains("oracle")) {
+            return ORACLE;
+        }
+        if (product.contains("microsoft sql server")) {
+            return SQLSERVER;
+        }
+        return OTHER;
+    }
+
+    /** True for the MySQL family, which shares the dialect, the catalog-as-database model and the system databases. */
+    public boolean isMySqlFamily() {
+        return this == MYSQL || this == MARIADB;
+    }
+}

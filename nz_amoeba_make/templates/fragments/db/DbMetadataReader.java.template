@@ -20,6 +20,14 @@
 //     it would run on every call against any database with one uncommented table, for nothing. If a driver ever
 //     stops reporting them, LiveMetadataTest is what fails; do not "fix" it by editing the shared URL, which
 //     every deployed module uses.
+//     The two exceptions are vendors whose driver NEVER reports them: ojdbc leaves REMARKS null unless the
+//     connection sets remarksReporting (which slows every metadata call), and mssql-jdbc has no source for them —
+//     SQL Server keeps comments as MS_Description extended properties. On those two only, comments are read from
+//     ALL_TAB_COMMENTS/ALL_COL_COMMENTS and sys.extended_properties, best effort: a refused read leaves them null.
+//   · THE VENDOR IS DETECTED, NOT CONFIGURED (DbVendor). It decides the system namespaces (SystemNamespaces), the
+//     comment source above, and three location rules: Oracle has no database level (`database` is refused with a
+//     pointer to `schema`), SQL Server opens another database at its dbo schema (otherwise every schema's tables
+//     would be mixed into one list), and Oracle's recycle bin (BIN$…) is not a table anyone created.
 package {{PKG}}.db;
 
 import org.springframework.stereotype.Component;
@@ -38,7 +46,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.TreeMap;
 
 @Component
@@ -48,12 +55,10 @@ public class DbMetadataReader {
     static final int MAX_CANDIDATES = 10;
 
     /**
-     * Namespaces never opened, compared case-insensitively: MySQL's mysql · information_schema · performance_schema
-     * · sys, PostgreSQL's pg_catalog · pg_toast (and information_schema), H2's INFORMATION_SCHEMA. They are also left
-     * out of the visible names the tools report, so an agent is never offered one.
+     * Sizes at or above this are a vendor's "unbounded" marker rather than a declared length — SQL Server reports
+     * nvarchar(max) as 1073741823 (2^30−1) and varchar(max) as 2147483647 — and are shown as {@code (max)}.
      */
-    static final Set<String> SYSTEM_NAMESPACES =
-            Set.of("information_schema", "mysql", "performance_schema", "sys", "pg_catalog", "pg_toast");
+    static final int MAX_SIZE_MARKER = 1_073_741_823;
 
     private final DataSource dataSource;
 
@@ -144,18 +149,31 @@ public class DbMetadataReader {
     public sealed interface Lookup permits Found, NotFound, Ambiguous, UnknownLocation {
     }
 
+    /** Outcome of resolving {@code database}/{@code schema} on a connection the caller owns. */
+    public sealed interface Resolution permits Located, UnknownLocation {
+    }
+
+    /** A location that can be opened, with what was learned about the server while resolving it. */
+    public record Located(Location location, DbVendor vendor, SystemNamespaces system) implements Resolution {
+    }
+
     /**
      * A requested database or schema that cannot be opened: not visible to the account, or a system namespace.
      * {@code visible} is what could have been asked for instead.
      */
-    public record UnknownLocation(String kind, String requested, boolean system, List<String> visible)
-            implements Listing, Lookup {
+    public record UnknownLocation(String kind, String requested, boolean system, List<String> visible, String hint)
+            implements Listing, Lookup, Resolution {
+
+        public UnknownLocation(String kind, String requested, boolean system, List<String> visible) {
+            this(kind, requested, system, visible, null);
+        }
 
         public String message() {
             String head = system
                     ? kind + " '" + requested + "' is a system " + kind + " and is not visible through these tools"
                     : kind + " '" + requested + "' is not visible to this server's database account";
-            return head + (visible.isEmpty() ? "." : ". Visible " + kind + "s: " + String.join(", ", visible) + ".");
+            String tail = visible.isEmpty() ? "." : ". Visible " + kind + "s: " + String.join(", ", visible) + ".";
+            return head + tail + (hint == null ? "" : " " + hint);
         }
     }
 
@@ -176,14 +194,14 @@ public class DbMetadataReader {
      */
     public Listing listTables(String database, String schema) throws SQLException {
         try (Connection conn = dataSource.getConnection()) {
-            DatabaseMetaData meta = conn.getMetaData();
-            Resolved resolved = locate(conn, meta, database, schema);
+            Ctx ctx = Ctx.of(conn);
+            Resolved resolved = locate(ctx, database, schema);
             if (resolved.failure() != null) {
                 return resolved.failure();
             }
             Location location = resolved.location();
-            return new TableList(location, readTables(conn, location), visible(catalogs(meta)),
-                    visible(schemas(meta, location.database())));
+            return new TableList(location, readTables(ctx, location), visible(ctx, catalogs(ctx)),
+                    visible(ctx, schemas(ctx.meta(), location.database())));
         }
     }
 
@@ -194,8 +212,8 @@ public class DbMetadataReader {
      */
     public Lookup describe(String requested, String database, String schema) throws SQLException {
         try (Connection conn = dataSource.getConnection()) {
-            DatabaseMetaData meta = conn.getMetaData();
-            Resolved resolved = locate(conn, meta, database, schema);
+            Ctx ctx = Ctx.of(conn);
+            Resolved resolved = locate(ctx, database, schema);
             if (resolved.failure() != null) {
                 return resolved.failure();
             }
@@ -208,10 +226,10 @@ public class DbMetadataReader {
                 String rest = unquote(wanted.substring(dot + 1));
                 if (qualifier.equalsIgnoreCase(location.database()) || qualifier.equalsIgnoreCase(location.schema())) {
                     wanted = rest;
-                } else if (isSystem(qualifier)) {
-                    return new UnknownLocation("database", qualifier, true, visible(catalogs(meta)));
+                } else if (ctx.system().contains(qualifier)) {
+                    return new UnknownLocation("database", qualifier, true, visible(ctx, catalogs(ctx)));
                 } else if (database == null && schema == null) {
-                    Location moved = locateQualifier(conn, meta, qualifier);
+                    Location moved = locateQualifier(ctx, qualifier);
                     if (moved != null) {
                         location = moved;
                         wanted = rest;
@@ -220,7 +238,7 @@ public class DbMetadataReader {
             }
             String name = wanted;
 
-            List<TableSummary> tables = readTables(conn, location);
+            List<TableSummary> tables = readTables(ctx, location);
 
             List<TableSummary> exact = tables.stream().filter(t -> t.name().equals(name)).toList();
             List<TableSummary> matches = exact.isEmpty()
@@ -241,8 +259,23 @@ public class DbMetadataReader {
                         .toList();
                 return new NotFound(location, candidates);
             }
-            return new Found(readDetail(conn, location, matches.get(0)));
+            return new Found(readDetail(ctx, location, matches.get(0)));
         }
+    }
+
+    /**
+     * Resolves the optional {@code database}/{@code schema} on a connection the CALLER owns, with exactly the rules
+     * the two metadata tools apply (visible to the account, system namespaces refused, vendor location rules).
+     *
+     * <p>For the query tools: they resolve on the connection that will run the statement, so the boundary is the
+     * account that connection belongs to — which may be a dedicated read-only account, not the host DataSource's.
+     * Reads metadata only; the connection's state is not changed.
+     */
+    public static Resolution resolveLocation(Connection conn, String database, String schema) throws SQLException {
+        Ctx ctx = Ctx.of(conn);
+        Resolved resolved = locate(ctx, database, schema);
+        return resolved.failure() != null ? resolved.failure()
+                : new Located(resolved.location(), ctx.vendor(), ctx.system());
     }
 
     // ---- internals ----------------------------------------------------------------------------------------
@@ -251,9 +284,18 @@ public class DbMetadataReader {
     private record Resolved(Location location, UnknownLocation failure) {
     }
 
-    static boolean isSystem(String name) {
-        return name != null && SYSTEM_NAMESPACES.contains(name.toLowerCase(Locale.ROOT));
+    /** One connection with what every read on it needs: its metadata, its vendor, and that vendor's system names. */
+    private record Ctx(Connection conn, DatabaseMetaData meta, DbVendor vendor, SystemNamespaces system) {
+
+        static Ctx of(Connection conn) throws SQLException {
+            DatabaseMetaData meta = conn.getMetaData();
+            DbVendor vendor = DbVendor.detect(meta);
+            return new Ctx(conn, meta, vendor, SystemNamespaces.of(conn, vendor));
+        }
     }
+
+    /** SQL Server's default schema in a database the connection is not currently in. */
+    static final String SQLSERVER_DEFAULT_SCHEMA = "dbo";
 
     private static Location current(Connection conn) throws SQLException {
         String schema;
@@ -267,36 +309,46 @@ public class DbMetadataReader {
 
     /**
      * Resolves the optional {@code database}/{@code schema} against what the account can see. A database other than
-     * the current one drops the current schema (MySQL has no schema level; PostgreSQL cannot leave its database), the
-     * current one named explicitly keeps it.
+     * the current one drops the current schema (MySQL has no schema level; PostgreSQL cannot leave its database) —
+     * except on SQL Server, where it opens at {@code dbo}, the schema every database has and the one an unqualified
+     * name resolves to; with no schema at all getTables would mix every schema's tables into one list. The current
+     * database named explicitly keeps the current schema.
      */
-    private static Resolved locate(Connection conn, DatabaseMetaData meta, String database, String schema)
-            throws SQLException {
-        Location current = current(conn);
+    private static Resolved locate(Ctx ctx, String database, String schema) throws SQLException {
+        Location current = current(ctx.conn());
         String catalog = current.database();
         String sch = current.schema();
         if (database != null) {
-            List<String> all = catalogs(meta);
-            if (isSystem(database)) {
-                return new Resolved(null, new UnknownLocation("database", database, true, visible(all)));
+            if (ctx.vendor() == DbVendor.ORACLE) {
+                // Oracle has no level above the schema: getCatalogs() is empty, so every name would be "not visible"
+                // and the caller would never learn why. Say where the other application's tables actually live.
+                return new Resolved(null, new UnknownLocation("database", database, false, List.of(),
+                        "Oracle has no database level — pass it as 'schema' (the owning user) instead."));
+            }
+            List<String> all = catalogs(ctx);
+            if (ctx.system().contains(database)) {
+                return new Resolved(null, new UnknownLocation("database", database, true, visible(ctx, all)));
             }
             String found = match(all, database);
             if (found == null) {
-                return new Resolved(null, new UnknownLocation("database", database, false, visible(all)));
+                return new Resolved(null, new UnknownLocation("database", database, false, visible(ctx, all),
+                        ctx.vendor() == DbVendor.POSTGRESQL
+                                ? "A PostgreSQL connection cannot open another database — only its schemas ('schema')."
+                                : null));
             }
             if (!found.equals(catalog)) {
-                sch = null;
+                sch = ctx.vendor() == DbVendor.SQLSERVER ? SQLSERVER_DEFAULT_SCHEMA : null;
             }
             catalog = found;
         }
         if (schema != null) {
-            List<String> all = schemas(meta, catalog);
-            if (isSystem(schema)) {
-                return new Resolved(null, new UnknownLocation("schema", schema, true, visible(all)));
+            List<String> all = schemas(ctx.meta(), catalog);
+            if (ctx.system().contains(schema)) {
+                return new Resolved(null, new UnknownLocation("schema", schema, true, visible(ctx, all)));
             }
             String found = match(all, schema);
             if (found == null) {
-                return new Resolved(null, new UnknownLocation("schema", schema, false, visible(all)));
+                return new Resolved(null, new UnknownLocation("schema", schema, false, visible(ctx, all)));
             }
             sch = found;
         }
@@ -304,21 +356,30 @@ public class DbMetadataReader {
     }
 
     /** A table-name qualifier naming another visible database, else another visible schema; null when neither. */
-    private static Location locateQualifier(Connection conn, DatabaseMetaData meta, String qualifier)
-            throws SQLException {
-        if (match(visible(catalogs(meta)), qualifier) != null) {
-            return locate(conn, meta, qualifier, null).location();
+    private static Location locateQualifier(Ctx ctx, String qualifier) throws SQLException {
+        if (ctx.vendor() != DbVendor.ORACLE && match(visible(ctx, catalogs(ctx)), qualifier) != null) {
+            return locate(ctx, qualifier, null).location();
         }
-        Location current = current(conn);
-        if (match(visible(schemas(meta, current.database())), qualifier) != null) {
-            return locate(conn, meta, null, qualifier).location();
+        Location current = current(ctx.conn());
+        if (match(visible(ctx, schemas(ctx.meta(), current.database())), qualifier) != null) {
+            return locate(ctx, null, qualifier).location();
         }
         return null;
     }
 
-    private static List<String> catalogs(DatabaseMetaData meta) throws SQLException {
+    /**
+     * The databases a `database` argument may name. On PostgreSQL that is the current one only: pgjdbc's getCatalogs()
+     * lists every database on the server, but a connection cannot leave its own — setCatalog is a no-op and
+     * getTables on another catalog answers an empty list, so "database X has 0 tables" would be reported for a
+     * database that was never read.
+     */
+    private static List<String> catalogs(Ctx ctx) throws SQLException {
+        if (ctx.vendor() == DbVendor.POSTGRESQL) {
+            String current = blankToNull(ctx.conn().getCatalog());
+            return current == null ? List.of() : List.of(current);
+        }
         List<String> names = new ArrayList<>();
-        try (ResultSet rs = meta.getCatalogs()) {
+        try (ResultSet rs = ctx.meta().getCatalogs()) {
             while (rs.next()) {
                 names.add(rs.getString("TABLE_CAT"));
             }
@@ -338,9 +399,9 @@ public class DbMetadataReader {
     }
 
     /** Sorted, without blanks and without system namespaces — the names worth offering to a caller. */
-    private static List<String> visible(List<String> names) {
+    private static List<String> visible(Ctx ctx, List<String> names) {
         return names.stream()
-                .filter(n -> n != null && !n.isBlank() && !isSystem(n))
+                .filter(n -> n != null && !n.isBlank() && !ctx.system().contains(n))
                 .distinct()
                 .sorted(Comparator.comparing((String n) -> n.toLowerCase(Locale.ROOT)).thenComparing(n -> n))
                 .toList();
@@ -368,32 +429,43 @@ public class DbMetadataReader {
         return s;
     }
 
-    private List<TableSummary> readTables(Connection conn, Location location) throws SQLException {
-        DatabaseMetaData meta = conn.getMetaData();
+    private List<TableSummary> readTables(Ctx ctx, Location location) throws SQLException {
+        DatabaseMetaData meta = ctx.meta();
         String escape = meta.getSearchStringEscape();
         List<TableSummary> tables = new ArrayList<>();
         try (ResultSet rs = meta.getTables(location.database(), like(location.schema(), escape), null, null)) {
             while (rs.next()) {
                 Optional<TableType> type = TableType.fromJdbc(rs.getString("TABLE_TYPE"));
-                if (type.isEmpty()) {
-                    continue;
+                String name = rs.getString("TABLE_NAME");
+                if (type.isEmpty() || (ctx.vendor() == DbVendor.ORACLE && name.startsWith("BIN$"))) {
+                    continue;   // BIN$… is a dropped table waiting in Oracle's recycle bin
                 }
-                tables.add(new TableSummary(rs.getString("TABLE_NAME"), type.get(),
-                        comment(rs.getString("REMARKS"), type.get())));
+                tables.add(new TableSummary(name, type.get(), comment(rs.getString("REMARKS"), type.get())));
             }
+        }
+        Map<String, String> comments = VendorComments.tables(ctx.conn(), ctx.vendor(), location);
+        if (!comments.isEmpty()) {
+            tables.replaceAll(t -> t.comment() != null || !comments.containsKey(t.name()) ? t
+                    : new TableSummary(t.name(), t.type(), comments.get(t.name())));
         }
         tables.sort(Comparator.comparing((TableSummary t) -> t.name().toLowerCase(Locale.ROOT))
                 .thenComparing(TableSummary::name));
         return tables;
     }
 
-    private TableDetail readDetail(Connection conn, Location location, TableSummary table) throws SQLException {
-        DatabaseMetaData meta = conn.getMetaData();
+    private TableDetail readDetail(Ctx ctx, Location location, TableSummary table) throws SQLException {
+        DatabaseMetaData meta = ctx.meta();
         String catalog = location.database();
         String schema = location.schema();
         String name = table.name();
 
-        List<Column> columns = readColumns(meta, catalog, schema, name);
+        List<Column> columns = readColumns(meta, ctx.vendor(), catalog, schema, name);
+        Map<String, String> columnComments = VendorComments.columns(ctx.conn(), ctx.vendor(), location, name);
+        if (!columnComments.isEmpty()) {
+            columns.replaceAll(c -> c.comment() != null || !columnComments.containsKey(c.name()) ? c
+                    : new Column(c.name(), c.position(), c.type(), c.size(), c.scale(), c.nullable(),
+                    c.defaultValue(), c.autoIncrement(), columnComments.get(c.name())));
+        }
         PrimaryKey primaryKey = readPrimaryKey(meta, catalog, schema, name);
         List<Index> indexes = table.type() == TableType.TABLE
                 ? readIndexes(meta, catalog, schema, name, primaryKey) : List.of();
@@ -410,8 +482,8 @@ public class DbMetadataReader {
         return new TableDetail(location, table, columns, primaryKey, indexes, foreignKeys, referencedBy);
     }
 
-    private static List<Column> readColumns(DatabaseMetaData meta, String catalog, String schema, String table)
-            throws SQLException {
+    private static List<Column> readColumns(DatabaseMetaData meta, DbVendor vendor, String catalog, String schema,
+                                            String table) throws SQLException {
         String escape = meta.getSearchStringEscape();
         List<Column> columns = new ArrayList<>();
         try (ResultSet rs = meta.getColumns(catalog, like(schema, escape), like(table, escape), "%")) {
@@ -420,13 +492,18 @@ public class DbMetadataReader {
                     continue;   // the LIKE match leaked a sibling table — see the header
                 }
                 int dataType = rs.getInt("DATA_TYPE");
-                String typeName = rs.getString("TYPE_NAME");
+                String typeName = typeName(rs.getString("TYPE_NAME"));
                 Integer size = intOrNull(rs, "COLUMN_SIZE");
                 Integer digits = intOrNull(rs, "DECIMAL_DIGITS");
                 boolean sized = isSized(dataType, typeName);
                 boolean scaled = dataType == Types.DECIMAL || dataType == Types.NUMERIC;
-                Integer shownSize = sized || scaled ? size : null;
-                Integer shownScale = scaled ? digits : null;
+                // Oracle's bare NUMBER (no precision) arrives as size 0 / scale −127: it has neither, so show neither.
+                Integer shownSize = (sized || scaled) && size != null && size > 0 ? size : null;
+                Integer shownScale = scaled && shownSize != null && digits != null && digits >= 0 ? digits : null;
+                String defaultValue = rs.getString("COLUMN_DEF");
+                if (vendor == DbVendor.ORACLE && defaultValue != null) {
+                    defaultValue = defaultValue.strip();   // ojdbc returns the DEFAULT clause as typed, newline and all
+                }
 
                 int nullable = rs.getInt("NULLABLE");
                 boolean isNullable = nullable == DatabaseMetaData.columnNullableUnknown
@@ -440,7 +517,7 @@ public class DbMetadataReader {
                         shownSize,
                         shownScale,
                         isNullable,
-                        rs.getString("COLUMN_DEF"),
+                        defaultValue,
                         "YES".equalsIgnoreCase(rs.getString("IS_AUTOINCREMENT")),
                         blankToNull(rs.getString("REMARKS"))));
             }
@@ -463,12 +540,28 @@ public class DbMetadataReader {
         };
     }
 
-    private static String displayType(String typeName, Integer size, Integer scale) {
+    static String displayType(String typeName, Integer size, Integer scale) {
         String base = typeName == null ? "?" : typeName;
         if (size == null) {
             return base;
         }
-        return scale == null ? base + "(" + size + ")" : base + "(" + size + "," + scale + ")";
+        if (scale == null) {
+            return base + "(" + (size >= MAX_SIZE_MARKER ? "max" : size) + ")";
+        }
+        return base + "(" + size + "," + scale + ")";
+    }
+
+    /**
+     * mssql-jdbc reports an IDENTITY column's type as {@code int identity}; the column's {@code autoIncrement} already
+     * says that, and the suffix would make the type read differently from the DDL that declared it.
+     */
+    static String typeName(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String t = raw.strip();
+        return t.regionMatches(true, Math.max(0, t.length() - 9), " identity", 0, 9) && t.length() > 9
+                ? t.substring(0, t.length() - 9) : t;
     }
 
     private static PrimaryKey readPrimaryKey(DatabaseMetaData meta, String catalog, String schema, String table)
@@ -496,6 +589,9 @@ public class DbMetadataReader {
                                            PrimaryKey primaryKey) throws SQLException {
         Map<String, TreeMap<Short, String>> columnsByIndex = new LinkedHashMap<>();
         Map<String, Boolean> uniqueByIndex = new HashMap<>();
+        // approximate=TRUE IS LOAD-BEARING, not a speed hint. With false, ojdbc runs ANALYZE TABLE … COMPUTE
+        // STATISTICS to make the statistic row exact — a write to the dictionary, on a read-only tool, against
+        // whatever table the caller named. The statistic row is discarded below anyway.
         try (ResultSet rs = meta.getIndexInfo(catalog, schema, table, false, true)) {
             while (rs.next()) {
                 String indexName = rs.getString("INDEX_NAME");
@@ -543,8 +639,8 @@ public class DbMetadataReader {
                     : qualified(rs.getString("FKTABLE_CAT"), rs.getString("FKTABLE_SCHEM"),
                     rs.getString("FKTABLE_NAME"), location);
             String fkName = blankToNull(rs.getString("FK_NAME"));
-            String onUpdate = rule(rs.getInt("UPDATE_RULE"));
-            String onDelete = rule(rs.getInt("DELETE_RULE"));
+            String onUpdate = rule(intOrNull(rs, "UPDATE_RULE"));
+            String onDelete = rule(intOrNull(rs, "DELETE_RULE"));
             String key = (fkName == null ? "" : fkName) + "\u0000" + otherTable;
             Part part = parts.computeIfAbsent(key,
                     k -> new Part(fkName, otherTable, new TreeMap<>(), onUpdate, onDelete));
@@ -576,7 +672,15 @@ public class DbMetadataReader {
         return sb.append(table).toString();
     }
 
-    private static String rule(int code) {
+    /**
+     * A JDBC referential-action code as SQL. NULL is NO ACTION — and must be checked before the switch: ojdbc reports
+     * UPDATE_RULE as NULL (Oracle has no ON UPDATE), and {@code getInt} turns NULL into 0, which is
+     * {@code importedKeyCascade}. Read with getInt, every Oracle foreign key claimed ON UPDATE CASCADE.
+     */
+    static String rule(Integer code) {
+        if (code == null) {
+            return "NO ACTION";
+        }
         return switch (code) {
             case DatabaseMetaData.importedKeyCascade -> "CASCADE";
             case DatabaseMetaData.importedKeyRestrict -> "RESTRICT";

@@ -1,0 +1,414 @@
+// [DB QUERY] Splits caller SQL into tokens the way the target vendor would, so SqlGuard can reason about words
+// instead of characters. It does not parse SQL — it only has to agree with the server on where every string,
+// quoted identifier and comment starts and ends. Where that is not certain it REFUSES rather than guesses:
+//
+//   · Settings that change lexing are tried both ways and must agree: MySQL/MariaDB backslash escapes
+//     (NO_BACKSLASH_ESCAPES), PostgreSQL standard_conforming_strings. A literal that ends in a different place
+//     under one of them — `'a\'; DELETE …'` — is rejected, because which one the server uses is not known here.
+//   · Executable comments (`/*! … */`, `/*M! … */`) run their contents on MySQL/MariaDB — rejected everywhere.
+//   · Nested block comments: PostgreSQL, SQL Server and H2 nest them, MySQL and Oracle do not — rejected.
+//   · MySQL reads `--` as a comment only when whitespace follows; `1--1` is arithmetic there — rejected when
+//     ambiguous. `#` comments only on MySQL/MariaDB; `//` comments only on H2.
+//   · Bind markers (`?`, `:name`) and JDBC escapes (`{fn …}`, `{call …}`) — the tools bind nothing, and a driver
+//     rewriting the text is exactly what this lexer could not predict. Rejected.
+//   · NUL, control characters and non-ASCII whitespace outside literals — a server may treat them as whitespace
+//     where this lexer would not. Rejected.
+package {{PKG}}.db.query;
+
+import {{PKG}}.db.DbVendor;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
+
+public final class SqlLexer {
+
+    public enum Kind {
+        /** An unquoted word: keyword, identifier, function name, MSSQL #temp / @var, MySQL @var. */
+        WORD,
+        /** A delimited identifier: "x", `x`, [x]. Never a keyword. */
+        QUOTED,
+        /** A string literal of any form. */
+        STRING,
+        NUMBER,
+        /** Any other single character, or the two-character operators listed in {@link #TWO_CHAR}. */
+        SYMBOL
+    }
+
+    public record Token(Kind kind, String text, int start, int end) {
+
+        public boolean isWord(String word) {
+            return kind == Kind.WORD && text.equalsIgnoreCase(word);
+        }
+
+        public boolean isSymbol(String symbol) {
+            return kind == Kind.SYMBOL && text.equals(symbol);
+        }
+
+        /** The identifier as the server would see it: unquoted, case kept. Null for literals and symbols. */
+        public String name() {
+            return switch (kind) {
+                case WORD -> text;
+                case QUOTED -> text.substring(1, text.length() - 1)
+                        .replace("\"\"", "\"").replace("``", "`").replace("]]", "]");
+                default -> null;
+            };
+        }
+
+        public String upper() {
+            return text.toUpperCase(Locale.ROOT);
+        }
+    }
+
+    /** Thrown for SQL the lexer will not tokenize; the message is shown to the caller. */
+    public static final class Rejected extends RuntimeException {
+        public Rejected(String message) {
+            super(message);
+        }
+    }
+
+    private static final String[] TWO_CHAR = {"::", "<=", ">=", "<>", "!=", "||", "->", "=>", "<<", ">>"};
+
+    private SqlLexer() {
+    }
+
+    /** Tokenizes {@code sql} for {@code vendor}, cross-checking every setting that changes where literals end. */
+    public static List<Token> lex(String sql, DbVendor vendor) {
+        Objects.requireNonNull(sql, "sql");
+        return switch (vendor) {
+            case MYSQL, MARIADB -> agree(lex(sql, vendor, true), lex(sql, vendor, false),
+                    "a backslash inside a string literal makes it end in different places depending on the server's "
+                            + "NO_BACKSLASH_ESCAPES mode");
+            case POSTGRESQL -> agree(lex(sql, vendor, false), lex(sql, vendor, true),
+                    "a backslash inside a string literal makes it end in different places depending on the server's "
+                            + "standard_conforming_strings setting — use E'…' for escapes or remove the backslash");
+            default -> lex(sql, vendor, false);
+        };
+    }
+
+    private static List<Token> agree(List<Token> a, List<Token> b, String why) {
+        if (!a.equals(b)) {
+            throw new Rejected("ambiguous SQL: " + why + ".");
+        }
+        return a;
+    }
+
+    /**
+     * One pass. {@code backslash} = plain '…' strings treat backslash as an escape (MySQL default; PostgreSQL with
+     * standard_conforming_strings off).
+     */
+    static List<Token> lex(String sql, DbVendor vendor, boolean backslash) {
+        boolean mysql = vendor.isMySqlFamily();
+        List<Token> out = new ArrayList<>();
+        int n = sql.length();
+        int i = 0;
+        while (i < n) {
+            char c = sql.charAt(i);
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f') {
+                i++;
+                continue;
+            }
+            if (c == 0 || Character.isISOControl(c) || Character.isWhitespace(c) || Character.isSpaceChar(c)) {
+                throw new Rejected("unsupported character U+" + String.format("%04X", (int) c) + " at position " + i
+                        + " (control or non-ASCII whitespace outside a literal).");
+            }
+            // ---- comments -------------------------------------------------------------------------------------
+            if (c == '-' && at(sql, i + 1) == '-') {
+                if (mysql) {
+                    char next = at(sql, i + 2);
+                    if (next != 0 && next != ' ' && next != '\t' && next != '\n' && next != '\r' && next != '\f') {
+                        throw new Rejected("ambiguous '--' at position " + i + ": MySQL reads it as a comment only "
+                                + "when whitespace follows. Add a space, or write '- -' for arithmetic.");
+                    }
+                }
+                i = lineEnd(sql, i);
+                continue;
+            }
+            if (c == '#' && mysql) {
+                i = lineEnd(sql, i);
+                continue;
+            }
+            if (c == '/' && at(sql, i + 1) == '/' && vendor == DbVendor.H2) {
+                i = lineEnd(sql, i);
+                continue;
+            }
+            if (c == '/' && at(sql, i + 1) == '*') {
+                i = blockComment(sql, i);
+                continue;
+            }
+            // ---- literals and delimited identifiers -----------------------------------------------------------
+            if (c == '\'') {
+                int end = quoted(sql, i, '\'', backslash);
+                out.add(new Token(Kind.STRING, sql.substring(i, end), i, end));
+                i = end;
+                continue;
+            }
+            int prefixed = prefixedString(sql, i, vendor, backslash);
+            if (prefixed > 0) {
+                out.add(new Token(Kind.STRING, sql.substring(i, prefixed), i, prefixed));
+                i = prefixed;
+                continue;
+            }
+            if (c == '"') {
+                // An identifier everywhere except MySQL/MariaDB without ANSI_QUOTES, where it is a string — either
+                // way a quoted token whose end is what matters; MySQL applies backslash escapes inside it too.
+                int end = quoted(sql, i, '"', mysql && backslash);
+                out.add(new Token(mysql ? Kind.STRING : Kind.QUOTED, sql.substring(i, end), i, end));
+                i = end;
+                continue;
+            }
+            if (c == '`') {
+                if (!(mysql || vendor == DbVendor.H2)) {
+                    throw new Rejected("backtick at position " + i + " is not an identifier quote on " + vendor
+                            + ". Use double quotes.");
+                }
+                int end = quoted(sql, i, '`', false);
+                out.add(new Token(Kind.QUOTED, sql.substring(i, end), i, end));
+                i = end;
+                continue;
+            }
+            if (c == '[' && vendor == DbVendor.SQLSERVER) {
+                int end = quoted(sql, i, ']', false);
+                out.add(new Token(Kind.QUOTED, sql.substring(i, end), i, end));
+                i = end;
+                continue;
+            }
+            if (c == '$') {
+                if (vendor == DbVendor.POSTGRESQL || vendor == DbVendor.H2) {
+                    int end = dollarQuoted(sql, i, vendor);
+                    out.add(new Token(Kind.STRING, sql.substring(i, end), i, end));
+                    i = end;
+                    continue;
+                }
+                // elsewhere '$' is an identifier character (Oracle V$…, MySQL) or a money literal (SQL Server)
+            }
+            // ---- binds and escapes ----------------------------------------------------------------------------
+            if (c == '?') {
+                throw new Rejected("bind marker '?' at position " + i + ": these tools bind no parameters — write "
+                        + "the value into the statement.");
+            }
+            if (c == '{' || c == '}') {
+                throw new Rejected("'" + c + "' at position " + i + ": JDBC escape syntax is not accepted.");
+            }
+            if (c == ':') {
+                char next = at(sql, i + 1);
+                if (next == ':') {
+                    out.add(new Token(Kind.SYMBOL, "::", i, i + 2));
+                    i += 2;
+                    continue;
+                }
+                if (next == '=') {
+                    throw new Rejected("assignment ':=' at position " + i + " is not accepted.");
+                }
+                if (isWordStart(next) || (vendor == DbVendor.ORACLE && Character.isDigit(next))) {
+                    throw new Rejected("named bind ':" + next + "…' at position " + i + ": these tools bind no "
+                            + "parameters.");
+                }
+                out.add(new Token(Kind.SYMBOL, ":", i, i + 1));
+                i++;
+                continue;
+            }
+            // ---- numbers, words, symbols ----------------------------------------------------------------------
+            if (Character.isDigit(c) || (c == '.' && Character.isDigit(at(sql, i + 1)))) {
+                int end = number(sql, i);
+                out.add(new Token(Kind.NUMBER, sql.substring(i, end), i, end));
+                i = end;
+                continue;
+            }
+            if (isWordStart(c) || c == '@' || (c == '#' && vendor == DbVendor.SQLSERVER)
+                    || (c == '$' && vendor == DbVendor.SQLSERVER)) {
+                int end = i + 1;
+                while (end < n && isWordPart(sql.charAt(end), vendor)) {
+                    end++;
+                }
+                out.add(new Token(Kind.WORD, sql.substring(i, end), i, end));
+                i = end;
+                continue;
+            }
+            if (c > 127) {
+                throw new Rejected("unsupported character U+" + String.format("%04X", (int) c) + " at position " + i
+                        + " outside a literal.");
+            }
+            String two = i + 2 <= n ? sql.substring(i, i + 2) : "";
+            boolean matched = false;
+            for (String op : TWO_CHAR) {
+                if (op.equals(two)) {
+                    out.add(new Token(Kind.SYMBOL, op, i, i + 2));
+                    i += 2;
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                out.add(new Token(Kind.SYMBOL, String.valueOf(c), i, i + 1));
+                i++;
+            }
+        }
+        return List.copyOf(out);
+    }
+
+    // ---- pieces -------------------------------------------------------------------------------------------
+
+    private static char at(String s, int i) {
+        return i < s.length() ? s.charAt(i) : 0;
+    }
+
+    private static int lineEnd(String sql, int i) {
+        int nl = sql.indexOf('\n', i);
+        return nl < 0 ? sql.length() : nl + 1;
+    }
+
+    private static int blockComment(String sql, int start) {
+        char third = at(sql, start + 2);
+        if (third == '!' || (third == 'M' && at(sql, start + 3) == '!')) {
+            throw new Rejected("executable comment '/*!' at position " + start + ": MySQL/MariaDB run its contents "
+                    + "as SQL. Remove it.");
+        }
+        int i = start + 2;
+        while (i < sql.length()) {
+            if (sql.charAt(i) == '/' && at(sql, i + 1) == '*') {
+                throw new Rejected("nested block comment at position " + i + ": vendors disagree on where it ends.");
+            }
+            if (sql.charAt(i) == '*' && at(sql, i + 1) == '/') {
+                return i + 2;
+            }
+            if (sql.charAt(i) == 0) {
+                throw new Rejected("NUL character inside a comment at position " + i + ".");
+            }
+            i++;
+        }
+        throw new Rejected("unterminated block comment starting at position " + start + ".");
+    }
+
+    /** End index (exclusive) of a literal opened at {@code start} by {@code close}'s partner; doubled close escapes. */
+    private static int quoted(String sql, int start, char close, boolean backslash) {
+        int i = start + 1;
+        while (i < sql.length()) {
+            char c = sql.charAt(i);
+            if (c == 0) {
+                throw new Rejected("NUL character inside a literal at position " + i + ".");
+            }
+            if (backslash && c == '\\') {
+                i += 2;
+                continue;
+            }
+            if (c == close) {
+                if (at(sql, i + 1) == close) {
+                    i += 2;
+                    continue;
+                }
+                return i + 1;
+            }
+            i++;
+        }
+        throw new Rejected("unterminated literal or quoted identifier starting at position " + start + ".");
+    }
+
+    /**
+     * N'…', X'…', B'…' everywhere; E'…' and U&'…' on PostgreSQL (and U& on H2); q'…' / nq'…' on Oracle. Returns the
+     * end index, or 0 when no prefixed literal starts here.
+     */
+    private static int prefixedString(String sql, int i, DbVendor vendor, boolean backslash) {
+        char c = Character.toUpperCase(sql.charAt(i));
+        char next = at(sql, i + 1);
+        if (vendor == DbVendor.ORACLE) {
+            int q = -1;
+            if (c == 'Q' && next == '\'') {
+                q = i + 1;
+            } else if (c == 'N' && Character.toUpperCase(next) == 'Q' && at(sql, i + 2) == '\'') {
+                q = i + 2;
+            }
+            if (q > 0 && (i == 0 || !isWordPart(sql.charAt(i - 1), vendor))) {
+                return oracleQuote(sql, q);
+            }
+        }
+        if ((c == 'N' || c == 'X' || c == 'B') && next == '\'' && (i == 0 || !isWordPart(sql.charAt(i - 1), vendor))) {
+            boolean escapes = c == 'N' && vendor.isMySqlFamily() && backslash;
+            return quoted(sql, i + 1, '\'', escapes);
+        }
+        if (vendor == DbVendor.POSTGRESQL && c == 'E' && next == '\''
+                && (i == 0 || !isWordPart(sql.charAt(i - 1), vendor))) {
+            return quoted(sql, i + 1, '\'', true);
+        }
+        if ((vendor == DbVendor.POSTGRESQL || vendor == DbVendor.H2) && c == 'U' && next == '&'
+                && at(sql, i + 2) == '\'' && (i == 0 || !isWordPart(sql.charAt(i - 1), vendor))) {
+            return quoted(sql, i + 2, '\'', false);
+        }
+        return 0;
+    }
+
+    /** Oracle q'X…X' — X any character, with ( [ { < closed by ) ] } >. {@code quote} is the index of the '. */
+    private static int oracleQuote(String sql, int quote) {
+        char open = at(sql, quote + 1);
+        if (open == 0 || Character.isWhitespace(open)) {
+            throw new Rejected("malformed Oracle q-quote at position " + quote + ".");
+        }
+        char close = switch (open) {
+            case '(' -> ')';
+            case '[' -> ']';
+            case '{' -> '}';
+            case '<' -> '>';
+            default -> open;
+        };
+        String end = close + "'";
+        int found = sql.indexOf(end, quote + 2);
+        if (found < 0) {
+            throw new Rejected("unterminated Oracle q-quote starting at position " + quote + ".");
+        }
+        if (sql.substring(quote, found).indexOf(0) >= 0) {
+            throw new Rejected("NUL character inside a literal at position " + quote + ".");
+        }
+        return found + 2;
+    }
+
+    /** PostgreSQL $tag$…$tag$ (tag may be empty); H2 $$…$$ only. A positional $1 is a bind — rejected. */
+    private static int dollarQuoted(String sql, int start, DbVendor vendor) {
+        int i = start + 1;
+        if (Character.isDigit(at(sql, i))) {
+            throw new Rejected("positional parameter '$" + at(sql, i) + "' at position " + start
+                    + ": these tools bind no parameters.");
+        }
+        while (i < sql.length() && vendor == DbVendor.POSTGRESQL
+                && (Character.isLetterOrDigit(sql.charAt(i)) || sql.charAt(i) == '_')) {
+            i++;
+        }
+        if (at(sql, i) != '$') {
+            throw new Rejected("'$' at position " + start + " does not open a dollar-quoted string.");
+        }
+        String tag = sql.substring(start, i + 1);
+        int end = sql.indexOf(tag, i + 1);
+        if (end < 0) {
+            throw new Rejected("unterminated dollar-quoted string starting at position " + start + ".");
+        }
+        if (sql.substring(start, end).indexOf(0) >= 0) {
+            throw new Rejected("NUL character inside a literal at position " + start + ".");
+        }
+        return end + tag.length();
+    }
+
+    private static int number(String sql, int i) {
+        int end = i;
+        while (end < sql.length()) {
+            char c = sql.charAt(end);
+            if (Character.isLetterOrDigit(c) || c == '.' || c == '_') {
+                end++;
+            } else if ((c == '+' || c == '-') && end > i
+                    && Character.toUpperCase(sql.charAt(end - 1)) == 'E' && !sql.substring(i, end).startsWith("0x")) {
+                end++;
+            } else {
+                break;
+            }
+        }
+        return end;
+    }
+
+    private static boolean isWordStart(char c) {
+        return c == '_' || Character.isLetter(c);
+    }
+
+    private static boolean isWordPart(char c, DbVendor vendor) {
+        return c == '_' || c == '$' || Character.isLetterOrDigit(c) || c == '@'
+                || (c == '#' && (vendor == DbVendor.ORACLE || vendor == DbVendor.SQLSERVER));
+    }
+}

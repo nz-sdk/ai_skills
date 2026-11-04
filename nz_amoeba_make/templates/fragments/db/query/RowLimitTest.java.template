@@ -1,0 +1,126 @@
+// RowLimit, statement by statement: what is sent for each vendor when the query has no limit, a smaller one, a larger
+// one, or one this tool cannot bound. Whether the server ACCEPTS the rewritten text is LiveQueryContract's job.
+package {{PKG}}.db.query;
+
+import {{PKG}}.db.DbVendor;
+import {{PKG}}.db.query.RowLimit.How;
+import {{PKG}}.db.query.RowLimit.Limited;
+
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.util.stream.Stream;
+
+import static {{PKG}}.db.DbVendor.H2;
+import static {{PKG}}.db.DbVendor.MARIADB;
+import static {{PKG}}.db.DbVendor.MYSQL;
+import static {{PKG}}.db.DbVendor.ORACLE;
+import static {{PKG}}.db.DbVendor.POSTGRESQL;
+import static {{PKG}}.db.DbVendor.SQLSERVER;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+class RowLimitTest {
+
+    private static final int CAP = 101;
+
+    static Stream<Arguments> rewritten() {
+        return Stream.of(
+                // ---- MySQL / MariaDB: LIMIT ------------------------------------------------------------------
+                Arguments.of(MYSQL, "SELECT a FROM t", "SELECT a FROM t LIMIT 101", How.ADDED, 101),
+                Arguments.of(MYSQL, "SELECT a FROM t ORDER BY a", "SELECT a FROM t ORDER BY a LIMIT 101", How.ADDED, 101),
+                Arguments.of(MYSQL, "SELECT a FROM t UNION ALL SELECT b FROM u",
+                        "SELECT a FROM t UNION ALL SELECT b FROM u LIMIT 101", How.ADDED, 101),
+                Arguments.of(MYSQL, "WITH x AS (SELECT 1 AS a) SELECT * FROM x",
+                        "WITH x AS (SELECT 1 AS a) SELECT * FROM x LIMIT 101", How.ADDED, 101),
+                Arguments.of(MYSQL, "SELECT a FROM t LIMIT 5", "SELECT a FROM t LIMIT 5", How.KEPT, 5),
+                Arguments.of(MYSQL, "SELECT a FROM t LIMIT 5000", "SELECT a FROM t LIMIT 101", How.LOWERED, 101),
+                Arguments.of(MYSQL, "SELECT a FROM t LIMIT 99999999999999999999", "SELECT a FROM t LIMIT 101",
+                        How.LOWERED, 101),
+                Arguments.of(MYSQL, "SELECT a FROM t LIMIT 10, 5000", "SELECT a FROM t LIMIT 10, 101", How.LOWERED, 101),
+                Arguments.of(MYSQL, "SELECT a FROM t LIMIT 5000 OFFSET 10", "SELECT a FROM t LIMIT 101 OFFSET 10",
+                        How.LOWERED, 101),
+                Arguments.of(MYSQL, "SELECT a FROM (SELECT a FROM t LIMIT 5000) x",
+                        "SELECT a FROM (SELECT a FROM t LIMIT 5000) x LIMIT 101", How.ADDED, 101),
+                Arguments.of(MYSQL, "SELECT a FROM t -- note", "SELECT a FROM t LIMIT 101 -- note", How.ADDED, 101),
+                Arguments.of(MARIADB, "SELECT a FROM t", "SELECT a FROM t LIMIT 101", How.ADDED, 101),
+                Arguments.of(MARIADB, "SELECT a FROM t ORDER BY a FETCH FIRST 5000 ROWS ONLY",
+                        "SELECT a FROM t ORDER BY a FETCH FIRST 101 ROWS ONLY", How.LOWERED, 101),
+                // ---- PostgreSQL / H2: FETCH FIRST, existing LIMIT lowered --------------------------------------
+                Arguments.of(POSTGRESQL, "SELECT a FROM t", "SELECT a FROM t FETCH FIRST 101 ROWS ONLY", How.ADDED, 101),
+                Arguments.of(POSTGRESQL, "SELECT a FROM t OFFSET 5", "SELECT a FROM t OFFSET 5 FETCH FIRST 101 ROWS ONLY",
+                        How.ADDED, 101),
+                Arguments.of(POSTGRESQL, "SELECT a FROM t LIMIT ALL", "SELECT a FROM t LIMIT 101", How.LOWERED, 101),
+                Arguments.of(POSTGRESQL, "SELECT a FROM t LIMIT 5000 OFFSET 5", "SELECT a FROM t LIMIT 101 OFFSET 5",
+                        How.LOWERED, 101),
+                Arguments.of(POSTGRESQL, "SELECT a FROM t FETCH FIRST 10 ROWS ONLY",
+                        "SELECT a FROM t FETCH FIRST 10 ROWS ONLY", How.KEPT, 10),
+                Arguments.of(POSTGRESQL, "SELECT a FROM t FETCH NEXT 500 ROWS ONLY",
+                        "SELECT a FROM t FETCH NEXT 101 ROWS ONLY", How.LOWERED, 101),
+                Arguments.of(POSTGRESQL, "SELECT a FROM t FETCH FIRST ROW ONLY", "SELECT a FROM t FETCH FIRST ROW ONLY",
+                        How.KEPT, 1),
+                Arguments.of(H2, "SELECT a FROM t UNION ALL SELECT b FROM u",
+                        "SELECT a FROM t UNION ALL SELECT b FROM u FETCH FIRST 101 ROWS ONLY", How.ADDED, 101),
+                Arguments.of(H2, "SELECT a FROM t LIMIT 3", "SELECT a FROM t LIMIT 3", How.KEPT, 3),
+                // ---- Oracle: FETCH FIRST ------------------------------------------------------------------------
+                Arguments.of(ORACLE, "SELECT a FROM t", "SELECT a FROM t FETCH FIRST 101 ROWS ONLY", How.ADDED, 101),
+                Arguments.of(ORACLE, "SELECT a FROM t WHERE ROWNUM <= 5000",
+                        "SELECT a FROM t WHERE ROWNUM <= 5000 FETCH FIRST 101 ROWS ONLY", How.ADDED, 101),
+                Arguments.of(ORACLE, "SELECT a FROM t ORDER BY a OFFSET 5 ROWS FETCH NEXT 1000 ROWS ONLY",
+                        "SELECT a FROM t ORDER BY a OFFSET 5 ROWS FETCH NEXT 101 ROWS ONLY", How.LOWERED, 101),
+                // ---- SQL Server: TOP / OFFSET-FETCH --------------------------------------------------------------
+                Arguments.of(SQLSERVER, "SELECT a FROM t", "SELECT TOP (101) a FROM t", How.ADDED, 101),
+                Arguments.of(SQLSERVER, "SELECT DISTINCT a FROM t", "SELECT DISTINCT TOP (101) a FROM t", How.ADDED, 101),
+                Arguments.of(SQLSERVER, "WITH x AS (SELECT 1 AS a) SELECT a FROM x",
+                        "WITH x AS (SELECT 1 AS a) SELECT TOP (101) a FROM x", How.ADDED, 101),
+                Arguments.of(SQLSERVER, "SELECT a FROM t ORDER BY a",
+                        "SELECT a FROM t ORDER BY a OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY", How.ADDED, 101),
+                Arguments.of(SQLSERVER, "SELECT a FROM t ORDER BY a OFFSET 10 ROWS",
+                        "SELECT a FROM t ORDER BY a OFFSET 10 ROWS FETCH NEXT 101 ROWS ONLY", How.ADDED, 101),
+                Arguments.of(SQLSERVER, "SELECT a FROM t UNION ALL SELECT b FROM u",
+                        "SELECT a FROM t UNION ALL SELECT b FROM u ORDER BY 1 OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY",
+                        How.ADDED, 101),
+                Arguments.of(SQLSERVER, "SELECT a FROM t ORDER BY a FOR JSON AUTO",
+                        "SELECT a FROM t ORDER BY a OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY FOR JSON AUTO", How.ADDED, 101),
+                Arguments.of(SQLSERVER, "SELECT a FROM t ORDER BY a OPTION (RECOMPILE)",
+                        "SELECT a FROM t ORDER BY a OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY OPTION (RECOMPILE)",
+                        How.ADDED, 101),
+                Arguments.of(SQLSERVER, "SELECT a FROM t FOR JSON AUTO", "SELECT TOP (101) a FROM t FOR JSON AUTO",
+                        How.ADDED, 101),
+                Arguments.of(SQLSERVER, "SELECT TOP 5000 a FROM t", "SELECT TOP 101 a FROM t", How.LOWERED, 101),
+                Arguments.of(SQLSERVER, "SELECT TOP 10 * FROM t", "SELECT TOP 10 * FROM t", How.KEPT, 10),
+                Arguments.of(SQLSERVER, "SELECT TOP (5) a FROM t", "SELECT TOP (5) a FROM t", How.KEPT, 5),
+                Arguments.of(SQLSERVER, "SELECT a FROM t ORDER BY a OFFSET 0 ROWS FETCH NEXT 9999 ROWS ONLY",
+                        "SELECT a FROM t ORDER BY a OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY", How.LOWERED, 101));
+    }
+
+    @ParameterizedTest(name = "{0}: {1}")
+    @MethodSource
+    void rewritten(DbVendor vendor, String sql, String expected, How how, int limit) throws Exception {
+        Limited limited = RowLimit.apply(sql, vendor, CAP);
+        assertEquals(expected, limited.sql());
+        assertEquals(how, limited.how());
+        assertEquals(limit, limited.limit());
+    }
+
+    static Stream<Arguments> refused() {
+        return Stream.of(
+                Arguments.of(POSTGRESQL, "SELECT a FROM t LIMIT 10 + 5000"),
+                Arguments.of(POSTGRESQL, "SELECT a FROM t LIMIT (5000)"),
+                Arguments.of(POSTGRESQL, "SELECT a FROM t LIMIT 10::bigint"),
+                Arguments.of(POSTGRESQL, "SELECT a FROM t LIMIT -1"),
+                Arguments.of(ORACLE, "SELECT a FROM t FETCH FIRST 10 PERCENT ROWS ONLY"),
+                Arguments.of(ORACLE, "SELECT a FROM t FETCH FIRST 1.5 ROWS ONLY"),
+                Arguments.of(SQLSERVER, "SELECT TOP 10 PERCENT a FROM t"),
+                Arguments.of(SQLSERVER, "SELECT TOP (10) PERCENT a FROM t"),
+                Arguments.of(SQLSERVER, "SELECT TOP (SELECT 5) a FROM t"),
+                Arguments.of(SQLSERVER, "(SELECT a FROM t) UNION (SELECT b FROM u)"));
+    }
+
+    @ParameterizedTest(name = "{0}: {1}")
+    @MethodSource
+    void refused(DbVendor vendor, String sql) {
+        assertThrows(QueryEnvelope.Refused.class, () -> RowLimit.apply(sql, vendor, CAP));
+    }
+}

@@ -1,0 +1,82 @@
+// LiveQueryContract on SQL Server — no server-side read-only mode (a write past the guard is rolled back, not
+// refused), SHOWPLAN_XML switched off again, ROWCOUNT reset, and USE (setCatalog) undone — plus another database.
+package {{PKG}}.db.query;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
+import {{PKG}}.db.DbFixtures;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.List;
+
+import static {{PKG}}.db.query.QueryFixtures.MAPPER;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class LiveSqlServerQueryTest extends LiveQueryContract {
+
+    private static final String PROBE_DB = "zz_dbquery_probe";
+    private static final String OTHER_DB = "zz_dbquery_other";
+
+    @Override
+    String envPrefix() {
+        return "DB_TOOLS_TEST_SQLSERVER";
+    }
+
+    @Override
+    String prepareUrl(String url, String user, String password) {
+        DbFixtures.exec(new DriverManagerDataSource(url, user, password),
+                "IF DB_ID('" + PROBE_DB + "') IS NULL CREATE DATABASE " + PROBE_DB,
+                "IF DB_ID('" + OTHER_DB + "') IS NULL CREATE DATABASE " + OTHER_DB);
+        return url + ";databaseName=" + PROBE_DB;
+    }
+
+    @Override
+    String createProbe() {
+        return "CREATE TABLE " + PROBE + " (id BIGINT PRIMARY KEY, name NVARCHAR(50), amount DECIMAL(10,2))";
+    }
+
+    /** Never consulted: SQL Server has no read-only transaction, so serverEnforcesReadOnly() is false. */
+    @Override
+    boolean isReadOnlyRefusal(SQLException e) {
+        return false;
+    }
+
+    @Override
+    List<String> ownLimitShapes() {
+        return List.of("SELECT TOP 5000 id FROM " + PROBE,
+                "SELECT id FROM " + PROBE + " ORDER BY id OFFSET 0 ROWS FETCH NEXT 5000 ROWS ONLY",
+                "SELECT DISTINCT id FROM " + PROBE);
+    }
+
+    @Override
+    String planFormat() {
+        return "xml";
+    }
+
+    @Override
+    boolean serverEnforcesReadOnly() {
+        return false;
+    }
+
+    @Override
+    void assertCleanVendor(Connection conn) throws SQLException {
+        assertEquals(PROBE_DB, single(conn, "SELECT DB_NAME()"));
+    }
+
+    @Test
+    void anotherDatabaseIsOpenedAndLeftBehind() throws SQLException {
+        DbFixtures.exec(pool, "IF OBJECT_ID('" + OTHER_DB + ".dbo.ledger') IS NOT NULL DROP TABLE " + OTHER_DB
+                        + ".dbo.ledger",
+                "CREATE TABLE " + OTHER_DB + ".dbo.ledger (x INT)",
+                "INSERT INTO " + OTHER_DB + ".dbo.ledger VALUES (7)");
+        SelectQueryTool tool = QueryFixtures.select(pool);
+        JsonNode s = QueryFixtures.ok(tool, tool.call(MAPPER.createObjectNode()
+                .put("sql", "SELECT x FROM ledger").put("database", OTHER_DB), null));
+        assertEquals(7, s.path("rows").get(0).get(0).asInt(), s.toString());
+        assertClean();
+    }
+}

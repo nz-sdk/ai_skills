@@ -1,0 +1,90 @@
+// The vendor-specific rules of the metadata bundle that need no database: product detection, system namespaces,
+// and the value mappings Oracle and SQL Server drivers made necessary. The live half — that real drivers report
+// what these rules expect — is LiveVendorMetadataContract and its subclasses.
+package {{PKG}}.db;
+
+import org.junit.jupiter.api.Test;
+
+import java.sql.DatabaseMetaData;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class VendorRulesTest {
+
+    @Test
+    void productNamesMapToVendors() {
+        assertEquals(DbVendor.MYSQL, DbVendor.fromProduct("MySQL", "8.4.3"));
+        assertEquals(DbVendor.MARIADB, DbVendor.fromProduct("MariaDB", "11.4.2-MariaDB"));
+        // Connector/J talking to MariaDB reports the product as MySQL; only the version tells.
+        assertEquals(DbVendor.MARIADB, DbVendor.fromProduct("MySQL", "5.5.5-11.4.2-MariaDB-ubu2404"));
+        assertEquals(DbVendor.POSTGRESQL, DbVendor.fromProduct("PostgreSQL", "17.2"));
+        assertEquals(DbVendor.H2, DbVendor.fromProduct("H2", "2.3.232 (2024-08-11)"));
+        assertEquals(DbVendor.ORACLE, DbVendor.fromProduct("Oracle", "Oracle Database 23ai Free"));
+        assertEquals(DbVendor.SQLSERVER, DbVendor.fromProduct("Microsoft SQL Server", "16.00.4135"));
+        assertEquals(DbVendor.OTHER, DbVendor.fromProduct("Apache Derby", "10.17"));
+        assertEquals(DbVendor.OTHER, DbVendor.fromProduct(null, null));
+    }
+
+    @Test
+    void commonSystemNamesStayRefusedOnEveryVendor() {
+        // The list that existed before vendors were told apart must not open up on any of them.
+        for (DbVendor vendor : DbVendor.values()) {
+            SystemNamespaces names = SystemNamespaces.forVendor(vendor);
+            for (String name : SystemNamespaces.COMMON) {
+                assertTrue(names.contains(name.toUpperCase()), vendor + " " + name);
+            }
+            assertFalse(names.contains("app_db"), vendor.name());
+            assertFalse(names.contains(null), vendor.name());
+        }
+    }
+
+    @Test
+    void vendorSystemNamesAreRefusedOnlyOnThatVendor() {
+        SystemNamespaces sqlServer = SystemNamespaces.forVendor(DbVendor.SQLSERVER);
+        assertTrue(sqlServer.contains("master") && sqlServer.contains("TEMPDB") && sqlServer.contains("db_owner"));
+        assertFalse(sqlServer.contains("db_sales"), "a db_ prefix is not a system schema");
+
+        SystemNamespaces postgres = SystemNamespaces.forVendor(DbVendor.POSTGRESQL);
+        assertTrue(postgres.contains("pg_temp_3") && postgres.contains("pg_toast_temp_1"));
+
+        SystemNamespaces oracle = SystemNamespaces.forVendor(DbVendor.ORACLE);
+        assertTrue(oracle.contains("SYSTEM") && oracle.contains("MDSYS") && oracle.contains("APEX_230200"));
+        assertFalse(oracle.contains("APP_USER"));
+
+        SystemNamespaces mysql = SystemNamespaces.forVendor(DbVendor.MYSQL);
+        assertFalse(mysql.contains("master"), "master is an ordinary database name on MySQL");
+        assertFalse(mysql.contains("pg_archive"), "pg_ is only special on PostgreSQL");
+    }
+
+    @Test
+    void aNullReferentialActionIsNoActionNotCascade() {
+        // ojdbc reports UPDATE_RULE as NULL; getInt would have turned it into 0 = importedKeyCascade.
+        assertEquals(0, DatabaseMetaData.importedKeyCascade, "the trap this test exists for");
+        assertEquals("NO ACTION", DbMetadataReader.rule(null));
+        assertEquals("CASCADE", DbMetadataReader.rule(DatabaseMetaData.importedKeyCascade));
+        assertEquals("SET NULL", DbMetadataReader.rule(DatabaseMetaData.importedKeySetNull));
+        assertEquals("NO ACTION", DbMetadataReader.rule(DatabaseMetaData.importedKeyNoAction));
+    }
+
+    @Test
+    void unboundedSizesShowAsMaxAndIdentityLeavesTheTypeName() {
+        assertEquals("nvarchar(max)", DbMetadataReader.displayType("nvarchar", 1_073_741_823, null));
+        assertEquals("varchar(max)", DbMetadataReader.displayType("varchar", Integer.MAX_VALUE, null));
+        assertEquals("VARCHAR(20)", DbMetadataReader.displayType("VARCHAR", 20, null));
+        assertEquals("DECIMAL(12,2)", DbMetadataReader.displayType("DECIMAL", 12, 2));
+        assertEquals("NUMBER", DbMetadataReader.displayType("NUMBER", null, null));
+
+        assertEquals("int", DbMetadataReader.typeName("int identity"));
+        assertEquals("bigint", DbMetadataReader.typeName("bigint IDENTITY"));
+        assertEquals("identity", DbMetadataReader.typeName("identity"), "nothing left to strip it from");
+        assertEquals("VARCHAR2", DbMetadataReader.typeName("VARCHAR2"));
+    }
+
+    @Test
+    void sqlServerIdentifiersAreBracketedWithClosingBracketsDoubled() {
+        assertEquals("[sales]", VendorComments.bracket("sales"));
+        assertEquals("[a]]b]", VendorComments.bracket("a]b"));
+    }
+}

@@ -1,0 +1,143 @@
+// The layers BELOW SqlGuard, proven on their own: what the envelope changes on a pooled connection is put back, a
+// write that got past the guard is rolled back, a connection that cannot be put back is replaced, and the timeout
+// holds. A Hikari pool of ONE connection over H2, so every borrow after a call is the very connection the call used.
+package {{PKG}}.db.query;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+
+import {{PKG}}.db.DbFixtures;
+import {{PKG}}.db.query.QueryEnvelope.Mode;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.time.Duration;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class QueryEnvelopeTest {
+
+    private HikariDataSource pool;
+
+    @BeforeEach
+    void pool() {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl("jdbc:h2:mem:envelope_" + UUID.randomUUID().toString().replace("-", "")
+                + ";DB_CLOSE_DELAY=-1");
+        config.setMaximumPoolSize(1);
+        config.setMinimumIdle(1);
+        pool = new HikariDataSource(config);
+        DbFixtures.exec(pool, DbFixtures.SCHEMA);
+        DbFixtures.exec(pool, "INSERT INTO comp_mst (comp_cd, comp_nm) VALUES ('A01', '회사A')");
+    }
+
+    @AfterEach
+    void close() {
+        pool.close();
+    }
+
+    @Test
+    void aSchemaSwitchIsPutBackOnThePooledConnection() throws Exception {
+        QueryEnvelope envelope = QueryFixtures.envelope(pool, DbQuerySettings.defaults());
+        String seen = envelope.run("SELECT other_col FROM comp_mst", null, DbFixtures.OTHER_SCHEMA, Mode.QUERY,
+                s -> s.connection().getSchema());
+        assertEquals(DbFixtures.OTHER_SCHEMA, seen, "the body ran in the requested schema");
+
+        try (Connection conn = pool.getConnection()) {
+            assertEquals("PUBLIC", conn.getSchema(), "Hikari does not reset schema — the envelope must");
+            assertTrue(conn.getAutoCommit());
+        }
+    }
+
+    @Test
+    void aWriteThatGotPastTheGuardIsRolledBack() throws Exception {
+        QueryEnvelope envelope = QueryFixtures.envelope(pool, DbQuerySettings.defaults());
+        int inserted = envelope.runUnguardedForTest(
+                "INSERT INTO comp_mst (comp_cd, comp_nm) VALUES ('Z99', '들어가면 안 됨')", null, null, s -> {
+                    try (Statement st = s.statement()) {
+                        return st.executeUpdate(s.sql());
+                    }
+                });
+        assertEquals(1, inserted, "H2 has no read-only transaction, so only the rollback stands between");
+        assertEquals(1, count(), "the insert must not survive the envelope");
+    }
+
+    @Test
+    void theGuardStopsTheSameWriteBeforeItIsSent() {
+        QueryEnvelope envelope = QueryFixtures.envelope(pool, DbQuerySettings.defaults());
+        QueryEnvelope.Refused refused = assertThrows(QueryEnvelope.Refused.class, () -> envelope.run(
+                "INSERT INTO comp_mst (comp_cd, comp_nm) VALUES ('Z99', 'x')", null, null, Mode.QUERY, s -> {
+                    throw new AssertionError("the body must not run");
+                }));
+        assertTrue(refused.getMessage().contains("SELECT"), refused.getMessage());
+    }
+
+    @Test
+    void aConnectionThatCannotBePutBackIsReplaced() throws Exception {
+        DbFixtures.exec(pool, "CREATE SCHEMA scratch", "CREATE TABLE scratch.t (x INT)");
+        Connection before;
+        try (Connection conn = pool.getConnection()) {
+            conn.setSchema("SCRATCH");   // the pooled connection now lives in a schema the body will remove
+            before = conn.unwrap(Connection.class);
+        }
+        QueryEnvelope envelope = QueryFixtures.envelope(pool, DbQuerySettings.defaults());
+        // DDL commits on its own in H2, so the rollback cannot undo it and restoring SCRATCH must fail.
+        envelope.runUnguardedForTest("DROP SCHEMA scratch CASCADE", null, "PUBLIC", s -> {
+            try (Statement st = s.statement()) {
+                return st.execute(s.sql());
+            }
+        });
+
+        try (Connection conn = pool.getConnection()) {
+            assertNotSame(before, conn.unwrap(Connection.class), "a connection left in an unknown state is evicted");
+            assertEquals("PUBLIC", conn.getSchema());
+        }
+    }
+
+    @Test
+    void aHealthyConnectionIsReturnedNotReplaced() throws Exception {
+        Connection before;
+        try (Connection conn = pool.getConnection()) {
+            before = conn.unwrap(Connection.class);
+        }
+        QueryFixtures.envelope(pool, DbQuerySettings.defaults())
+                .run("SELECT 1", null, null, Mode.QUERY, s -> null);
+        try (Connection conn = pool.getConnection()) {
+            assertSame(before, conn.unwrap(Connection.class));
+        }
+    }
+
+    @Test
+    void theStatementTimeoutHolds() {
+        QueryEnvelope envelope = QueryFixtures.envelope(pool,
+                QueryFixtures.settings(null, null, Duration.ofSeconds(1)));
+        long started = System.nanoTime();
+        assertThrows(SQLException.class, () -> envelope.run(
+                "SELECT SUM(a.X * b.X) FROM SYSTEM_RANGE(1, 200000) a, SYSTEM_RANGE(1, 200000) b", null, null,
+                Mode.QUERY, s -> {
+                    try (Statement st = s.statement(); ResultSet rs = st.executeQuery(s.sql())) {
+                        return rs.next();
+                    }
+                }));
+        assertTrue(System.nanoTime() - started < Duration.ofSeconds(20).toNanos(), "the query was cancelled");
+    }
+
+    private int count() throws SQLException {
+        try (Connection conn = pool.getConnection(); Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM comp_mst")) {
+            rs.next();
+            return rs.getInt(1);
+        }
+    }
+}

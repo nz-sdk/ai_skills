@@ -87,6 +87,12 @@ services:
       #   deployment from silently using the generated demo password against a real server.
       DB_PASSWORD:           ${DB_PASSWORD:?set DB_PASSWORD in .env}
 
+      # [db_query_tools ONLY] The query tools' dedicated read-only account. Empty = they use the DB_* account — no :?
+      # guard on purpose: it is optional. GENERATOR: drop these lines with the capability.
+      DB_QUERY_URL: ${DB_QUERY_URL:-}
+      DB_QUERY_USER: ${DB_QUERY_USER:-}
+      DB_QUERY_PASSWORD: ${DB_QUERY_PASSWORD:-}
+
       JAVA_OPTS: ${JAVA_OPTS:--XX:MaxRAMPercentage=75.0}
 
       # PROTEAN_MODULESTORE_DIR is already in the image ENV — not repeated here.

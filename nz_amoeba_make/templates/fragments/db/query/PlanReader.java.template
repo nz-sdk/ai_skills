@@ -1,0 +1,309 @@
+// [DB QUERY] Reads the optimizer's ESTIMATED plan for one statement, per vendor. Nothing here executes the statement:
+// every form below asks the planner only (EXPLAIN without ANALYZE, EXPLAIN PLAN, SHOWPLAN_XML).
+//
+//   MySQL      EXPLAIN FORMAT=JSON (plan) + EXPLAIN FORMAT=TREE (text; the traditional table before 8.0.16)
+//   MariaDB    EXPLAIN FORMAT=JSON (plan) + the traditional EXPLAIN table (text — MariaDB has no TREE)
+//   PostgreSQL EXPLAIN (FORMAT JSON) (plan) + EXPLAIN (text)
+//   H2         EXPLAIN (text only)
+//   Oracle     EXPLAIN PLAN SET STATEMENT_ID = '<random>' FOR …, then DBMS_XPLAN.DISPLAY (text) and the PLAN_TABLE
+//              rows (plan). Those rows are a write — QueryEnvelope runs Mode.PLAN outside READ ONLY and rolls back.
+//   SQL Server SET SHOWPLAN_XML ON in its own batch → the statement returns its plan instead of running → OFF. The XML
+//              is checked to hold exactly ONE SELECT statement: the server's own parse, a second guard for T-SQL
+//              batches. If OFF fails the connection is marked broken and evicted — a pooled connection stuck in
+//              SHOWPLAN would hand the next module a plan instead of rows.
+package {{PKG}}.db.query;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
+
+import {{PKG}}.db.query.QueryEnvelope.Refused;
+import {{PKG}}.db.query.QueryEnvelope.Session;
+
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.InputSource;
+
+import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilderFactory;
+import java.io.StringReader;
+import java.security.SecureRandom;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Locale;
+
+final class PlanReader {
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    /** {@code format}: json | xml | text. {@code plan} is JSON for json, the document as a string otherwise. */
+    record Plan(String format, JsonNode plan, String text) {
+    }
+
+    private PlanReader() {
+    }
+
+    static Plan explain(Session s, ObjectMapper mapper) throws SQLException, Refused {
+        return switch (s.vendor()) {
+            case MYSQL -> {
+                JsonNode json = json(mapper, single(s, "EXPLAIN FORMAT=JSON " + s.sql()));
+                String text;
+                try {
+                    text = lines(s, "EXPLAIN FORMAT=TREE " + s.sql());
+                } catch (SQLException e) {
+                    text = table(s, "EXPLAIN " + s.sql());   // before 8.0.16 — no TREE
+                }
+                yield new Plan("json", json, text);
+            }
+            case MARIADB -> new Plan("json", json(mapper, single(s, "EXPLAIN FORMAT=JSON " + s.sql())),
+                    table(s, "EXPLAIN " + s.sql()));
+            case POSTGRESQL -> new Plan("json", json(mapper, single(s, "EXPLAIN (FORMAT JSON) " + s.sql())),
+                    lines(s, "EXPLAIN " + s.sql()));
+            case H2 -> {
+                String text = lines(s, "EXPLAIN " + s.sql());
+                yield new Plan("text", TextNode.valueOf(text), text);
+            }
+            case ORACLE -> oracle(s, mapper);
+            case SQLSERVER -> sqlServer(s);
+            default -> throw new Refused("EXPLAIN is not supported for " + s.vendor() + ".");
+        };
+    }
+
+    // ---- Oracle -------------------------------------------------------------------------------------------
+
+    private static Plan oracle(Session s, ObjectMapper mapper) throws SQLException {
+        // 30 characters is STATEMENT_ID's width on every version. Random, so concurrent calls never read each other's.
+        String id = "AMOEBA_" + HexFormat.of().formatHex(randomBytes(8)).toUpperCase(Locale.ROOT);
+        try (Statement st = s.statement()) {
+            st.execute("EXPLAIN PLAN SET STATEMENT_ID = '" + id + "' FOR " + s.sql());
+        }
+        StringBuilder text = new StringBuilder();
+        try (PreparedStatement ps = s.connection().prepareStatement(
+                "SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', ?, 'TYPICAL'))")) {
+            ps.setQueryTimeout(s.timeoutSeconds());
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    text.append(rs.getString(1)).append('\n');
+                }
+            }
+        }
+        ArrayNode steps = mapper.createArrayNode();
+        try (PreparedStatement ps = s.connection().prepareStatement(
+                "SELECT ID, PARENT_ID, DEPTH, OPERATION, OPTIONS, OBJECT_OWNER, OBJECT_NAME, COST, CARDINALITY,"
+                        + " BYTES, ACCESS_PREDICATES, FILTER_PREDICATES FROM PLAN_TABLE WHERE STATEMENT_ID = ?"
+                        + " ORDER BY ID")) {
+            ps.setQueryTimeout(s.timeoutSeconds());
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                ResultSetMetaData md = rs.getMetaData();
+                while (rs.next()) {
+                    ObjectNode step = steps.addObject();
+                    for (int i = 1; i <= md.getColumnCount(); i++) {
+                        Object v = rs.getObject(i);
+                        String key = camel(md.getColumnLabel(i));
+                        if (v == null) {
+                            continue;
+                        }
+                        if (v instanceof Number n) {
+                            step.put(key, n.longValue());
+                        } else {
+                            step.put(key, v.toString());
+                        }
+                    }
+                }
+            }
+        }
+        // QueryEnvelope rolls back, which removes these rows; deleting them first keeps that true even if a future
+        // change commits.
+        try (PreparedStatement ps = s.connection().prepareStatement("DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = ?")) {
+            ps.setString(1, id);
+            ps.executeUpdate();
+        }
+        return new Plan("json", steps, text.toString());
+    }
+
+    private static String camel(String column) {
+        String[] parts = column.toLowerCase(Locale.ROOT).split("_");
+        StringBuilder sb = new StringBuilder(parts[0]);
+        for (int i = 1; i < parts.length; i++) {
+            sb.append(Character.toUpperCase(parts[i].charAt(0))).append(parts[i].substring(1));
+        }
+        return sb.toString();
+    }
+
+    private static byte[] randomBytes(int n) {
+        byte[] b = new byte[n];
+        RANDOM.nextBytes(b);
+        return b;
+    }
+
+    // ---- SQL Server ---------------------------------------------------------------------------------------
+
+    private static Plan sqlServer(Session s) throws SQLException, Refused {
+        QueryEnvelope.exec(s.connection(), "SET SHOWPLAN_XML ON");
+        String xml = null;
+        try (Statement st = s.statement()) {
+            boolean result = st.execute(s.sql());
+            while (true) {
+                if (result) {
+                    try (ResultSet rs = st.getResultSet()) {
+                        while (rs.next()) {
+                            String part = rs.getString(1);
+                            xml = xml == null ? part : xml + part;
+                        }
+                    }
+                } else if (st.getUpdateCount() == -1) {
+                    break;
+                }
+                result = st.getMoreResults();
+            }
+        } finally {
+            try {
+                QueryEnvelope.exec(s.connection(), "SET SHOWPLAN_XML OFF");
+            } catch (SQLException e) {
+                s.lease().markBroken();
+                throw e;
+            }
+        }
+        if (xml == null) {
+            throw new SQLException("SQL Server returned no plan");
+        }
+        Document doc = parse(xml);
+        NodeList statements = doc.getElementsByTagNameNS("*", "StmtSimple");
+        if (statements.getLength() != 1) {
+            throw new Refused("SQL Server parsed " + statements.getLength() + " statements — only one query is "
+                    + "accepted.");
+        }
+        String type = ((Element) statements.item(0)).getAttribute("StatementType");
+        if (!"SELECT".equalsIgnoreCase(type)) {
+            throw new Refused("SQL Server parsed a " + type + " statement — only a query is accepted.");
+        }
+        StringBuilder text = new StringBuilder();
+        render(statements.item(0), 0, text);
+        return new Plan("xml", TextNode.valueOf(xml), text.toString());
+    }
+
+    /** XML from the server, still parsed defensively: no DTDs, no external entities. */
+    private static Document parse(String xml) throws SQLException {
+        try {
+            DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
+            f.setNamespaceAware(true);
+            f.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+            f.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            f.setExpandEntityReferences(false);
+            return f.newDocumentBuilder().parse(new InputSource(new StringReader(xml)));
+        } catch (Exception e) {
+            throw new SQLException("unreadable SHOWPLAN_XML: " + e.getMessage(), e);
+        }
+    }
+
+    /** One line per RelOp, indented by nesting: physical op, logical op, the object it touches, estimates. */
+    private static void render(Node node, int depth, StringBuilder out) {
+        for (Node child = node.getFirstChild(); child != null; child = child.getNextSibling()) {
+            if (!(child instanceof Element e)) {
+                continue;
+            }
+            if ("RelOp".equals(e.getLocalName())) {
+                out.append("  ".repeat(depth)).append("-> ").append(e.getAttribute("PhysicalOp"));
+                String logical = e.getAttribute("LogicalOp");
+                if (!logical.isEmpty() && !logical.equals(e.getAttribute("PhysicalOp"))) {
+                    out.append(" (").append(logical).append(')');
+                }
+                String object = objectOf(e);
+                if (object != null) {
+                    out.append(" on ").append(object);
+                }
+                out.append("  rows=").append(e.getAttribute("EstimateRows"))
+                        .append(" cost=").append(e.getAttribute("EstimatedTotalSubtreeCost")).append('\n');
+                render(e, depth + 1, out);
+            } else {
+                render(e, depth, out);
+            }
+        }
+    }
+
+    /** The Object element directly under this RelOp's operator (not a nested RelOp's). */
+    private static String objectOf(Element relOp) {
+        for (Node op = relOp.getFirstChild(); op != null; op = op.getNextSibling()) {
+            if (!(op instanceof Element opElement) || "RelOp".equals(opElement.getLocalName())) {
+                continue;
+            }
+            for (Node c = opElement.getFirstChild(); c != null; c = c.getNextSibling()) {
+                if (c instanceof Element o && "Object".equals(o.getLocalName())) {
+                    List<String> parts = new ArrayList<>();
+                    for (String a : new String[] {"Schema", "Table", "Index"}) {
+                        if (!o.getAttribute(a).isEmpty()) {
+                            parts.add(o.getAttribute(a));
+                        }
+                    }
+                    return String.join(".", parts);
+                }
+            }
+        }
+        return null;
+    }
+
+    // ---- shared -------------------------------------------------------------------------------------------
+
+    private static String single(Session s, String sql) throws SQLException {
+        try (Statement st = s.statement(); ResultSet rs = st.executeQuery(sql)) {
+            if (!rs.next()) {
+                throw new SQLException("EXPLAIN returned no rows");
+            }
+            return rs.getString(1);
+        }
+    }
+
+    private static JsonNode json(ObjectMapper mapper, String text) throws SQLException {
+        try {
+            return mapper.readTree(text);
+        } catch (Exception e) {
+            throw new SQLException("EXPLAIN returned unparseable JSON: " + e.getMessage(), e);
+        }
+    }
+
+    /** Every row's first column, one per line. */
+    private static String lines(Session s, String sql) throws SQLException {
+        StringBuilder sb = new StringBuilder();
+        try (Statement st = s.statement(); ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) {
+                sb.append(rs.getString(1)).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    /** A whole result rendered as a pipe table — the traditional EXPLAIN output. */
+    private static String table(Session s, String sql) throws SQLException {
+        StringBuilder sb = new StringBuilder();
+        try (Statement st = s.statement(); ResultSet rs = st.executeQuery(sql)) {
+            ResultSetMetaData md = rs.getMetaData();
+            int n = md.getColumnCount();
+            List<String> header = new ArrayList<>();
+            for (int i = 1; i <= n; i++) {
+                header.add(md.getColumnLabel(i));
+            }
+            sb.append(String.join(" | ", header)).append('\n');
+            while (rs.next()) {
+                List<String> row = new ArrayList<>();
+                for (int i = 1; i <= n; i++) {
+                    String v = rs.getString(i);
+                    row.add(v == null ? "NULL" : v);
+                }
+                sb.append(String.join(" | ", row)).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+}

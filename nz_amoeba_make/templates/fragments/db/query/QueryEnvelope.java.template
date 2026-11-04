@@ -1,0 +1,280 @@
+// [DB QUERY] The frame every query-tool statement runs inside — EXPLAIN included, because EXPLAIN is not a sandbox
+// either (MySQL reads const tables and may evaluate subqueries while planning; PostgreSQL folds IMMUTABLE functions).
+//
+//   1. a slot and a connection (QueryConnections)
+//   2. `database`/`schema` resolved ON THIS CONNECTION (DbMetadataReader.resolveLocation) — so against the account
+//      that will run the statement — then SqlGuard for that connection's vendor
+//   3. the session state that is about to change is remembered: autoCommit, readOnly, catalog, schema
+//   4. a transaction is opened read-only where the vendor has such a thing, the location applied, the body run
+//   5. ALWAYS rolled back, then every remembered setting put back; a connection that cannot be put back is evicted
+//
+// Per vendor (what "read-only" and "location" mean):
+//   MySQL/MariaDB  setReadOnly + SET TRANSACTION READ ONLY (a write fails: ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION);
+//                  `database` via setCatalog; SQL_SELECT_LIMIT reset afterwards in case setMaxRows left it behind.
+//   PostgreSQL     SET TRANSACTION READ ONLY + SET LOCAL statement_timeout/lock_timeout/search_path — all undone by
+//                  the rollback itself. A connection cannot change database (resolveLocation refuses it).
+//   Oracle         SET TRANSACTION READ ONLY for queries (EXPLAIN PLAN writes PLAN_TABLE — see Mode.PLAN);
+//                  `schema` via ALTER SESSION SET CURRENT_SCHEMA, restored explicitly — it is not transactional.
+//   SQL Server     NO server-side read-only mode exists: implicit transaction + rollback, plus the guard. A dedicated
+//                  db_datareader account is what really holds here. `database` via setCatalog (USE); `schema` cannot
+//                  be switched for a session, so a different one is refused (qualify names instead).
+//   H2             setReadOnly is only a hint; guard + rollback (H2 is the offline test vendor).
+//
+// Hikari puts autoCommit/readOnly back on return but catalog and schema only when the pool configures them — this
+// one does not — and never session variables. Hence the explicit restore and the eviction.
+package {{PKG}}.db.query;
+
+import {{PKG}}.db.DbMetadataReader;
+import {{PKG}}.db.DbMetadataReader.Located;
+import {{PKG}}.db.DbMetadataReader.Location;
+import {{PKG}}.db.DbMetadataReader.Resolution;
+import {{PKG}}.db.DbMetadataReader.UnknownLocation;
+import {{PKG}}.db.DbVendor;
+import {{PKG}}.db.query.QueryConnections.Lease;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.Objects;
+
+@Component
+public class QueryEnvelope {
+
+    private static final Logger log = LoggerFactory.getLogger(QueryEnvelope.class);
+
+    private final QueryConnections connections;
+    private final DbQuerySettings settings;
+
+    public QueryEnvelope(QueryConnections connections, DbQuerySettings settings) {
+        this.connections = connections;
+        this.settings = settings;
+    }
+
+    /** What the body runs with. {@link #statement()} hands out a Statement already carrying the timeout. */
+    public record Session(Connection connection, DbVendor vendor, Location location, String sql, int timeoutSeconds,
+                          long deadlineNanos, Lease lease) {
+
+        public Statement statement() throws SQLException {
+            Statement st = connection.createStatement();
+            st.setEscapeProcessing(false);
+            st.setQueryTimeout(timeoutSeconds);
+            return st;
+        }
+
+        public boolean pastDeadline() {
+            return System.nanoTime() - deadlineNanos > 0;
+        }
+    }
+
+    @FunctionalInterface
+    public interface Body<T> {
+        T run(Session session) throws SQLException, Refused;
+    }
+
+    /**
+     * What the body does with the statement. PLAN differs only on Oracle: EXPLAIN PLAN writes its result into
+     * PLAN_TABLE, which a READ ONLY transaction refuses, so the plan is read in an ordinary transaction — still rolled
+     * back, and still nothing but EXPLAIN PLAN runs in it (the statement itself is never executed).
+     */
+    public enum Mode {
+        QUERY, PLAN
+    }
+
+    /** The statement was not sent: a guard or location refusal. The message is for the caller. */
+    public static final class Refused extends Exception {
+        public Refused(String message) {
+            super(message);
+        }
+    }
+
+    public DbQuerySettings settings() {
+        return settings;
+    }
+
+    public boolean dedicatedAccount() {
+        return connections.dedicated();
+    }
+
+    /** Runs {@code body} on the guarded {@code sql} inside the envelope. */
+    public <T> T run(String sql, String database, String schema, Mode mode, Body<T> body)
+            throws Refused, SQLException {
+        return execute(sql, database, schema, mode, true, body);
+    }
+
+    /** The envelope WITHOUT the guard — package-private, for tests that prove the layers below it hold on their own. */
+    <T> T runUnguardedForTest(String sql, String database, String schema, Body<T> body)
+            throws Refused, SQLException {
+        return execute(sql, database, schema, Mode.QUERY, false, body);
+    }
+
+    private <T> T execute(String sql, String database, String schema, Mode mode, boolean guarded, Body<T> body)
+            throws Refused, SQLException {
+        try (Lease lease = connections.lease()) {
+            Connection conn = lease.connection();
+            Resolution resolution = DbMetadataReader.resolveLocation(conn, database, schema);
+            if (resolution instanceof UnknownLocation unknown) {
+                throw new Refused(unknown.message());
+            }
+            Located located = (Located) resolution;
+            DbVendor vendor = located.vendor();
+            String statement;
+            try {
+                statement = guarded ? SqlGuard.check(sql, vendor, located.system()) : sql;
+            } catch (SqlLexer.Rejected e) {
+                throw new Refused(e.getMessage());
+            }
+            Snapshot before = Snapshot.of(conn);
+            Location location = located.location();
+            if (vendor == DbVendor.SQLSERVER && location.schema() != null
+                    && !location.schema().equalsIgnoreCase(before.schema())) {
+                throw new Refused("SQL Server cannot switch a session's default schema — qualify the names "
+                        + "(" + location.schema() + ".table) instead of passing 'schema'.");
+            }
+            long deadline = System.nanoTime() + settings.timeout().toNanos();
+            try {
+                begin(conn, vendor, location, before, mode, settings.timeout().toMillis());
+                return body.run(new Session(conn, vendor, location, statement, settings.timeoutSeconds(), deadline,
+                        lease));
+            } finally {
+                if (!end(conn, vendor, before)) {
+                    lease.markBroken();
+                }
+            }
+        }
+    }
+
+    // ---- session state ------------------------------------------------------------------------------------
+
+    /** What the envelope changes and must put back. */
+    record Snapshot(boolean autoCommit, boolean readOnly, String catalog, String schema) {
+
+        static Snapshot of(Connection conn) throws SQLException {
+            String schema;
+            try {
+                schema = conn.getSchema();
+            } catch (SQLException | AbstractMethodError e) {
+                schema = null;
+            }
+            return new Snapshot(conn.getAutoCommit(), conn.isReadOnly(), conn.getCatalog(), schema);
+        }
+    }
+
+    private static void begin(Connection conn, DbVendor vendor, Location location, Snapshot before,
+                              Mode mode, long timeoutMillis) throws SQLException {
+        conn.setAutoCommit(false);
+        switch (vendor) {
+            case MYSQL, MARIADB -> {
+                conn.setReadOnly(true);
+                exec(conn, "SET TRANSACTION READ ONLY");
+                if (differs(location.database(), before.catalog())) {
+                    conn.setCatalog(location.database());
+                }
+            }
+            case POSTGRESQL -> {
+                exec(conn, "SET TRANSACTION READ ONLY");
+                // Server-side twins of the JDBC timeout: SET LOCAL lasts until the rollback below, never longer.
+                exec(conn, "SET LOCAL statement_timeout = " + timeoutMillis);
+                exec(conn, "SET LOCAL lock_timeout = " + timeoutMillis);
+                if (differs(location.schema(), before.schema())) {
+                    exec(conn, "SET LOCAL search_path TO " + doubleQuoted(location.schema()));
+                }
+            }
+            case H2 -> {
+                conn.setReadOnly(true);
+                if (differs(location.schema(), before.schema())) {
+                    conn.setSchema(location.schema());
+                }
+            }
+            case ORACLE -> {
+                if (differs(location.schema(), before.schema())) {
+                    exec(conn, "ALTER SESSION SET CURRENT_SCHEMA = " + doubleQuoted(location.schema()));
+                }
+                if (mode == Mode.QUERY) {
+                    exec(conn, "SET TRANSACTION READ ONLY");
+                }
+            }
+            case SQLSERVER -> {
+                if (differs(location.database(), before.catalog())) {
+                    conn.setCatalog(location.database());
+                }
+            }
+            default -> throw new SQLException("unsupported vendor " + vendor);
+        }
+    }
+
+    /** Rolls back and restores. False when anything could not be restored — the connection must not be reused. */
+    private static boolean end(Connection conn, DbVendor vendor, Snapshot before) {
+        boolean ok = true;
+        if (vendor == DbVendor.SQLSERVER) {
+            // First: while SHOWPLAN is on the server executes nothing — the rollback below included.
+            ok = attempt("showplan", () -> exec(conn, "SET SHOWPLAN_XML OFF"));
+        }
+        ok &= attempt("rollback", conn::rollback);
+        switch (vendor) {
+            case MYSQL, MARIADB -> {
+                ok &= attempt("sql_select_limit", () -> exec(conn, "SET SESSION SQL_SELECT_LIMIT = DEFAULT"));
+                if (before.catalog() != null) {
+                    ok &= attempt("catalog", () -> conn.setCatalog(before.catalog()));
+                }
+                ok &= attempt("readOnly", () -> conn.setReadOnly(before.readOnly()));
+            }
+            case POSTGRESQL -> ok &= attempt("readOnly", () -> conn.setReadOnly(before.readOnly()));
+            case H2 -> {
+                if (before.schema() != null) {
+                    ok &= attempt("schema", () -> conn.setSchema(before.schema()));
+                }
+                ok &= attempt("readOnly", () -> conn.setReadOnly(before.readOnly()));
+            }
+            case ORACLE -> {
+                if (before.schema() != null) {
+                    ok &= attempt("schema",
+                            () -> exec(conn, "ALTER SESSION SET CURRENT_SCHEMA = " + doubleQuoted(before.schema())));
+                }
+            }
+            case SQLSERVER -> {
+                ok &= attempt("rowcount", () -> exec(conn, "SET ROWCOUNT 0"));
+                if (before.catalog() != null) {
+                    ok &= attempt("catalog", () -> conn.setCatalog(before.catalog()));
+                }
+            }
+            default -> {
+            }
+        }
+        ok &= attempt("autoCommit", () -> conn.setAutoCommit(before.autoCommit()));
+        return ok;
+    }
+
+    private interface SqlAction {
+        void run() throws SQLException;
+    }
+
+    private static boolean attempt(String what, SqlAction action) {
+        try {
+            action.run();
+            return true;
+        } catch (SQLException | RuntimeException e) {
+            log.warn("db-query: restoring {} failed: {}", what, e.toString());
+            return false;
+        }
+    }
+
+    static void exec(Connection conn, String sql) throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            st.setEscapeProcessing(false);
+            st.execute(sql);
+        }
+    }
+
+    private static boolean differs(String wanted, String current) {
+        return wanted != null && !Objects.equals(wanted, current);
+    }
+
+    /** A standard delimited identifier. Only names already matched against the server's own lists reach here. */
+    static String doubleQuoted(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+}

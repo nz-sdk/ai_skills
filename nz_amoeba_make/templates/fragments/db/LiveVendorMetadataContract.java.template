@@ -1,0 +1,189 @@
+// What every vendor's real driver must give list_tables / describe_table: comments (Korean intact), the primary
+// key folded out of the index list, foreign keys with their referential actions, views without a fake comment, and
+// the vendor's system namespaces refused. One subclass per vendor supplies the DDL and its vendor-specific checks;
+// MySQL/MariaDB stay in LiveMetadataTest, which predates this contract.
+//
+// SELF-SKIPS unless DB_TOOLS_TEST_<VENDOR>_URL is set, so `./gradlew test` stays offline. Point it at a DISPOSABLE
+// database — each subclass creates and drops zz_dbtools_probe_* objects (SQL Server: a zz_dbtools_probe database).
+// Recipes (docker) are in each subclass's header.
+package {{PKG}}.db;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import org.htcom.protean.mcp.McpToolResult;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+abstract class LiveVendorMetadataContract {
+
+    static final String PARENT = "zz_dbtools_probe_parent";
+    static final String CHILD = "zz_dbtools_probe_child";
+    static final String VIEW = "zz_dbtools_probe_view";
+    static final String PARENT_COMMENT = "DB 도구 검증용 임시 테이블";
+    static final String CHILD_COMMENT = "DB 도구 검증용 임시 자식";
+    static final String ID_COMMENT = "아이디";
+
+    protected final ObjectMapper mapper = new ObjectMapper();
+    protected DataSource database;
+
+    /** e.g. DB_TOOLS_TEST_ORACLE — _URL, _USER and _PASSWORD are read from it. */
+    abstract String envPrefix();
+
+    abstract DbVendor vendor();
+
+    /** Creates PARENT (id PK with ID_COMMENT, code UNIQUE uk_zz_probe_code), CHILD (FK ON DELETE CASCADE), VIEW. */
+    abstract String[] createProbe();
+
+    /** Every statement is run on its own and may fail (the object may not exist). */
+    abstract String[] dropProbe();
+
+    /** An argument name and a system namespace the vendor must refuse through it. */
+    abstract String[] refusedSystemLocation();
+
+    /** A hook for vendors that need a database created before the probe can live in it. */
+    String prepareUrl(String url, String user, String password) throws SQLException {
+        return url;
+    }
+
+    @BeforeAll
+    void createProbe0() throws SQLException {
+        String url = System.getenv(envPrefix() + "_URL");
+        assumeTrue(url != null && !url.isBlank(), envPrefix() + "_URL not set — live " + vendor() + " check skipped");
+        String user = System.getenv(envPrefix() + "_USER");
+        String password = System.getenv(envPrefix() + "_PASSWORD");
+        database = new DriverManagerDataSource(prepareUrl(url, user, password), user, password);
+        dropQuietly(dropProbe());
+        DbFixtures.exec(database, createProbe());
+    }
+
+    @AfterAll
+    void dropProbe0() {
+        if (database != null) {
+            dropQuietly(dropProbe());
+        }
+    }
+
+    void dropQuietly(String... statements) {
+        for (String sql : statements) {
+            try (Connection conn = database.getConnection(); Statement st = conn.createStatement()) {
+                st.execute(sql);
+            } catch (SQLException e) {
+                // not there — fine
+            }
+        }
+    }
+
+    @Test
+    void detectsTheVendor() throws SQLException {
+        try (Connection conn = database.getConnection()) {
+            assertEquals(vendor(), DbVendor.detect(conn.getMetaData()));
+        }
+    }
+
+    @Test
+    void tableCommentsArriveAndTheViewCarriesNone() {
+        ListTablesTool tool = new ListTablesTool(mapper, new DbMetadataReader(database));
+        JsonNode s = tool.call(mapper.createObjectNode().put("pattern", "zz_dbtools_probe"), null).structured();
+
+        assertEquals(3, s.path("totalCount").asInt(), s.toString());
+        assertEquals(CHILD_COMMENT, find(s.path("tables"), CHILD).path("comment").asText(), s.toString());
+        assertEquals(PARENT_COMMENT, find(s.path("tables"), PARENT).path("comment").asText(), s.toString());
+        JsonNode view = find(s.path("tables"), VIEW);
+        assertEquals("view", view.path("type").asText(), s.toString());
+        assertFalse(view.has("comment"), s.toString());
+        for (String other : strings(s.path("databases"))) {
+            assertFalse(SystemNamespaces.forVendor(vendor()).contains(other), "offered a system database: " + s);
+        }
+        for (String other : strings(s.path("schemas"))) {
+            assertFalse(SystemNamespaces.forVendor(vendor()).contains(other), "offered a system schema: " + s);
+        }
+    }
+
+    @Test
+    void describesKeysCommentsAndReferentialActions() {
+        DescribeTableTool tool = new DescribeTableTool(mapper, new DbMetadataReader(database));
+
+        McpToolResult parent = tool.call(mapper.createObjectNode().put("table", PARENT), null);
+        DbFixtures.assertSatisfiesOutputSchema(tool, parent);
+        JsonNode s = parent.structured();
+        assertEquals(PARENT_COMMENT, s.path("comment").asText(), s.toString());
+        assertEquals(ID_COMMENT, s.path("columns").get(0).path("comment").asText(), s.toString());
+        assertEquals(List.of("id"), lower(strings(s.path("primaryKey").path("columns"))), s.toString());
+        List<String> indexes = new ArrayList<>();
+        s.path("indexes").forEach(i -> indexes.add(i.path("name").asText().toLowerCase(Locale.ROOT)));
+        assertEquals(List.of("uk_zz_probe_code"), indexes, "the PK's index must be folded into primaryKey: " + s);
+
+        JsonNode ref = s.path("referencedBy").get(0);
+        assertEquals(CHILD, ref.path("table").asText().toLowerCase(Locale.ROOT), s.toString());
+        assertEquals("CASCADE", ref.path("onDelete").asText(), s.toString());
+        assertEquals("NO ACTION", ref.path("onUpdate").asText(), "no ON UPDATE clause was declared: " + s);
+
+        JsonNode child = tool.call(mapper.createObjectNode().put("table", CHILD), null).structured();
+        JsonNode fk = child.path("foreignKeys").get(0);
+        assertEquals(PARENT, fk.path("refTable").asText().toLowerCase(Locale.ROOT), child.toString());
+        assertEquals("NO ACTION", fk.path("onUpdate").asText(), child.toString());
+    }
+
+    @Test
+    void theVendorsSystemNamespaceIsRefused() {
+        String[] refused = refusedSystemLocation();
+        ListTablesTool tool = new ListTablesTool(mapper, new DbMetadataReader(database));
+        McpToolResult result = tool.call(mapper.createObjectNode().put(refused[0], refused[1]), null);
+        assertTrue(result.isError() && result.text().contains("system"), result.text());
+    }
+
+    // ---- helpers ------------------------------------------------------------------------------------------
+
+    JsonNode describe(String table) {
+        DescribeTableTool tool = new DescribeTableTool(mapper, new DbMetadataReader(database));
+        McpToolResult result = tool.call(mapper.createObjectNode().put("table", table), null);
+        DbFixtures.assertSatisfiesOutputSchema(tool, result);
+        return result.structured();
+    }
+
+    static JsonNode column(JsonNode described, String name) {
+        for (JsonNode c : described.path("columns")) {
+            if (c.path("name").asText().equalsIgnoreCase(name)) {
+                return c;
+            }
+        }
+        throw new AssertionError("no column " + name + " in " + described);
+    }
+
+    static JsonNode find(JsonNode tables, String name) {
+        for (JsonNode t : tables) {
+            if (t.path("name").asText().equalsIgnoreCase(name)) {
+                return t;
+            }
+        }
+        throw new AssertionError("no table " + name + " in " + tables);
+    }
+
+    static List<String> strings(JsonNode array) {
+        List<String> out = new ArrayList<>();
+        array.forEach(n -> out.add(n.asText()));
+        return out;
+    }
+
+    static List<String> lower(List<String> values) {
+        return values.stream().map(v -> v.toLowerCase(Locale.ROOT)).toList();
+    }
+}

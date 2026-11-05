@@ -181,6 +181,18 @@ public class SecurityConfig {
      *
      * <p>CSRF stays disabled — module routes may be POST and would break otherwise. With {@code permitAll} and no
      * session there is nothing for CSRF to protect here.
+     *
+     * <p><b>{@code /__bridge/**} is denied, not left to permitAll.</b> protean's component scan registers its
+     * {@code BridgeController} ({@code POST /__bridge/invoke}) on every host that is not a worker. It turns the
+     * request body into {@code Class.forName} → {@code getBean} → a reflective method call — the worker-to-host RPC
+     * of the worker/container isolation modes. Its own guard ({@code BridgeAuthFilter}) loads only with
+     * {@code protean.bridge.auth-enabled=true}, which defaults to false. Left to permitAll it lets ANYONE call any
+     * method of any host bean (e.g. read a secret through {@code Environment}) — measured on a production server
+     * built from this template. In-process isolation has no worker, so nothing legitimate calls it.
+     *
+     * <p>[rpc-bridge] When workers DO call the host ({@code protean.worker.rpc-bridge=true}), delete the deny line
+     * AND set {@code protean.bridge.auth-enabled=true} (auth-mode {@code hmac}) in the same change — the bridge must
+     * never be reachable without its own auth.
      */
     @Bean
     @Order(2)
@@ -189,7 +201,10 @@ public class SecurityConfig {
             // Modules may declare POST routes; with permitAll and no session, CSRF has nothing to protect.
             .csrf(csrf -> csrf.disable())
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-            .authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
+            .authorizeHttpRequests(auth -> auth
+                // protean's worker→host RPC bridge — see the Javadoc ([rpc-bridge] swaps this for bridge auth).
+                .requestMatchers("/__bridge/**").denyAll()
+                .anyRequest().permitAll());
 
         return http.build();
     }

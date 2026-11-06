@@ -11,6 +11,7 @@
 | [create-frontend](create-frontend/) | 프론트 표준 기반 세팅 | Claude | 스캐폴드 위에 표준 프론트엔드 기반(i18n·폰트·통신 SDK·공유 번들)을 올린다 |
 | [appcontext-architecture](appcontext-architecture/) | 셸↔앱 계약 세우기 | Claude | 셸↔앱 계약(AppContext 근간)을 세운다 — create-frontend 다음 단계 |
 | [add-shadcn-existing](add-shadcn-existing/) | 기존 프로젝트 shadcn 추가 | Claude | 이미 있는 React 프로젝트에 shadcn/ui 를 추가·통합한다 |
+| [dev-pc-setup](dev-pc-setup/) | 개발자 PC 초기 설정 | Claude | AX 개발자 Windows PC 를 점검하고 빠진 것(도구 · GitHub 토큰 · 저장소 · 커넥터 · 첫 세션)만 채운다. 새 PC 에서 처음 쓰는 법은 [부트스트랩](dev-pc-setup/references/procedure.md#부트스트랩--이-스킬을-처음-쓰기) |
 
 변경 이력은 [CHANGELOG.md](CHANGELOG.md) 다 — 사람이 갱신한다. PR 마다 「Unreleased」에 한 줄을 더한다.
 
@@ -27,6 +28,7 @@
 | 스킬 영문명 | 아티팩트 |
 | --- | --- |
 | nz_amoeba_make | [Amoeba Maker 선택 지도](https://claude.ai/code/artifact/6fe78fca-2674-4bcf-a76f-866bb81fe074?org=dbcf19a7-9d52-448d-b3cd-0945742ba48e) |
+| dev-pc-setup | [개발자 PC 초기 설정](https://claude.ai/artifact/1tDQtkD5Pn6rKYn5XcbL6n) — 같은 절차의 사람용 체크리스트 |
 
 ## 스킬 설정
 

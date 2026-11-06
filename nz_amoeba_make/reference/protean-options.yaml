@@ -227,7 +227,11 @@ groups:
         type: boolean
         default: false
         advanced: true
-        desc: Require a shared-secret bearer token on /__bridge/* (unauthenticated calls → 401).
+        desc: >-
+          Require a shared-secret bearer token on /__bridge/* (unauthenticated calls → 401). protean registers
+          POST /__bridge/invoke (a reflective call into any host bean) on EVERY non-worker host, not only when
+          rpc-bridge is on — so this default (false) leaves it open unless SecurityConfig denies /__bridge/**, which
+          the generated one does. MUST be true whenever protean.worker.rpc-bridge is on.
       - key: protean.bridge.secret
         type: string
         default: ""
@@ -435,7 +439,11 @@ groups:
         default: false
         requires: [protean.bridge.url]
         advanced: true
-        desc: Let workers call host shared beans over the RPC bridge (declare bridgedInterfaces per module).
+        desc: >-
+          Let workers call host shared beans over the RPC bridge (declare bridgedInterfaces per module). Turning it
+          on REQUIRES protean.bridge.auth-enabled=true (auth-mode hmac) and removing SecurityConfig's
+          `/__bridge/**` deny — in the same change. Off (the default), the generated SecurityConfig denies
+          /__bridge/** because protean registers the endpoint on every non-worker host regardless.
       - key: protean.worker.runtime
         type: enum
         allowed: [embed, sidecar]

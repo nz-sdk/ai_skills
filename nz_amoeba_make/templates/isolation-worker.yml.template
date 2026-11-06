@@ -14,6 +14,9 @@
     auto-restart: false         # restart a crashed worker's modules (process track)
     shutdown-grace-ms: 5000     # SIGTERM grace before force-kill
     # [OPTIONAL rpc-bridge] let workers call host shared beans over /__bridge/* (declare bridgedInterfaces per module)
+    # ★ Turning this on REQUIRES the bridge auth below (auth-enabled: true) AND deleting the /__bridge/** deny line
+    #   in SecurityConfig — in ONE change. The host's /__bridge/invoke reflectively calls any host bean; without its
+    #   own auth it is open to anyone who can reach the host port.
     # rpc-bridge: true
     #
     # [OPTIONAL sidecar runtime] runtime: sidecar  — launch an external worker artifact instead of exploding bootJar.

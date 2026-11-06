@@ -11,6 +11,7 @@
 
 ### 기능
 
+* **dev-pc-setup:** 새 스킬 — AX 개발자 Windows PC 를 읽기 전용 스크립트(`scripts/check.ps1`)로 점검하고 빠진 것만 채운다(도구 · gh 로그인 · DS 패키지 classic PAT · 저장소 · 작성자 · 커넥터 · 첫 세션 · Jira 대조표). 토큰 값은 보지도 출력하지도 않는다 ([#15](https://github.com/nz-sdk/ai_skills/pull/15))
 * **nz_amoeba_make:** 생성되는 리소스 서버가 액세스 토큰의 `aud` 를 검증한다 ([#5](https://github.com/nz-sdk/ai_skills/pull/5))
 * **nz_amoeba_make:** capability `db_metadata_tools` — 스키마 · 테이블 조회 MCP 도구 ([#7](https://github.com/nz-sdk/ai_skills/pull/7))
 * **nz_amoeba_make:** `db_metadata_tools` 에 `database` 인자 — 계정이 보는 다른 DB 조회 ([#8](https://github.com/nz-sdk/ai_skills/pull/8))

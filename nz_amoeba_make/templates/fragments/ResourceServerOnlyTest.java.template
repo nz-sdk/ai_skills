@@ -2,7 +2,7 @@
 // protean.mcp.authorization.resource is set (i.e. alongside SecurityConfig).
 //
 // This app is a Resource Server ONLY — it VERIFIES tokens, it does not ISSUE them. That is an architectural
-// boundary, not a configuration choice, so it is pinned by tests rather than left as an assumption. Five things
+// boundary, not a configuration choice, so it is pinned by tests rather than left as an assumption. Six things
 // could silently cross it:
 //   (1) the Authorization Server library returning to the classpath,
 //   (2) a local JwtDecoder bean appearing, which switches verification to an in-process key,
@@ -11,7 +11,9 @@
 //   (5) the discovery document breaking — this is how an MCP client FINDS the Authorization Server, and it is
 //       the contract most easily broken without anything else failing. Pinned at BOTH addresses (root and
 //       path-appended) and through the 401's resource_metadata, because a strict client (VS Code) uses only the
-//       path-appended one and a lenient one only the root.
+//       path-appended one and a lenient one only the root,
+//   (6) protean's worker bridge (/__bridge/invoke) falling open on the permitAll service chain — an anonymous
+//       reflective call into any host bean.
 //
 // The whole test runs OFFLINE: no database, and the issuer need not be reachable (see props() below).
 package {{PKG}};
@@ -176,6 +178,39 @@ class ResourceServerOnlyTest {
         // stateful again (STATELESS broken).
         assertTrue(res.getBody() == null || !res.getBody().contains("name=\"password\""),
                 "a login form appeared: " + res.getBody());
+    }
+
+    @Test
+    void proteanWorkerBridgeIsClosed() throws Exception {
+        // protean registers BridgeController (POST /__bridge/invoke) on every non-worker host; it reflectively
+        // invokes any method of any host bean named in the body, and its own auth filter is opt-in (off by
+        // default). Without SecurityConfig's deny, this exact request returns 200 {"result":"21",...} — an
+        // anonymous Environment read.
+        //
+        // The bean must still EXIST, so that the 403 below proves the security rule refuses it — not merely that
+        // a protean upgrade stopped registering the controller (that would let this test pass and then rot).
+        //
+        // [rpc-bridge] With protean.worker.rpc-bridge=true the deny is replaced by protean.bridge.auth-enabled=true:
+        // then expect 401 from BridgeAuthFilter instead of 403, and keep the no-leak assertion.
+        assertTrue(this.context.getBeanNamesForType(Class.forName("org.htcom.protean.bridge.BridgeController"))
+                        .length > 0,
+                "protean no longer registers BridgeController — revisit SecurityConfig's /__bridge/** rule");
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        String invocation = "{\"iface\":\"org.springframework.core.env.Environment\",\"method\":\"getProperty\","
+                + "\"argTypes\":[\"java.lang.String\"],\"args\":[\"java.version\"]}";
+        for (String path : new String[] { "/__bridge/invoke", "/__bridge/invoke/" }) {
+            ResponseEntity<String> res = this.rest.exchange(
+                    "http://localhost:" + this.port + path, HttpMethod.POST,
+                    new HttpEntity<>(invocation, headers), String.class);
+            assertEquals(403, res.getStatusCode().value(),
+                    path + " must be refused before it reaches protean's controller, got: "
+                            + res.getStatusCode().value() + " / " + res.getBody());
+            String body = res.getBody() == null ? "" : res.getBody();
+            assertTrue(!body.contains(System.getProperty("java.version")) && !body.contains("at org."),
+                    "the response leaked a property or a stack trace: " + body);
+        }
     }
 
     @Test

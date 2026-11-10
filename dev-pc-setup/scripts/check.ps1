@@ -273,6 +273,27 @@ foreach ($repo in @('bridge-web', 'bridge-backoffice')) {
   if ($remote -match "nz-sdk/$repo(\.git)?$") { Add-Result '3' "$repo clone" 'ok' $remote }
   else { Add-Result '3' "$repo clone" 'warn' "origin is '$remote'" }
 
+  # A stale checkout misleads: its README and settings may describe a flow that no longer exists.
+  # Read-only: ask the remote for main's sha (no fetch) and test whether HEAD already contains it.
+  if (-not $Offline) {
+    $branch = Get-FirstLine (Invoke-Native 'git' @('-C', $dir, 'rev-parse', '--abbrev-ref', 'HEAD'))
+    $ls = Invoke-Native 'git' @('-C', $dir, 'ls-remote', 'origin', 'refs/heads/main')
+    $sha = ''
+    if ($ls.Code -eq 0 -and (Get-FirstLine $ls) -match '^([0-9a-f]{40})') { $sha = $Matches[1] }
+    if (-not $sha) {
+      Add-Result '3' "$repo up to date" 'warn' 'cannot read origin main (network or auth)'
+    } else {
+      $short = $sha.Substring(0, 7)
+      # Exit 0 = ancestor. A sha that is not in the local repo yet also fails, which means behind.
+      $anc = Invoke-Native 'git' @('-C', $dir, 'merge-base', '--is-ancestor', $sha, 'HEAD')
+      if ($anc.Code -eq 0) {
+        Add-Result '3' "$repo up to date" 'ok' "$branch contains origin/main ($short)"
+      } else {
+        Add-Result '3' "$repo up to date" 'warn' "$branch does not contain origin/main ($short): on main run git pull --ff-only, on a work branch update it from main"
+      }
+    }
+  }
+
   $name = Get-FirstLine (Invoke-Native 'git' @('-C', $dir, 'config', '--local', '--get', 'user.name'))
   $mail = Get-FirstLine (Invoke-Native 'git' @('-C', $dir, 'config', '--local', '--get', 'user.email'))
   if ($name -and $mail) { Add-Result '3' "$repo author (local)" 'ok' "$name <$mail>" }

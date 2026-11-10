@@ -87,7 +87,9 @@ winget install --id Microsoft.VisualStudioCode -e --scope user
 |---|---|---|---|---|
 | gh 로그인 | 브라우저 로그인(OAuth, `gho_`) | `repo` · `read:org` · `gist` | Windows 자격 증명 관리자(gh) | push · PR · CI · Release 조회 |
 | DS 패키지 | classic PAT(`ghp_`) | `read:packages` 하나 | 사용자 환경변수 `NODE_AUTH_TOKEN` | `npm ci` 로 `@nz-sdk/ds-bridge` |
-| 이슈 토큰(선택) | fine-grained PAT | bridge-web · Issues: Read and write | 저장소 Secret `ISSUE_TOKEN_<아이디>` | Jira 사본 이슈를 본인 이름으로 |
+
+개발자가 만들 GitHub 토큰은 이 둘뿐이다. bridge-web 이슈와 Jira EXP 의 동기화(`issue-sync.yml`)는 저장소의 `GITHUB_TOKEN` 과
+Owner 가 관리하는 Jira 규칙용 토큰 하나로 돈다. 예전 README 의 사람별 `ISSUE_TOKEN_<아이디>` 는 #116 이후 쓰지 않는다.
 
 ### 2-1. gh 브라우저 로그인 (사람)
 
@@ -152,18 +154,6 @@ Claude 는 창만 열어 줄 수 있다: `rundll32 sysdm.cpl,EditEnvironmentVari
 - **대안 (bridge-web README 방식):** gh 로그인 토큰을 쓴다. `gh auth refresh -h github.com -s read:packages` 뒤 창마다 `$env:NODE_AUTH_TOKEN = gh auth token`.
   gh 토큰은 권한이 넓으니 영구 환경변수로는 넣지 않는다.
 
-### 2-6. Jira 이슈 개인 토큰 (선택 · 사람)
-
-Jira EXP 업무 항목은 bridge-web 에 GitHub 이슈 사본 `[EXP-123] 요약` 으로 만들어진다. 이 토큰이 있으면 내가 보고한 항목의 사본이 내 이름으로 생긴다. 없으면 봇 이름으로 생기고, 작업에는 지장이 없다.
-
-1. Developer settings ▸ Personal access tokens ▸ Fine-grained tokens ▸ Generate new token
-2. Resource owner `nz-sdk`, Repository access: Only select repositories → `bridge-web`
-3. Permissions ▸ Repositories ▸ Issues: Read and write 만 준다. 만료는 짧게 잡는다.
-   - 조직이 승인을 요구하면 Owner 가 Pending requests 에서 승인한다.
-4. 저장소 관리자가 Settings ▸ Secrets and variables ▸ Actions 에 `ISSUE_TOKEN_<아이디 대문자, 하이픈은 밑줄>` 로 넣는다.
-   - 예: `hong-gd` → `ISSUE_TOKEN_HONG_GD`
-   - 토큰 전달은 채팅이 아니라 관리자와 정한 경로로 한다.
-
 ---
 
 ## 3. 저장소 · 작성자 · 의존성
@@ -176,6 +166,10 @@ cd D:\work\bridge
 gh repo clone nz-sdk/bridge-web
 gh repo clone nz-sdk/bridge-backoffice
 ```
+
+이미 받아 둔 저장소는 최신화한다. main 이면 `git -C <저장소> pull --ff-only`, 작업 브랜치면 main 을 받아 브랜치를 맞춘다.
+낡은 체크아웃의 README · 설정은 지금 방식과 다를 수 있다. 예를 들어 #116 이전 README 는 이미 없어진 사람별 이슈 토큰을 설명했다.
+점검의 `<저장소> up to date` 행이 이것을 본다.
 
 ### 작성자 (저장소마다 local)
 
@@ -326,7 +320,7 @@ people:
 ```
 
 - 저장소 변경이므로 그 저장소의 브랜치 + PR 규칙을 따른다(예: `chore/jira-map-<아이디>`). 커밋 · push · PR 은 사용자 승인 뒤 한다.
-- 대조표는 지금 시험 스페이스(TEST1) 단계다.
+- 대조표는 bridge-web 이슈와 Jira EXP 의 양방향 동기화(`issue-sync.yml`)와 이슈 등록 스킬이 보고자 · 담당을 찾을 때 읽는다. 개발자가 따로 만들 토큰은 없다.
 - 활성 gh 계정이 `people` 에 없고 다른 계정이 있으면 먼저 어느 계정으로 일할지 정한다(2-1 「gh 계정이 여럿일 때」).
   그 계정이 맞다면 추가하고, 아니면 `gh auth switch` 로 바꾼다.
 

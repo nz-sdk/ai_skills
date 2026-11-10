@@ -6,7 +6,7 @@ compatibility:
   agents:
     - claude
 metadata:
-  version: 0.1.0
+  version: 0.1.1
 ---
 
 # dev-pc-setup — 개발자 PC 초기 설정
@@ -127,7 +127,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<base directory>\scripts\ch
 | 0 계정 · 권한 | 남은 것만 요청 문구로 정리 | 조직 관리자 · 설계자 · Jira 관리자에게 요청 | 사용자 확인 |
 | 1 도구 | winget 설치, 필요하면 VS Code `bin` 을 사용자 PATH 에 추가(모두 승인 후) | — | node v22.x, VS Code 1.94 이상 · `code` 가 PATH 에 있음. 사용자 설치판은 권장(info) |
 | 2 GitHub | `gh auth setup-git` 실행, 토큰 화면 경로 안내, 환경 변수 창 열기(`rundll32 sysdm.cpl,EditEnvironmentVariables`) | 별도 창에서 `gh auth login … --web`, classic PAT 만들기, `NODE_AUTH_TOKEN` 입력. gh 계정이 여럿이면 쓸 계정 고르기(`gh auth switch -u <계정>`) | 활성 gh 계정이 oauth, `npm view` 가 판 번호 |
-| 3 저장소 | clone, local `git config`, `npm ci`, 백오피스 `.env` 두 줄(모두 승인 후) | 이름 · 회사 메일 답하기(AskUserQuestion) | 3단계 모두 ok |
+| 3 저장소 | clone 또는 최신화(main 이면 `git pull --ff-only`), local `git config`, `npm ci`, 백오피스 `.env` 두 줄(모두 승인 후) | 이름 · 회사 메일 답하기(AskUserQuestion) | 3단계 모두 ok |
 | 4 Claude Code | API 키 변수가 있는지 확인 | `/status` 로 팀 계정 확인 | API key variables ok |
 | 5 커넥터 | 가입 → 승인 요청 → 연결 순서와 요청 문구 안내 | bridge-auth 가입, 관리자 승인 요청, claude.ai 에서 BridgeX · Atlassian 연결 | 새 세션에서 도구가 보임 |
 | 6 첫 세션 | `/mcp` 안내, `protean_list_modules` · `atlassianUserInfo` 호출, 검사 4종 실행 | 저장소 루트로 새 창 열기, 프로젝트 MCP 승인, 필요하면 `/design-login` | 모두 통과 |

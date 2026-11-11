@@ -1,0 +1,572 @@
+# =====================================================================
+# Issue sync — GitHub 이슈 ↔ Jira 업무 항목을 등록 · 수정 · 댓글 · 상태 · 담당까지 맞춘다
+#
+# job 두 개 — 실패하면 job 이름으로 방향을 안다
+#   from-github  GitHub 이벤트 → Jira 자동화 규칙 「GitHub -> Jira」(수신 웹후크)
+#                opened(사본 등록) · edited · closed · reopened · assigned · unassigned · 댓글
+#   from-jira    Jira 규칙이 workflow_dispatch 로 부른다 → GitHub
+#                kind = create(사본 등록) · link(원본에 짝 표시) · edit · transition · comment
+#
+# 짝 찾기 (라벨 · 입력값에 기대지 않고 GitHub 안의 표시로 찾는다)
+#   GitHub 사본   제목 [JIRA 키] + 라벨 jira        → Jira 가 원본
+#   GitHub 원본   본문 끝 <!-- jira:키 --> · 라벨 jira 없음 → Jira 가 사본 (표시는 link 가 넣는다)
+#   둘 다 없으면 건너뛴다(짝 없는 이슈 · 등록 직후 link 전)
+#
+# 쓰는 계정 (방안 A — 대신 쓰는 전용 계정)
+#   GitHub 에 쓰기   Secret SYNC_BOT_TOKEN(전용 계정 PAT) — 없으면 GITHUB_TOKEN(github-actions)
+#   Jira 에 쓰기     Jira 규칙의 실행 주체(전용 Jira 사용자로 바꿀 수 있다)
+#   누가 했는지는 댓글 첫 줄 「○○ 님 GitHub 댓글 / ○○ 님 Jira 댓글」로 남긴다
+#
+# 반복 막기
+#   - 전용 계정(변수 SYNC_BOT_LOGIN)이 일으킨 이벤트는 from-github 가 돌지 않는다
+#     (GITHUB_TOKEN 으로 바꾼 것은 GitHub 이 애초에 워크플로를 깨우지 않는다)
+#   - 옮겨 단 댓글에는 <!-- sync:jira --> — from-github 가 건너뛴다
+#   - Jira 규칙은 「다른 규칙이 이 규칙을 트리거하도록 허용」을 끈다 — 규칙이 바꾼 Jira 는 GitHub 으로 돌아오지 않는다
+#   - 값이 이미 같으면 고치지 않는다
+#
+# Secrets: JIRA_TEST1_WEBHOOK_URL · JIRA_TEST1_WEBHOOK_TOKEN(TEST1 규칙 「[AX_AI] Github -> Jira Issue」 수신 웹후크) · SYNC_BOT_TOKEN(선택)
+#   옛 JIRA_WEBHOOK_URL · JIRA_WEBHOOK_TOKEN 은 쓰지 않는다
+# Variables: SYNC_BOT_LOGIN(선택 — 전용 계정 아이디)
+#
+# ★ workflow_dispatch 입력은 GitHub 이 10개까지만 받는다 — 지금 10개(꽉 참 · 더 필요하면 person · parent 처럼 「a|b」로 묶는다).
+#   Jira 규칙 본문의 키와 이름이 같아야 한다(모르는 키가 오면 422 — 입력을 먼저 머지한 뒤 Jira 본문에 키를 더한다).
+# ★ Jira 가 쥔 PAT(Actions: write)는 workflow_dispatch 가 있는 다른 워크플로도 부를 수 있다 —
+#   release.yml 수동 실행은 dry-run 뿐이다. 수동 실행에 실제 job 을 붙이지 않는다.
+# ⚠️ 이슈 제목 · 본문 · 댓글 · Jira 입력은 run: 안에 ${{ }} 로 넣지 않는다 — 이벤트 파일 · env 로만 받는다.
+# =====================================================================
+name: Issue sync
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened, assigned, unassigned]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: 'create · link · edit · transition · comment'
+        required: true
+      key:
+        description: 'Jira 키 (예: TEST1-30)'
+        required: true
+      number:
+        description: 'GitHub 이슈 번호 — link 만'
+        required: false
+      summary:
+        description: '요약'
+        required: false
+      body:
+        description: '설명 또는 댓글 (Jira 위키)'
+        required: false
+      type:
+        description: '업무 유형 이름'
+        required: false
+      status:
+        description: '상태 분류 키 (new · indeterminate · done)'
+        required: false
+      assignee:
+        description: '담당자 accountId'
+        required: false
+      person:
+        description: '댓글 쓴 사람 「accountId|이름」'
+        required: false
+      parent:
+        description: '상위 에픽 「키|요약」 — create · edit (없으면 빈 값 · 「|」)'
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  PANDOC_VERSION: 3.1.11.1
+  MAP: .github/github-jira-map.yml
+
+jobs:
+  # ===================================================================
+  # GitHub → Jira
+  # ===================================================================
+  from-github:
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      && !github.event.issue.pull_request
+      && (vars.SYNC_BOT_LOGIN == '' || github.event.sender.login != vars.SYNC_BOT_LOGIN)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: issue-sync-gh-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      URL: ${{ secrets.JIRA_TEST1_WEBHOOK_URL }}
+      TOKEN: ${{ secrets.JIRA_TEST1_WEBHOOK_TOKEN }}
+      JIRA_SPACE: TEST1   # 등록 때 규칙이 티켓을 만드는 스페이스
+
+    steps:
+      - name: Decide kind · pair
+        id: d
+        run: |
+          # 상위 에픽 키 — 양식 칸 「### 상위 에픽 키」 를 읽는 함수(Build payload 도 쓴다)
+          #   epic_raw: 칸의 첫 글줄 그대로(슬랙에 「적은 값」 으로) · epic_of: 그 칸의 키 모양만 대문자로(링크 · 소문자도 받는다)
+          cat > "$RUNNER_TEMP/epic.sh" <<'SH'
+          epic_raw() { perl -CSD -Mutf8 -0ne 'if (/^###[ \t]*상위 에픽 키[ \t]*\r?\n(.*?)(?=^###[ \t]|\z)/ms) { my ($l) = grep { /\S/ } split /\r?\n/, $1; $l //= ""; $l =~ s/^\s+|\s+$//g; print substr($l, 0, 80) }'; }
+          epic_of()  { perl -CSD -Mutf8 -0ne 'if (/^###[ \t]*상위 에픽 키[ \t]*\r?\n(.*?)(?=^###[ \t]|\z)/ms) { my $s = $1; print uc $1 if $s =~ /\b([A-Za-z][A-Za-z0-9]*-[0-9]+)\b/ }'; }
+          has_epic() { grep -qE '^###[[:space:]]*상위 에픽 키'; }
+          SH
+          . "$RUNNER_TEMP/epic.sh"
+
+          ev="$GITHUB_EVENT_PATH"
+          action=$(jq -r '.action' "$ev")
+          title=$(jq -r '.issue.title' "$ev")
+          body=$(jq -r '.issue.body // ""' "$ev")
+          copy=""; jq -e '[.issue.labels[].name] | index("jira")' "$ev" >/dev/null && copy=1
+
+          kind=""
+          case "$GITHUB_EVENT_NAME:$action" in
+            issues:opened)
+              # 라벨 jira = Jira 에서 온 사본 — 다시 보내지 않는다
+              if [ -n "$copy" ]; then echo "Jira 사본 — 건너뛴다"; else kind=create; fi ;;
+            issues:edited)
+              jq -e '.changes.title or .changes.body' "$ev" >/dev/null && kind=edit ;;
+            issues:closed)     kind=close ;;
+            issues:reopened)   kind=reopen ;;
+            issues:assigned|issues:unassigned) kind=assign ;;
+            issue_comment:created)
+              if jq -e '(.comment.body // "" | contains("<!-- sync:jira -->")) or .comment.user.type == "Bot"' "$ev" >/dev/null; then
+                echo "옮겨 온 댓글 · 봇 댓글 — 건너뛴다"
+              else
+                kind=comment
+              fi ;;
+          esac
+
+          # 사본은 제목 [JIRA 키] + 라벨 jira 둘 다 — 사람이 제목에 [JIRA 키] 를 쓴 원본(GCJ-C8)을 사본으로 보지 않는다
+          key=""; role=""
+          if [ -n "$kind" ] && [ "$kind" != create ]; then
+            if [[ "$title" =~ ^\[JIRA\ ([A-Z][A-Z0-9]+-[0-9]+)\] ]] && [ -n "$copy" ]; then
+              key="${BASH_REMATCH[1]}"; role=copy
+            else
+              key=$(printf '%s' "$body" | grep -oE '<!-- jira:[A-Z][A-Z0-9]+-[0-9]+ -->' | tail -1 | sed -E 's/<!-- jira:(.*) -->/\1/' || true)
+              [ -z "$key" ] || role=original
+            fi
+            if [ -z "$key" ]; then
+              # 사본이 없는 원본 — 틀린 상위 에픽 키로 등록이 멈춘 이슈의 키를 고치면 다시 등록한다
+              # (새 양식 이슈 · 본문의 「상위 에픽 키」 칸이 바뀐 수정만. 사본이 이미 있으면 규칙 ①의 레이블 확인이 막는다)
+              old=$(jq -r '.changes.body.from // ""' "$ev")
+              if [ "$kind" = edit ] && [ -z "$copy" ] && jq -e '.changes.body' "$ev" >/dev/null \
+                 && printf '%s' "$body" | has_epic \
+                 && [ "$(printf '%s' "$body" | epic_raw)" != "$(printf '%s' "$old" | epic_raw)" ]; then
+                echo "짝 없음 · 상위 에픽 키가 바뀜 — 다시 등록한다"; kind=create
+              else
+                echo "짝 없음 — 건너뛴다"; kind=""
+              fi
+            fi
+          fi
+
+          [ -n "$kind" ] || echo "보낼 것 없음"
+          { echo "kind=$kind"; echo "key=$key"; echo "role=$role"; } >> "$GITHUB_OUTPUT"
+          echo "kind=$kind key=$key role=$role"
+
+      - name: Checkout map
+        if: steps.d.outputs.kind != ''
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/github-jira-map.yml
+          sparse-checkout-cone-mode: false
+
+      # 러너의 apt pandoc 은 이미지마다 판이 달라 판을 고정한다
+      - name: Install pandoc
+        if: contains(fromJSON('["create","edit","comment"]'), steps.d.outputs.kind)
+        run: |
+          deb="$RUNNER_TEMP/pandoc.deb"
+          curl -sSL --max-time 60 -o "$deb" \
+            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
+          sudo dpkg -i "$deb" >/dev/null
+          pandoc --version | head -1
+
+      - name: Build payload
+        if: steps.d.outputs.kind != ''
+        env:
+          KIND: ${{ steps.d.outputs.kind }}
+          KEY: ${{ steps.d.outputs.key }}
+          ROLE: ${{ steps.d.outputs.role }}
+        run: |
+          . "$RUNNER_TEMP/epic.sh"
+          ev="$GITHUB_EVENT_PATH"
+          acct() { [ -z "$1" ] || L="$1" yq -r '.people[strenv(L)].jiraAccountId // ""' "$MAP"; }
+          # Jira 위키 글 안의 @아이디 를 대조표 사람이면 멘션으로
+          mention() {
+            local t; t=$(cat)
+            for login in $(yq -r '.people | keys | .[]' "$MAP"); do
+              id=$(acct "$login")
+              t=$(printf '%s' "$t" | L="$login" I="$id" perl -pe 's/(?<![\w\/])\@\Q$ENV{L}\E\b/[~accountid:$ENV{I}]/g')
+            done
+            printf '%s' "$t"
+          }
+          # GitHub 마크다운 → Jira 위키 (소제목 자동 앵커를 끄고, 남는 빈 {anchor:} 는 지운다)
+          tojira() { pandoc -f gfm-gfm_auto_identifiers -t jira --wrap=none | sed -E 's/\{anchor:[^}]*\}//g'; }
+
+          number=$(jq -r '.issue.number' "$ev")
+          title=$(jq -r '.issue.title' "$ev")
+          html=$(jq -r '.issue.html_url' "$ev")
+
+          if [ "$KIND" = create ]; then
+            # 등록 — 이벤트 그대로 + 변환한 본문 + 대조표 값(bridge). 규칙이 {{webhookData.bridge.*}} 로 읽는다
+            jq -r '.issue.body // ""' "$ev" | tojira > "$RUNNER_TEMP/body.txt"
+            gtype=$(jq -r '.issue.type.name // ""' "$ev")
+            opener=$(jq -r '.issue.user.login' "$ev")
+            first=$(jq -r '.issue.assignees[0].login // ""' "$ev")
+            jtype=$(S="$JIRA_SPACE" G="$gtype" yq -r '.spaces[strenv(S)] as $s | ($s.issueTypes[strenv(G)] // $s.default // "작업")' "$MAP")
+            reporter=$(acct "$opener")
+            assignee=$(acct "$first")
+            [ -n "$reporter" ] || echo "::notice::$opener 는 대조표 people 에 없다 — 보고자는 규칙 기본값"
+            [ -z "$first" ] || [ -n "$assignee" ] || echo "::notice::담당 $first 는 대조표 people 에 없다 — 담당 없음"
+            startField=$(S="$JIRA_SPACE" yq -r '.spaces[strenv(S)].startDateField // ""' "$MAP")
+            startDate=$(TZ=Asia/Seoul date -d "$(jq -r '.issue.created_at' "$ev")" +%F)
+            # 상위 에픽 — 규칙 ①이 키를 조회해 있는 에픽이면 사본을 만들고, 없으면(0건) 슬랙으로 알리고 멈춘다
+            # 이 스페이스 키 모양이 아니면 epicKey 를 null 로 — 규칙 조회식의 기본값({{…|TEST1-0}})이 쓰여 0건이 된다
+            epicRaw=$(jq -r '.issue.body // ""' "$ev" | epic_raw)
+            epicKey=$(jq -r '.issue.body // ""' "$ev" | epic_of)
+            if [[ ! "$epicKey" =~ ^${JIRA_SPACE}-[0-9]+$ ]]; then
+              echo "::notice::상위 에픽 키 「${epicRaw}」 는 $JIRA_SPACE 키 모양이 아니다 — 규칙이 사본을 만들지 않는다"
+              epicKey=""
+            fi
+            # 다시 등록(짝 없는 원본의 키 수정)도 규칙 ①의 opened 조건을 지나도록 action 을 맞춘다
+            jq --rawfile b "$RUNNER_TEMP/body.txt" \
+               --arg jt "$jtype" --arg rp "$reporter" --arg as "$assignee" \
+               --arg sd "$startDate" --arg sf "$startField" --arg ek "$epicKey" --arg er "$epicRaw" \
+               '.issue.body = $b
+                | .action = "opened"
+                | .bridge = { jiraType: $jt, reporter: $rp, assignee: $as,
+                              startDate: $sd, startDateField: $sf,
+                              epicKey: (if $ek == "" then null else $ek end), epicRaw: $er,
+                              actor: (.sender.login // ""),
+                              labels: [ .issue.labels[].name ] }' \
+               "$ev" > "$RUNNER_TEMP/payload.json"
+            jq '.bridge' "$RUNNER_TEMP/payload.json"
+            exit 0
+          fi
+
+          summary=""; desc=""; assignee=""; comment=""
+          case "$KIND" in
+            edit)
+              # 본문에서 짝 표시 · (사본이면) 맨 아래 출처 블록을 뗀다
+              jq -r '.issue.body // ""' "$ev" > "$RUNNER_TEMP/body.md"
+              perl -0pi -e 's/\n*<!-- jira:[A-Z][A-Z0-9]+-[0-9]+ -->\s*\z//' "$RUNNER_TEMP/body.md"
+              if [ "$ROLE" = copy ]; then
+                perl -0pi -e 's/\n*### 출처\n(?:(?!\n### ).)*\z//s' "$RUNNER_TEMP/body.md"
+                summary="${title#\[JIRA $KEY\] }"
+                desc=$(tojira < "$RUNNER_TEMP/body.md")
+              else
+                summary="[GH #$number] $title"
+                ft=$(printf '%s' "$title" | sed -e 's/\[/［/g; s/\]/］/g; s/|/｜/g')
+                desc=$(tojira < "$RUNNER_TEMP/body.md"; printf '\n\nh3. 출처\nGitHub : [Issue #%s · %s|%s]' "$number" "$ft" "$html")
+              fi ;;
+            assign)
+              first=$(jq -r '.issue.assignees[0].login // ""' "$ev")
+              assignee=$(acct "$first")
+              [ -z "$first" ] || [ -n "$assignee" ] || echo "::notice::담당 $first 는 대조표에 없다 — Jira 담당을 비운다" ;;
+            comment)
+              who=$(jq -r '.comment.user.login' "$ev")
+              text=$(jq -r '.comment.body // ""' "$ev" | tojira | mention)
+              comment=$(printf '*%s 님 GitHub 댓글*\n\n%s' "$who" "$text") ;;
+          esac
+
+          # 상위 에픽 — 원본 본문의 「상위 에픽 키」 칸이 바뀐 수정만 epicChanged=true. 규칙 ①이 조회해 있으면 상위를 바꾸고, 없으면 슬랙
+          epicKey=""; epicRaw=""; epicChanged=false
+          if [ "$KIND" = edit ] && [ "$ROLE" = original ] && jq -e '.changes.body' "$ev" >/dev/null; then
+            epicRaw=$(jq -r '.issue.body // ""' "$ev" | epic_raw)
+            if [ "$epicRaw" != "$(jq -r '.changes.body.from // ""' "$ev" | epic_raw)" ]; then
+              epicChanged=true
+              epicKey=$(jq -r '.issue.body // ""' "$ev" | epic_of)
+              [[ "$epicKey" =~ ^${JIRA_SPACE}-[0-9]+$ ]] || epicKey=""
+            fi
+          fi
+
+          jq -n --arg key "$KEY" --arg kind "$KIND" --arg role "$ROLE" \
+                --arg summary "$summary" --arg description "$desc" \
+                --arg assignee "$assignee" --arg comment "$comment" \
+                --arg ek "$epicKey" --arg er "$epicRaw" --argjson ec "$epicChanged" \
+                --arg actor "$(jq -r '.sender.login // ""' "$ev")" \
+            '{key: $key, kind: $kind, role: $role, summary: $summary, description: $description, assignee: $assignee, comment: $comment,
+              epicKey: (if $ek == "" then null else $ek end), epicRaw: $er, epicChanged: $ec, actor: $actor}' \
+            > "$RUNNER_TEMP/payload.json"
+          jq '{key, kind, role, summary, assignee, epicKey, epicChanged}' "$RUNNER_TEMP/payload.json"
+
+      - name: Send to Jira automation
+        if: steps.d.outputs.kind != ''
+        env:
+          KIND: ${{ steps.d.outputs.kind }}
+        run: |
+          [ -n "$URL" ] && [ -n "$TOKEN" ] || { echo "::error::Secrets JIRA_TEST1_WEBHOOK_URL · JIRA_TEST1_WEBHOOK_TOKEN 이 없다"; exit 1; }
+          # 실패 원인(Missing token · Invalid token 등)이 응답 본문에 온다
+          code=$(curl -sS --max-time 30 -o "$RUNNER_TEMP/resp.txt" -w '%{http_code}' -X POST "$URL" \
+            -H 'Content-Type: application/json' \
+            -H "X-Automation-Webhook-Token: $TOKEN" \
+            --data-binary @"$RUNNER_TEMP/payload.json") || code=000
+          cat "$RUNNER_TEMP/resp.txt"; echo
+          [[ "$code" == 2* ]] || { echo "::error::Jira 응답 $code"; exit 1; }
+          echo "- #$(jq -r .issue.number "$GITHUB_EVENT_PATH") → Jira · $KIND · $code" >> "$GITHUB_STEP_SUMMARY"
+
+  # ===================================================================
+  # Jira → GitHub
+  # ===================================================================
+  from-jira:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # 같은 키가 연달아 오면 차례로 — 두 번째 create 가 첫 번째 이슈를 보고 건너뛴다
+    concurrency:
+      group: issue-sync-jira-${{ inputs.key }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_BOT_TOKEN || github.token }}
+      GH_REPO: ${{ github.repository }}
+      KIND: ${{ inputs.kind }}
+      KEY: ${{ inputs.key }}
+      NUMBER_IN: ${{ inputs.number }}
+      SUMMARY: ${{ inputs.summary }}
+      BODY: ${{ inputs.body }}
+      TYPE: ${{ inputs.type }}
+      STATUS: ${{ inputs.status }}
+      ASSIGNEE: ${{ inputs.assignee }}
+      PERSON: ${{ inputs.person }}
+      PARENT: ${{ inputs.parent }}
+
+    steps:
+      - name: Check input · find pair
+        id: p
+        run: |
+          # 아래 검색에 KEY 를 쓰므로 형식부터 막는다
+          [[ "$KEY" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]] || { echo "::error::Jira 키 형식이 아니다: $KEY"; exit 1; }
+          case "$KIND" in create|link|edit|transition|comment) ;; *) echo "::error::kind 가 아니다: $KIND"; exit 1 ;; esac
+
+          # --search · --label 은 검색 색인이 늦어 방금 만든 이슈를 못 본다 — 생성순 최근 100건에서 찾는다
+          gh issue list --state all --limit 100 --json number,title,body,labels > "$RUNNER_TEMP/list.json"
+          n=""; role=""; go=""
+          case "$KIND" in
+            create)
+              n=$(jq -r --arg k "$KEY" 'map(select((.body // "" | contains("<!-- jira:" + $k + " -->"))
+                    or (.title | startswith("[JIRA " + $k + "]")) or (.title | startswith("[" + $k + "]")))) | .[0].number // empty' "$RUNNER_TEMP/list.json")
+              if [ -n "$n" ]; then
+                echo "이미 있다: #$n"
+                echo "- [$KEY] → 이미 있음 #$n" >> "$GITHUB_STEP_SUMMARY"
+              else
+                go=1
+              fi ;;
+            link)
+              [[ "$NUMBER_IN" =~ ^[0-9]+$ ]] || { echo "::error::이슈 번호 형식이 아니다: $NUMBER_IN"; exit 1; }
+              n="$NUMBER_IN"; go=1 ;;
+            *)
+              # GitHub 사본(제목 [JIRA 키] + 라벨 jira) → Jira 가 원본
+              n=$(jq -r --arg k "$KEY" 'map(select(([.labels[].name] | index("jira")) and (.title | startswith("[JIRA " + $k + "]")))) | .[0].number // empty' "$RUNNER_TEMP/list.json")
+              if [ -n "$n" ]; then
+                role=jira-original
+              else
+                # GitHub 원본(본문 끝 표시 · 라벨 jira 없음) → Jira 가 사본
+                n=$(jq -r --arg k "$KEY" 'map(select((([.labels[].name] | index("jira")) | not) and (.body // "" | contains("<!-- jira:" + $k + " -->")))) | .[0].number // empty' "$RUNNER_TEMP/list.json")
+                [ -z "$n" ] || role=jira-copy
+              fi
+              if [ -n "$n" ]; then go=1; else echo "짝 없음 — 건너뛴다"; fi ;;
+          esac
+          { echo "number=$n"; echo "role=$role"; echo "go=$go"; } >> "$GITHUB_OUTPUT"
+          echo "kind=$KIND key=$KEY #$n role=$role go=$go"
+
+      - name: Checkout map
+        if: steps.p.outputs.go == '1'
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/github-jira-map.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Install pandoc
+        if: steps.p.outputs.go == '1' && contains(fromJSON('["create","edit","comment"]'), inputs.kind)
+        run: |
+          deb="$RUNNER_TEMP/pandoc.deb"
+          curl -sSL --max-time 60 -o "$deb" \
+            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
+          sudo dpkg -i "$deb" >/dev/null
+          pandoc --version | head -1
+
+      # 사본 제목 · 본문 모양은 create 와 edit 이 같아야 한다 — 한곳에 둔다
+      - name: Prepare helpers
+        if: steps.p.outputs.go == '1'
+        run: |
+          cat > "$RUNNER_TEMP/lib.sh" <<'EOF'
+          site=$(yq -r '.jira.site' "$MAP")
+          # Jira accountId → 대조표 GitHub 아이디
+          login_of() { [ -z "$1" ] || A="$1" yq -r '.people // {} | to_entries | map(select(.value.jiraAccountId == strenv(A))) | .[0].key // ""' "$MAP"; }
+          # Jira 업무 유형 → GitHub Type (대조표에 스페이스가 없으면 기본 이름으로)
+          gtype_of() {
+            local t; t=$(T="$TYPE" S="${KEY%%-*}" yq -r '.spaces[strenv(S)].issueTypes // {} | to_entries | map(select(.value == strenv(T))) | .[0].key // ""' "$MAP")
+            [ -n "$t" ] || case "$TYPE" in 버그|Bug) t=Bug ;; 기능|Feature) t=Feature ;; *) t=Task ;; esac
+            printf '%s' "$t"
+          }
+          # GitHub 사본 제목 — [JIRA 키] 앞말: 요약 (요약이 bug: · feat: · task: · blocked: 로 시작하면 앞말을 더하지 않는다)
+          copy_title() {
+            local p
+            if [[ "$SUMMARY" =~ ^(bug|feat|task|blocked):\  ]]; then printf '[JIRA %s] %s' "$KEY" "$SUMMARY"; return; fi
+            case "$1" in Bug) p=bug ;; Feature) p=feat ;; *) p=task ;; esac
+            printf '[JIRA %s] %s: %s' "$KEY" "$p" "$SUMMARY"
+          }
+          # GitHub 사본 본문 — 설명 · 맨 아래 출처(Jira : [키 · 요약](링크) · 상위 : [에픽 키 · 요약](링크)) · 맨 끝 표시. 링크 글자 안의 [ ] 는 이스케이프한다
+          # 상위 줄은 사람이 보는 안내다 — 짝 찾기는 <!-- jira:키 --> · 제목 [JIRA 키] 만 보고, 사본 수정(role=copy)은 출처 칸째 떼고 Jira 로 보낸다
+          copy_body() {
+            local lt pk ps pt; lt=$(printf '%s · %s' "$KEY" "$SUMMARY" | sed -E 's/([][])/\\\1/g')
+            if [ -n "$BODY" ]; then printf '%s\n' "$BODY" | pandoc -f jira -t gfm --wrap=none; printf '\n'; fi
+            printf '### 출처\n\nJira : [%s](https://%s/browse/%s)\n\n' "$lt" "$site" "$KEY"
+            pk="${PARENT%%|*}"; ps=""; [[ "$PARENT" == *"|"* ]] && ps="${PARENT#*|}"
+            if [[ "$pk" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]]; then
+              pt=$(printf '%s%s' "$pk" "${ps:+ · $ps}" | sed -E 's/([][])/\\\1/g')
+              printf '상위 : [%s](https://%s/browse/%s)\n\n' "$pt" "$site" "$pk"
+            fi
+            printf '<!-- jira:%s -->\n' "$KEY"
+          }
+          EOF
+
+      - name: Create copy
+        if: steps.p.outputs.go == '1' && inputs.kind == 'create'
+        run: |
+          . "$RUNNER_TEMP/lib.sh"
+          gtype=$(gtype_of)
+          title=$(copy_title "$gtype")
+          copy_body > "$RUNNER_TEMP/body.md"
+          echo "--- 본문 ---"; cat "$RUNNER_TEMP/body.md"
+
+          login=$(login_of "$ASSIGNEE")
+          [ -z "$ASSIGNEE" ] || [ -n "$login" ] || echo "::notice::담당 $ASSIGNEE 의 GitHub 아이디가 대조표에 없다 — Assignee 를 비운다"
+          if [ -n "$login" ] && ! gh api "repos/$GH_REPO/assignees/$login" --silent 2>/dev/null; then
+            echo "::warning::담당 $login 은 이 저장소 담당이 될 수 없다(저장소 권한 없음) — Assignee 를 비운다"
+            login=""
+          fi
+
+          gh label create jira --color 0052CC --description 'Jira 에서 생성' --force >/dev/null
+          # gh issue create 에는 Type 옵션이 없어 REST 로 만든다. Type 이 거절되면 Type 없이 다시 만든다
+          payload() { jq -n --arg t "$title" --rawfile b "$RUNNER_TEMP/body.md" --arg ty "$1" \
+            '{title: $t, body: $b, labels: ["jira"]} + (if $ty == "" then {} else {type: $ty} end)'; }
+          n=$(payload "$gtype" | gh api "repos/$GH_REPO/issues" --input - --jq .number) \
+            || { echo "::warning::Type $gtype 거절 — Type 없이 다시 만든다"; n=$(payload "" | gh api "repos/$GH_REPO/issues" --input - --jq .number); }
+
+          # 저장소 권한이 없는 사람은 지정이 실패한다 — 이슈는 두고 경고만 남긴다
+          if [ -n "$login" ]; then
+            gh issue edit "$n" --add-assignee "$login" >/dev/null \
+              || echo "::warning::담당 $login 을 넣지 못했다 — #$n Assignee 비어 있음"
+          fi
+          echo "created #$n"
+          echo "- [$KEY] → #$n 사본 · Type $gtype · 담당 ${login:-없음}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Link original
+        if: steps.p.outputs.go == '1' && inputs.kind == 'link'
+        env:
+          NUMBER: ${{ steps.p.outputs.number }}
+        run: |
+          gh issue view "$NUMBER" --json body > "$RUNNER_TEMP/issue.json"
+          if jq -e --arg m "<!-- jira:$KEY -->" '.body // "" | contains($m)' "$RUNNER_TEMP/issue.json" >/dev/null; then
+            echo "이미 있다: #$NUMBER ← $KEY"
+            exit 0
+          fi
+          # 원본에는 보이는 출처를 넣지 않는다 — 짝 찾기 · 중복 검사용 표시만 맨 끝에
+          {
+            jq -r '.body // ""' "$RUNNER_TEMP/issue.json"
+            printf '\n\n<!-- jira:%s -->\n' "$KEY"
+          } > "$RUNNER_TEMP/body.md"
+          gh issue edit "$NUMBER" --body-file "$RUNNER_TEMP/body.md" >/dev/null
+          echo "linked #$NUMBER ← $KEY"
+          echo "- #$NUMBER ← [$KEY] 짝 표시" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Edit title · body · assignee
+        if: steps.p.outputs.go == '1' && inputs.kind == 'edit'
+        env:
+          NUMBER: ${{ steps.p.outputs.number }}
+          ROLE: ${{ steps.p.outputs.role }}
+        run: |
+          . "$RUNNER_TEMP/lib.sh"
+          gh issue view "$NUMBER" --json title,body,assignees > "$RUNNER_TEMP/now.json"
+
+          if [ "$ROLE" = jira-original ]; then
+            # GitHub 사본 — 등록 때와 같은 제목 · 본문 모양
+            title=$(copy_title "$(gtype_of)")
+            copy_body > "$RUNNER_TEMP/body.md"
+          else
+            # GitHub 원본 — 사본 요약의 [GH #n] · 설명 맨 아래 출처 블록을 떼고, 원본 표시는 지킨다
+            title=$(printf '%s' "$SUMMARY" | sed -E "s/^\[GH #${NUMBER}\] //")
+            printf '%s\n' "$BODY" | perl -0pe 's/\n*h3\. 출처\n(?:(?!\nh\d\. ).)*\z//s' > "$RUNNER_TEMP/desc.txt"
+            {
+              if [ -s "$RUNNER_TEMP/desc.txt" ]; then pandoc -f jira -t gfm --wrap=none < "$RUNNER_TEMP/desc.txt"; fi
+              printf '\n<!-- jira:%s -->\n' "$KEY"
+            } > "$RUNNER_TEMP/body.md"
+            # 「상위 에픽 키」 칸은 실제 Jira 상위를 따른다 — Jira 에서 상위를 바꾸거나 설명의 키 글자를 고쳐도 원본 본문은 실제 상위 키
+            pk="${PARENT%%|*}"
+            if [[ "$pk" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]]; then
+              PK="$pk" perl -CSD -Mutf8 -0pi -e 's/^(###[ \t]*상위 에픽 키[ \t]*\n).*?(?=^###[ \t]|^<!-- jira:|\z)/$1\n$ENV{PK}\n\n/ms' "$RUNNER_TEMP/body.md"
+            fi
+          fi
+
+          # 바뀐 것만 고친다 — 끝 공백 · 끝 빈 줄 차이는 같다고 본다
+          trim() { sed -e 's/[[:space:]]*$//' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'; }
+          oldt=$(jq -r .title "$RUNNER_TEMP/now.json")
+          args=()
+          [ "$oldt" = "$title" ] || args+=(--title "$title")
+          cmp -s <(jq -r '.body // ""' "$RUNNER_TEMP/now.json" | trim) <(trim < "$RUNNER_TEMP/body.md") || args+=(--body-file "$RUNNER_TEMP/body.md")
+          if [ ${#args[@]} -gt 0 ]; then gh issue edit "$NUMBER" "${args[@]}" >/dev/null; echo "고침: ${args[*]%%--body-file*}"; else echo "제목 · 본문 같음"; fi
+
+          # 담당 — 대조표에 없거나 저장소 담당이 될 수 없는 사람이면 비운다
+          # (GitHub 은 담당 불가 아이디가 섞이면 변경 전체를 거절해 옛 담당이 남는다 — 먼저 확인한다)
+          login=$(login_of "$ASSIGNEE")
+          if [ -n "$login" ] && ! gh api "repos/$GH_REPO/assignees/$login" --silent 2>/dev/null; then
+            echo "::warning::담당 $login 은 이 저장소 담당이 될 수 없다(저장소 권한 없음) — GitHub 담당을 비운다"
+            login=""
+          fi
+          now=$(jq -r '[.assignees[].login] | join(",")' "$RUNNER_TEMP/now.json")
+          if [ "$now" != "$login" ]; then
+            if jq -n --arg l "$login" '{assignees: (if $l == "" then [] else [$l] end)}' \
+                 | gh api -X PATCH "repos/$GH_REPO/issues/$NUMBER" --input - >/dev/null; then
+              echo "담당: ${now:-없음} → ${login:-없음}"
+            else
+              echo "::warning::담당을 바꾸지 못했다 — 그대로 ${now:-없음}"
+            fi
+          fi
+          echo "- [$KEY] → #$NUMBER 수정" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Close · reopen
+        if: steps.p.outputs.go == '1' && inputs.kind == 'transition'
+        env:
+          NUMBER: ${{ steps.p.outputs.number }}
+        run: |
+          state=$(gh issue view "$NUMBER" --json state --jq .state)
+          if [ "$STATUS" = done ] && [ "$state" = OPEN ]; then
+            gh issue close "$NUMBER" --reason completed >/dev/null; echo "닫음"
+          elif [ "$STATUS" != done ] && [ "$state" = CLOSED ]; then
+            gh issue reopen "$NUMBER" >/dev/null; echo "다시 엶"
+          else
+            echo "상태 같음 ($STATUS · $state)"
+          fi
+          echo "- [$KEY] $STATUS → #$NUMBER" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Add comment
+        if: steps.p.outputs.go == '1' && inputs.kind == 'comment'
+        env:
+          NUMBER: ${{ steps.p.outputs.number }}
+        run: |
+          # 멘션 [~accountid:…] → 대조표 @아이디(GitHub 계정 없는 사람은 「이름(Jira)」 글자)
+          # 이름에 띄어쓰기가 있을 수 있어 줄 단위로 읽는다
+          text="$BODY"
+          while IFS= read -r ent; do
+            [ -n "$ent" ] || continue
+            k="${ent%%=*}"; a="${ent#*=}"
+            if [ "${k:0:1}" = "~" ]; then rep="${k:1}(Jira)"; else rep="@$k"; fi
+            text=$(printf '%s' "$text" | A="$a" R="$rep" perl -pe 's/\[~accountid:\Q$ENV{A}\E\]/$ENV{R}/g')
+          done < <(yq -r '(.people // {} | to_entries | map(.key + "=" + .value.jiraAccountId)) + (.jiraOnly // {} | to_entries | map("~" + .key + "=" + .value.jiraAccountId)) | .[]' "$MAP")
+          name=""; [[ "$PERSON" == *"|"* ]] && name="${PERSON#*|}"
+          {
+            printf '**%s** 님 Jira 댓글\n\n' "${name:-Jira 사용자}"
+            printf '%s\n' "$text" | pandoc -f jira -t gfm --wrap=none
+            printf '\n<!-- sync:jira -->\n'
+          } > "$RUNNER_TEMP/c.md"
+          gh issue comment "$NUMBER" --body-file "$RUNNER_TEMP/c.md" >/dev/null
+          echo "댓글 → #$NUMBER (${name:-Jira 사용자})"
+          echo "- [$KEY] 댓글 → #$NUMBER · ${name:-Jira 사용자}" >> "$GITHUB_STEP_SUMMARY"

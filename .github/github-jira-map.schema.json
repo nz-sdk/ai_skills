@@ -1,0 +1,199 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GitHub ↔ Jira 대조표",
+  "description": "github-jira-map.yml 의 규칙 — 이메일 같은 칸은 additionalProperties: false 로 막고, 이름은 jiraOnly 키에만 받는다. 편집기(YAML 확장)와 CI 가 함께 쓴다.",
+  "type": "object",
+  "required": [
+    "jira",
+    "people",
+    "spaces",
+    "areas"
+  ],
+  "additionalProperties": false,
+  "definitions": {
+    "githubId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$",
+      "description": "GitHub 아이디"
+    },
+    "jiraOnlyName": {
+      "type": "string",
+      "pattern": "^[\\p{L}][\\p{L}\\p{N} ._-]*$",
+      "description": "GitHub 계정이 없는 사람의 이름(한글 · 영문) — 글자로 시작, 이메일(@) · 괄호 금지. GitHub 에서는 「이름(Jira)」 로 보인다"
+    },
+    "candidate": {
+      "anyOf": [
+        { "$ref": "#/definitions/githubId" },
+        { "$ref": "#/definitions/jiraOnlyName" }
+      ],
+      "description": "담당자 후보 — people 의 GitHub 아이디나 jiraOnly 의 이름"
+    },
+    "person": {
+      "type": "object",
+      "required": [
+        "jiraAccountId",
+        "roles"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "jiraAccountId": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{24}|[0-9]+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+          "description": "Jira 계정 ID — Jira 프로필 주소 끝(/people/<계정 ID>)"
+        },
+        "roles": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "designer",
+              "developer",
+              "planner",
+              "product-designer"
+            ]
+          },
+          "description": "설계자 · 개발자 · 기획자 · 프로덕트 디자이너 — 여러 개 가능"
+        }
+      }
+    }
+  },
+  "properties": {
+    "jira": {
+      "description": "Jira 사이트 — 스킬이 Atlassian MCP 를 부를 때 쓴다",
+      "type": "object",
+      "required": [
+        "cloudId",
+        "site"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "cloudId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "description": "Atlassian cloud ID (getAccessibleAtlassianResources)"
+        },
+        "site": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+\\.atlassian\\.net$",
+          "description": "사이트 주소 (https:// 없이)"
+        }
+      }
+    },
+    "screenScanExclude": {
+      "description": "화면 → 영역 판정에서 세지 않는 src/screens 폴더",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9-]+$"
+      },
+      "uniqueItems": true
+    },
+    "people": {
+      "description": "GitHub 아이디 → Jira 계정 · 역할",
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/definitions/githubId"
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/person"
+      }
+    },
+    "jiraOnly": {
+      "description": "GitHub 계정이 없는 사람 — 키는 이름(한글 · 영문, 이메일 · 괄호 금지) → Jira 계정 · 역할. Jira 담당만 되고 GitHub Assignee 는 비운다",
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/definitions/jiraOnlyName"
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/person"
+      }
+    },
+    "spaces": {
+      "description": "Jira 스페이스 키 → GitHub 이슈 유형별 Jira 업무 유형",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Z][A-Z0-9]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "issueTypes",
+          "default"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "issueTypes": {
+            "type": "object",
+            "propertyNames": {
+              "enum": [
+                "Bug",
+                "Task",
+                "Feature"
+              ]
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "default": {
+            "type": "string",
+            "minLength": 1,
+            "description": "issueTypes 에 없는 유형일 때"
+          },
+          "startDateField": {
+            "type": "string",
+            "pattern": "^customfield_[0-9]+$",
+            "description": "Jira 「시작 날짜」 칸 id — 칸이 없는 스페이스는 넣지 않는다"
+          }
+        }
+      }
+    },
+    "areas": {
+      "description": "영역 → 화면 폴더 · 스페이스 · 담당자 후보(선택지 앞에 놓는 순서 — 기본값 아님). 후보는 people 의 GitHub 아이디나 jiraOnly 의 이름",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9-]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "space",
+          "screens",
+          "designers",
+          "developers"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "space": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9]+$"
+          },
+          "screens": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]+$"
+            },
+            "uniqueItems": true
+          },
+          "designers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/candidate"
+            },
+            "uniqueItems": true
+          },
+          "developers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/candidate"
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  }
+}

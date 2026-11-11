@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=./github-jira-map.schema.json
+# GitHub ↔ Jira 대조표 — report-issue 스킬과 연동 워크플로가 읽는다.
+#
+# - 이메일은 넣지 않는다(스키마가 막는다). people 의 이름은 jiraAccountId 로 Jira 에서 그때 조회해 보여 준다.
+# - 이름은 jiraOnly 키에만 쓴다(Jira 표시 이름 · 한글 · 영문) — GitHub 에서는 「이름(Jira)」 로 보인다.
+# - 고칠 때는 PR 로 — CI 가 github-jira-map.schema.json 으로 검사한다.
+# - 입사: people(GitHub 계정 없으면 jiraOnly)에 한 줄 + 해당 areas 의 designers / developers 에 아이디. 퇴사: 그 줄과 아이디를 지운다.
+# - 이 상품의 Jira 스페이스는 TEST1 다.
+
+# Jira 사이트 — 스킬이 Atlassian MCP 를 부를 때 쓴다
+jira:
+  cloudId: "0cf27830-dcec-4a93-8a5a-d264d4dc3d6a"
+  site: newzensolution.atlassian.net
+
+# 화면 → 영역 판정에서 세지 않는 화면 폴더
+screenScanExclude: []
+
+# GitHub 아이디 → Jira 계정 · 역할(여러 개 가능: designer · developer · planner · product-designer)
+people:
+  yej92:
+    jiraAccountId: "712020:ea80b284-ed4c-41ef-9c95-6ff74dd18441"
+    roles: [developer]
+  krdsoup:
+    jiraAccountId: "712020:33dad862-96ec-48ca-8d9a-6a0ed54b106c"
+    roles: [developer]
+  HwanHwan2:
+    jiraAccountId: "712020:39fa99d6-8cfa-40b9-825d-329a05b1bb14"
+    roles: [developer]
+  LeeBeomSeok-hub:
+    jiraAccountId: "712020:75a012d8-a44f-44d2-bebc-f92971b280c2"
+    roles: [developer]
+  bhhwang:
+    jiraAccountId: "624a99cdf813eb00692c2df2"
+    roles: [product-designer]
+
+# GitHub 계정이 없는 사람 — 키는 Jira 표시 이름(한글 · 영문, 이메일 · 괄호 금지). Jira 담당만 되고 GitHub Assignee 는 비운다
+jiraOnly:
+  관리자:
+    jiraAccountId: "712020:dd8a891c-6274-4f66-aa96-d0e55aa256ea"
+    roles: [planner, designer]
+
+# Jira 스페이스 — 키 → GitHub 이슈 유형(Type)별 Jira 업무 유형. 표에 없는 유형은 default
+spaces:
+  TEST1:
+    issueTypes:
+      Bug: 버그
+      Task: 작업
+      Feature: 기능
+    default: 작업
+    startDateField: customfield_10015   # Jira 「시작 날짜」 — 등록 날짜를 넣는다
+
+# 영역 — 화면 폴더(src/screens/<폴더>) 묶음 · 스페이스 · 담당자 후보(선택지 앞에 놓는 순서 — 기본값 아님)
+areas:
+  test:
+    space: TEST1
+    screens: []
+    designers:
+      - bhhwang
+      - 관리자
+    developers:
+      - yej92
+      - krdsoup
+      - HwanHwan2
+      - LeeBeomSeok-hub

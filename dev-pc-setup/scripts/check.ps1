@@ -6,7 +6,7 @@
   Checks the dev-pc-setup procedure (steps 1-4, 7 and leftovers of the old setup) and prints
   one row per item. It never prints secret values: tokens are reported only as present/absent
   and by kind (taken from the prefix). It writes nothing.
-  Connectors (BridgeX, Atlassian), claude_design and the session root are not visible from here;
+  Connectors (BridgeX, Atlassian MCP v2), claude_design and the session root are not visible from here;
   Claude checks those from its own tool list.
 
   Kept ASCII-only on purpose: Windows PowerShell 5.1 misreads UTF-8 files without a BOM.
@@ -366,7 +366,7 @@ if (Test-Cmd 'claude') {
 }
 $keys = @('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN') | Where-Object { (Get-EnvAny $_).Process -or (Get-EnvAny $_).User }
 if ($keys) {
-  Add-Result '4' 'API key variables' 'warn' (($keys -join ', ') + ' set: Claude Code will not load claude.ai connectors (BridgeX, Atlassian)')
+  Add-Result '4' 'API key variables' 'warn' (($keys -join ', ') + ' set: Claude Code will not load claude.ai connectors (BridgeX, Atlassian MCP)')
 } else {
   Add-Result '4' 'API key variables' 'ok' 'none (claude.ai login is used)'
 }

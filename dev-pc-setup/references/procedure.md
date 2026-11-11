@@ -272,10 +272,17 @@ claude_design 은 저장소 `.mcp.json` 으로 붙으니 여기서 할 일이 �
 - **도구 이름:** Claude Code 에서는 `mcp__claude_ai_BridgeX__*` 로 보인다.
 - **Desktop 에 안 보일 때:** 앱을 완전히 종료하고 다시 연다.
 
-### 5-4. Atlassian 커넥터 (사람)
+### 5-4. Atlassian MCP 커넥터 (사람)
 
-claude.ai ▸ 설정 ▸ 커넥터 ▸ Atlassian ▸ 연결 → Atlassian 로그인 → `newzensolution.atlassian.net` 접근을 허용한다.
-이슈 등록 스킬(bridge-web `/report-issue`, bridge-backoffice `/브릿지X-백오피스:이슈등록`)이 이 커넥터를 쓴다.
+Atlassian Rovo MCP **v2** 를 사용자 지정 커넥터로 붙인다. v1(`https://mcp.atlassian.com/v1/mcp`)은 지원 중단이고 2027-03-01 에 제거된다.
+
+1. claude.ai ▸ 설정 ▸ 커넥터 ▸ **사용자 지정 커넥터 추가** — 이름 `Atlassian MCP` · URL `https://mcp.atlassian.com/v2/mcp`.
+2. 연결 → Atlassian 로그인 → `newzensolution.atlassian.net` 접근을 허용한다.
+3. 옛 `Atlassian` 커넥터(v1)가 있으면 지운다. 둘 다 있으면 같은 이름의 도구가 두 벌 보여 스킬이 어느 쪽을 부를지 정해지지 않는다.
+
+- **도구 이름:** Claude Code 에서는 `mcp__claude_ai_Atlassian_MCP__*` 로 보인다. v2 는 자주 쓰는 도구만 바로 보이고, 나머지는 `discover` 로 찾아 `executeRead` · `executeWrite` 로 부른다.
+- **「사용자 지정 커넥터 추가」 가 없을 때:** 팀 설정으로 막힌 것이다. 조직 관리자에게 묻는다.
+- 이슈 등록 스킬(bridge-web `/report-issue`, bridge-backoffice `/브릿지X-백오피스:이슈등록`)이 이 커넥터를 쓴다. 스킬은 v2 도구만 쓰고, v1 만 붙어 있으면 Jira 쪽을 빼고 다시 연결하라고 알린다.
 
 **커넥터 목록은 세션 시작 때 받는다.** 연결한 뒤에는 VS Code 창을 다시 불러오거나 새 세션을 열고, 이 스킬을 다시 부르게 한다.
 
@@ -287,7 +294,7 @@ bridge-web 에서 먼저, 이어서 bridge-backoffice 에서 한 번 더 한다.
 
 1. `code D:\work\bridge\bridge-web` 처럼 **저장소 폴더를 루트로** 연다. 상위 폴더로 열면 저장소 CLAUDE.md 와 `.claude/launch.json` 이 잡히지 않는다.
 2. 처음 열면 `.mcp.json` 서버를 승인하라고 묻는다(bridge-web: `claude_design` · `shadcn`, backoffice: `claude_design`). 사용자가 승인한다.
-3. `/mcp` 에서 `claude_design` · `claude.ai BridgeX` · `claude.ai Atlassian` 이 `✔ Connected` 인지 본다.
+3. `/mcp` 에서 `claude_design` · `claude.ai BridgeX` · `claude.ai Atlassian MCP` 가 `✔ Connected` 인지 본다. 옛 `claude.ai Atlassian` 이 보이면 5-4 의 3 대로 지운다.
    - `⏸ Pending approval` 이면 아직 승인하지 않은 것이다.
    - `claude_design` 이 인증 오류면 사용자가 `/design-login` 을 한다.
 4. Claude 가 읽기 도구로 확인한다. `protean_list_modules` 는 모듈 표, `atlassianUserInfo` 는 본인 계정이 나와야 한다.
@@ -350,7 +357,7 @@ people:
 | DS 토큰 | 저장소 안 `npm view @nz-sdk/ds-bridge version` | 판 번호 |
 | 작성자 | 저장소 안 `git config --get user.email` | 본인 회사 메일 |
 | Claude 계정 | `/status` | 회사 팀 계정 |
-| MCP | `/mcp` | claude_design · claude.ai BridgeX · claude.ai Atlassian Connected |
+| MCP | `/mcp` | claude_design · claude.ai BridgeX · claude.ai Atlassian MCP Connected (옛 claude.ai Atlassian 없음) |
 | BridgeX | `protean_list_modules` | 모듈 표 |
 | Jira | `atlassianUserInfo` | 본인 계정 |
 | 검사 | typecheck · lint · lint:eslint · build | 모두 통과 |
@@ -366,7 +373,8 @@ people:
 | E403 (scope 정상) | DS-Bridge 패키지 권한 없음(bridge-web 에만 초대) | DS-Bridge 관리자에게 패키지 권한 요청 |
 | push 가 멈춤 · 인증 창 | GCM 이 창을 띄우고 기다림 | `gh auth setup-git`. 한 번만 우회: `git -c credential.https://github.com.helper='!gh auth git-credential' push -u origin <브랜치>` |
 | `gh pr checks` 403 | gh 를 fine-grained PAT 로 로그인 | 브라우저 로그인으로 다시. 또는 `gh run list --branch <브랜치>` → `gh run watch <id> --exit-status` |
-| `/mcp` 에 claude.ai BridgeX · Atlassian 없음 | 미연결 · API 키 변수 · 팀 아닌 계정 · 세션이 연결 전에 시작됨 | claude.ai 에서 연결 · API 키 변수 삭제 후 `/login` · 창 다시 불러오기 |
+| `/mcp` 에 claude.ai BridgeX · Atlassian MCP 없음 | 미연결 · API 키 변수 · 팀 아닌 계정 · 세션이 연결 전에 시작됨 | claude.ai 에서 연결 · API 키 변수 삭제 후 `/login` · 창 다시 불러오기 |
+| 이슈 등록 스킬이 「Atlassian MCP v1 — 다시 연결」 로 Jira 를 뺌 | 옛 `Atlassian` 커넥터(v1)만 연결됨 | 5-4 대로 v2 사용자 지정 커넥터 추가 · 옛 커넥터 삭제 · 창 다시 불러오기 |
 | 「승인을 기다리고 있습니다」 | 관리자 승인 전 | 가입 방법과 계정을 알려 활성화 요청 |
 | 배포 · SELECT 도구 권한 오류 | `mcp.write` 없음 | 관리자에게 요청 → 커넥터 재연결 |
 | `claude_design` 인증 오류 | Claude Design 로그인 없음 · 만료 | `/design-login` |

@@ -1,0 +1,160 @@
+{
+  "cloud": true,
+  "rules": [
+    {
+      "id": 433515598350760,
+      "clientKey": "86cdccfb-e189-4517-8bda-ffd0c676aa6a",
+      "name": "<<PREFIX>> Jira 상태 → Github",
+      "state": "DISABLED",
+      "description": "",
+      "authorAccountId": "<<OWNER_ACCOUNT_ID>>",
+      "actor": {
+        "type": "ACCOUNT_ID",
+        "value": "<<ACTOR_ACCOUNT_ID>>"
+      },
+      "created": 1793065143514,
+      "updated": 1793235662885,
+      "trigger": {
+        "id": "246f6123-7110-446d-9069-3166ad3bb98e",
+        "parentId": null,
+        "conditionParentId": null,
+        "component": "TRIGGER",
+        "type": "jira.issue.event.trigger:transitioned",
+        "value": {
+          "eventFilters": [
+            "ari:cloud:jira:<<CLOUD_ID>>:project/<<PROJECT_ID>>"
+          ],
+          "fromStatus": [],
+          "toStatus": [],
+          "eventKey": "jira:issue_updated",
+          "issueEvent": "issue_generic"
+        },
+        "conditions": [],
+        "children": [],
+        "schemaVersion": 1,
+        "connectionId": null,
+        "checksum": null
+      },
+      "components": [
+        {
+          "id": "4e6833d9-ef6a-4014-ba7d-b5e759e5db08",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "CONDITION",
+          "type": "jira.jql.condition",
+          "value": "hierarchyLevel = 0",
+          "conditions": [],
+          "children": [],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        },
+        {
+          "id": "24ffcf90-8dc0-4b32-a732-8070b1fc1571",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "ACTION",
+          "type": "jira.issue.outgoing.webhook",
+          "value": {
+            "url": "https://api.github.com/repos/<<REPO>>/actions/workflows/issue-sync.yml/dispatches",
+            "urlSecure": false,
+            "headers": [
+              {
+                "id": "_header_1792913347794",
+                "name": "Authorization",
+                "value": "",
+                "headerSecure": true
+              },
+              {
+                "id": "_header_1792913381846",
+                "name": "Accept",
+                "value": "application/vnd.github+json",
+                "headerSecure": false
+              },
+              {
+                "id": "_header_1792913382572",
+                "name": "X-GitHub-Api-Version",
+                "value": "2022-11-28",
+                "headerSecure": false
+              },
+              {
+                "id": "_header_1792913383084",
+                "name": "Content-Type",
+                "value": "application/json",
+                "headerSecure": false
+              }
+            ],
+            "sendIssue": false,
+            "contentType": "custom",
+            "customBody": "{\"ref\":\"main\",\"inputs\":{\"kind\":\"transition\",\"key\":\"{{issue.key}}\",\"status\":\"{{issue.status.statusCategory.key}}\"}}\n",
+            "method": "POST",
+            "responseEnabled": false,
+            "continueOnErrorEnabled": false
+          },
+          "conditions": [],
+          "children": [],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        }
+      ],
+      "canOtherRuleTrigger": false,
+      "notifyOnError": "FIRSTERROR",
+      "projects": [],
+      "labels": [],
+      "tags": [
+        {
+          "id": 436376448435457,
+          "ruleIdUuid": "01a17b02-ccda-7904-8a64-df54dfe52598",
+          "tagType": "ORCHESTRATION_CONFIG_ID",
+          "tagValue": "36c2c4a3-d334-11f1-b74d-7326cfe843f8"
+        },
+        {
+          "id": 436376449223842,
+          "ruleIdUuid": "01a17b02-ccda-7904-8a64-df54dfe52598",
+          "tagType": "IS_RULE_UPDATED",
+          "tagValue": "true"
+        },
+        {
+          "id": 436376449223840,
+          "ruleIdUuid": "01a17b02-ccda-7904-8a64-df54dfe52598",
+          "tagType": "ORCHESTRATION_VERSION",
+          "tagValue": "8"
+        },
+        {
+          "id": 436376449223841,
+          "ruleIdUuid": "01a17b02-ccda-7904-8a64-df54dfe52598",
+          "tagType": "IS_RULE_AN_ORCHESTRATION",
+          "tagValue": "true"
+        }
+      ],
+      "ruleScope": {
+        "resources": [
+          "ari:cloud:jira:<<CLOUD_ID>>:project/<<PROJECT_ID>>"
+        ]
+      },
+      "ruleHome": {
+        "ruleLifecycleHome": {
+          "locationARI": "ari:cloud:jira:<<CLOUD_ID>>:project/<<PROJECT_ID>>"
+        },
+        "ruleBillingHome": {
+          "locationARI": "ari:cloud:jira-software::site/<<CLOUD_ID>>"
+        }
+      },
+      "writeAccessType": "OWNER_ONLY",
+      "readAccessType": "UNRESTRICTED",
+      "collaborators": [],
+      "billingType": "NORMAL",
+      "idUuid": "01a17b02-ccda-7904-8a64-df54dfe52598",
+      "partitionId": "86cdccfb-e189-4517-8bda-ffd0c676aa6a",
+      "checksum": {
+        "version": 3,
+        "value": "7fe853fd8145b9d2611b065bbba6d7e70167500e1ebfec6d027d0b83bbceb8d4"
+      },
+      "currentVersionId": null,
+      "ruleArchetype": null,
+      "draftId": null,
+      "editRestrictions": null
+    }
+  ]
+}

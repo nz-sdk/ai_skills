@@ -1,0 +1,21 @@
+{
+  "_설명": "install-files.mjs 용 값 파일 — 복사해서 저장소 밖에서 모두 자기 값으로 바꾼다. 비밀값(PAT · 웹후크 주소 · 암호)은 적지 않는다.",
+  "SPACE": "ABC",
+  "PREFIX": "[AB]",
+  "REPO": "owner/repo",
+  "PRODUCT_NAME": "상품",
+  "AUTHOR": "",
+  "CLOUD_ID": "00000000-0000-0000-0000-000000000000",
+  "SITE": "example.atlassian.net",
+  "ISSUE_TYPES": { "Bug": "버그", "Task": "작업", "Feature": "기능" },
+  "DEFAULT_TYPE": "작업",
+  "START_DATE_FIELD": "customfield_10015",
+  "PEOPLE": [
+    { "github": "octocat", "accountId": "000000000000000000000000", "roles": ["developer"] }
+  ],
+  "JIRA_ONLY": [],
+  "AREAS": [
+    { "name": "main", "screens": ["home"], "designers": [], "developers": ["octocat"] }
+  ],
+  "SCREEN_SCAN_EXCLUDE": []
+}

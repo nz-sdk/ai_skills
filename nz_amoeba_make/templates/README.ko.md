@@ -50,10 +50,14 @@
   `src/main/java/{{PKG_PATH}}/support/` 로 들어갑니다. `BaseService` / `BaseMapper`(배포된 모듈의 service 와
   Mapper 가 상속하는 빈 상위 타입)와 `CommonFilter` / `CommonInterceptor` / `WebSupportConfig`(등록만 되어 있고
   아무 일도 하지 않는 패스스루 훅)입니다. capability 로 게이팅되지 않습니다 — 나중에 공통 처리를 넣을 때
-  한 파일만 고치면 되게 하는 것이 목적입니다.
+  한 파일만 고치면 되게 하는 것이 목적입니다. 그 테스트 `support/SupportWiringTest.java.template` 은 항상
+  `src/test/java/{{PKG_PATH}}/support/` 로 이름 그대로 나갑니다.
 - `fragments/*.java.template` — 코드 capability 하나당 하나. 선택된 것만 포함하며, 실제 클래스명으로 이름을
   바꿉니다. 각 프래그먼트 헤더에 의존 조건이 적혀 있습니다(예: `mcp.enabled` 필요).
-  키의 `test_fragment` 는 예외입니다: `ResourceServerOnlyTest.java.template` 은 **클래스명을 유지한 채**
+  단일 프래그먼트마다 **동반 테스트** `fragments/<Fragment>Test.java.template`(레코드의 `companion_test`)이 있어
+  `src/test/java/{{PKG_PATH}}/` 로 나가며 **프래그먼트와 함께 rename** 됩니다: `ExampleAuthorizer` → `ScopePolicy`
+  이면 `ExampleAuthorizerTest` → `ScopePolicyTest`, 안의 참조도 함께 바뀝니다.
+  키의 `test_fragment` 는 그 반대입니다: `ResourceServerOnlyTest.java.template` 은 **클래스명을 유지한 채**
   `src/test/java/` 로 갑니다 — 프로젝트별 정책이 아니라 구조적 보증을 단정하기 때문입니다.
 - `infra/` — **배포 인프라**. SKILL.md 6 단계에서 고른 수준(`none` / `container` / `container + CI` / `full`)에
   따라 내보냅니다. 파일명은 내보낼 때 바뀝니다: `Dockerfile.template` → `Dockerfile`,

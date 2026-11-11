@@ -1,0 +1,55 @@
+// Companion test of the `module_store_dialect` fragment — emitted with it and RENAMED WITH IT (step 9): this class
+// becomes <your dialect class>Test and every ExampleModuleStoreDialect below becomes your class name.
+//
+// These DDL fragments only meet a database when the jdbc module store starts, and a wrong one fails there: a bounded
+// VARCHAR for descriptor_json is rejected by the store's startup self-check (a 128 KB value must round-trip), and a
+// seq column without its key breaks module_version. The checks are vendor-neutral so they survive adapting the
+// dialect to Oracle, SQL Server or anything else.
+package {{PKG}};
+
+import org.junit.jupiter.api.Test;
+import org.springframework.stereotype.Component;
+
+import java.util.Locale;
+import java.util.regex.Pattern;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ExampleModuleStoreDialectTest {
+
+    private static final Pattern BOUNDED_TEXT = Pattern.compile("(?i)\\b(N?VAR)?CHAR(ACTER)?\\s*\\(\\s*\\d+");
+
+    private final ExampleModuleStoreDialect dialect = new ExampleModuleStoreDialect();
+
+    @Test
+    void itIsABeanWithALowerCaseId() {
+        assertNotNull(ExampleModuleStoreDialect.class.getAnnotation(Component.class));
+        String id = dialect.id();
+        assertFalse(id == null || id.isBlank());
+        // Matched against protean.module-store.dialect or the detected product name, LOWERCASED.
+        assertEquals(id.toLowerCase(Locale.ROOT), id);
+    }
+
+    @Test
+    void descriptorJsonGetsAnUnboundedTextType() {
+        String type = dialect.jsonTextColumnType();
+        assertFalse(type == null || type.isBlank());
+        assertFalse(BOUNDED_TEXT.matcher(type).find(),
+                type + " is bounded — the store's self-check round-trips a 128 KB descriptor");
+    }
+
+    @Test
+    void theSequenceColumnIsThePrimaryKey() {
+        String definition = dialect.autoIncrementColumnDefinition();
+        assertTrue(definition != null && definition.toUpperCase(Locale.ROOT).contains("PRIMARY KEY"), definition);
+    }
+
+    @Test
+    void extraDdlIsNeverNull() {
+        assertNotNull(dialect.preTableDdl());
+        assertNotNull(dialect.postTableDdl());
+    }
+}

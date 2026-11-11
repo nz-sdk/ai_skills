@@ -6,7 +6,7 @@ compatibility:
   agents:
     - claude
 metadata:
-  version: 0.3.0
+  version: 0.4.0
 ---
 
 # Amoeba Maker
@@ -31,7 +31,9 @@ handful of choices. The full catalog is data-driven:
 - **`templates/`** — file templates + per-capability code fragments + per-vendor DB templates.
 
 Rules: generate everything from templates (assume no existing sample). All generated artifacts are in **English**
-(see ## Language). Do not run or deploy anything unless asked — end by printing the run/verify commands.
+(see ## Language). Do not run or deploy anything unless asked — with ONE exception: step 10 runs the generated
+project's offline test suite (`./gradlew test`) and reports the result. Everything else (`setup.sh`, `docker
+compose`, `./gradlew run`) is printed, not run.
 
 ## Language
 
@@ -40,7 +42,7 @@ choosing options now, and whoever reads the repository later.
 
 **Korean** — everything you say during the session: question wording, option labels and their descriptions, group
 and step headings, progress lines ("적용 가능한 확장 기능 7개 중 1/2"), the validation report (OK / 경고 / 차단),
-the final resolved-configuration echo, and the prose around the run/verify commands.
+the final resolved-configuration echo, the test-run report (step 10), and the prose around the run commands.
 
 **Never translated, quoted exactly as written** — `protean.*` property keys, their values / enum members /
 defaults, class · file · directory names, Maven coordinates, environment variable names (`OAUTH_ISSUER_URI`,
@@ -415,10 +417,14 @@ Engine:
   = 'boot' }` (the container track auto-detects `build/libs/*-boot.jar` by that literal suffix). With
   `runtime=sidecar` the bootJar is not used — add the shadow plugin instead only if the user builds the flat
   `-worker` sidecar jar themselves.
-- **common-support package (always)** — copy all five `templates/support/*.template` into
+- **common-support package (always)** — copy the five main `templates/support/*.template` into
   `src/main/java/{{PKG_PATH}}/support/`, keeping their class names. These are **not** capability-gated: every
   sample gets them, all four behaviours empty/pass-through, so that adding a cross-cutting concern later is a
-  one-file edit instead of a wiring exercise.
+  one-file edit instead of a wiring exercise. Their test, `SupportWiringTest.java.template`, goes to
+  `src/test/java/{{PKG_PATH}}/support/` (name kept): the filter passes requests on unchanged and sits between
+  protean's tracing and Spring Security, the interceptor reaches a route registered at runtime the way protean
+  registers module routes, no `@EnableWebMvc`, and `BaseMapper`/`BaseService` stay free of abstract methods and
+  mutable statics. When you later fill a hook, its test is where the new behaviour goes.
   - `BaseService` (abstract, empty) and `BaseMapper` (interface, empty) — supertypes a deployed module's service
     and Mapper extend. They must live in the HOST app: a module deploys as source and `RuntimeCompiler` inherits
     `java.class.path`, so a supertype it names has to resolve there. Tell the user to extend them from module
@@ -439,6 +445,20 @@ Engine:
   `protean.mcp.authorization.resource` → `ResourceServerOnlyTest`, which pins that this app **verifies tokens and
   never issues them** — a guarantee that lives in what the app does not carry, so no reading of the main sources
   can confirm it.
+- **companion tests** — every single fragment's record also carries **`companion_test`**: its unit test,
+  `templates/fragments/<Fragment>Test.java.template`, emitted to `src/test/java/{{PKG_PATH}}/` and — the opposite
+  of `test_fragment` — **renamed with the fragment**: when `ExampleAuthorizer` becomes `ScopePolicy`, the test
+  becomes `ScopePolicyTest` (class and file) and every `ExampleAuthorizer` in it becomes `ScopePolicy`. Emit one
+  test per emitted fragment (DbDialect is named by two records — still one test). The tests are vendor- and
+  name-neutral on purpose, but **a behaviour change you make to a fragment is a change to its test**, in the same
+  step — each template's header says which rows:
+  - step 8 relaxed the `authorizer` for a local demo (`Decision.allow()` for some actions) → change those rows of
+    the authorizer test's `callers()`; keep the DEBUG and unauthenticated rows unless those were opened too;
+  - `custom_mcp_tool` generated READ-only (its `GENERATOR:` note) → the test expects `READ` and a read-only hint;
+    a different `call()` → rewrite the echo test, keep the contract tests;
+  - `builtin_tool_override` wraps another tool → the test's `TARGET` is the same string;
+  - `code_rule` / `db_dialect` / `module_store_dialect` adapted beyond the example → adjust the rows the header
+    names, never delete the safety checks (detach keeps data, create drops nothing, unbounded descriptor text).
 - **`emit` instructions** — a key or capability carrying `emit` names config that must be written even though its
   library default is empty. `secured_mcp` requires `scopes-supported: [mcp.read, mcp.write, mcp.admin]` and
   `bearer-methods-supported: [header]`: `SecurityConfig` gates on exactly those three scope names, so leaving them
@@ -485,14 +505,16 @@ Engine:
     docker-compose.yml -f docker-compose.local-db.yml` against a missing file — the deploy fails at the compose
     step, on the production host, after CI went green. Delete that option line.
   - **★ RENAMED FRAGMENTS MUST BE RENAMED EVERYWHERE, NOT JUST IN THEIR OWN FILE.** A single `fragment` is
-    renamed to a real class (step 9), but other templates refer to those classes in prose and in
+    renamed to a real class (step 9), but other files refer to those classes in prose, in code and in
     `<<fragment-checks>>`. After emitting, grep the generated tree for the template placeholder names
-    (`ExampleTool`, `ExampleAuthorizer`, `ExampleCodeRule`, `ExampleUnloadCallback`, `ExampleToolOverride`) and
-    replace each with the name you actually used — `README.md`, `SecurityConfig.java` and the
-    `module_source_tools` bundle's tests all mention the authorizer or the custom tool, and the
-    `db_query_tools` bundle's `QueryToolRegistrationTest` imports and instantiates `ExampleAuthorizer`. A leftover placeholder
-    name is a reference to a class that does not exist. (`fragment_bundle` members are the opposite: `rename:
-    false`, so never touch those.)
+    (`ExampleTool`, `ExampleToolOverride`, `ExampleAuthorizer`, `ExampleCodeRule`, `ExampleUnloadCallback`,
+    `ExampleDialect`, `ExampleModuleStoreDialect` — a word-boundary match, so `ExampleTool` does not hit
+    `ExampleToolOverride`) and replace each with the name you actually used. The references that compile: each
+    fragment's **companion test** (class name and body), and the `db_query_tools` bundle's
+    `QueryToolRegistrationTest`, which imports and instantiates `ExampleAuthorizer` (`QueryToolSupport` and
+    `QueryToolsMcpEndToEndTest` name it in comments). A leftover placeholder name is a reference to a class that
+    does not exist — and `./gradlew test` in step 10 fails on it. (`fragment_bundle` members are the opposite:
+    `rename: false`, so never rename those classes.)
   - **`{{...}}` is not always a placeholder.** `ci.yml` contains `{{.State.Health.Status}}`, which is docker
     inspect's Go template. Skill placeholders are `{{UPPER_SNAKE_CASE}}` only — copy anything else verbatim.
   - **Do not "simplify" the load-bearing parts.** Each is a comment explaining a failure that is otherwise
@@ -544,9 +566,47 @@ Engine:
   compile error. `build.gradle` already adds `testImplementation spring-boot-starter-test`. This test loads
   `application.yml` and asserts it matches the selection — it does not start the server.
 
-### 10. Verify (print, do not run)
-Lead with the one-command install for a Linux/Ubuntu server, then the manual equivalents. **Explain each step in
-Korean; print every command byte-for-byte** — a translated or "tidied" command is one the user cannot paste.
+### 10. Run the tests, then print the run commands
+**Run the generated test suite before you hand over — it is the one command this skill executes.** Everything
+step 9 wrote carries tests: `ConfigMatchesSelectionTest`, `SupportWiringTest`, each fragment's companion test,
+`ResourceServerOnlyTest` when the MCP surface is secured, and the bundles' tests. They run **offline** — no
+Authorization Server, no reachable database, no Docker — so a failure is the generated project's, not the machine's.
+
+1. **Preconditions — check, do not install.** `gradlew` exists (the step 9 wrapper); `javac -version` reports 21
+   (if not, `settings.gradle`'s foojay resolver downloads one on the first run — say so); Maven Central is
+   reachable. If one fails, go to 4.
+2. **Run it in the generated folder**: `./gradlew test --console=plain` (Linux, macOS, Git Bash) or
+   `.\gradlew.bat test --console=plain` (PowerShell). The first run downloads Spring Boot, protean and the test
+   dependencies — allow up to 10 minutes; later runs take well under one.
+3. **Read the result from `build/test-results/test/*.xml`**, not from the console: count tests, failures, errors
+   and skipped. A build that fails before any test runs (`compileJava` / `compileTestJava` FAILED) writes no XML —
+   then the compiler errors in the console output are the result; read them and treat them as red.
+   - **Green** → report the counts in Korean. Say what "skipped" means here: the `Live*` vendor tests run only
+     with their `DB_TOOLS_TEST_*` variables, and `ExportedTreeCompilesTest` / `RealDescriptorLayoutTest` only when
+     their sample files exist.
+   - **Red** → read each failing test's message and stack, then decide which of two it is:
+     - **(a) a generation mistake** — a placeholder or `Example*` name left behind, a `build_deps` line not
+       written, a rename that missed a file, a companion test not adapted to a fragment you changed, a key missing
+       from `application.yml`. Fix the GENERATED file and run again.
+     - **(b) a failure inside template code you did not change** — a template defect. Do not patch around it
+       silently: report it as one (test name + the first line of its message) and tell the user to report it to
+       the `ai_skills` repository. If the fix to the generated copy is obvious you may apply it, but say that you
+       did and what.
+     At most **two** fix-and-run rounds. Then stop and report what still fails, verbatim.
+4. **Could not run** → say which precondition failed and print the command to run later. **Never report tests as
+   passing that did not run.**
+
+When reporting a green run, **do not describe it as "without the server"**. `ConfigMatchesSelectionTest` starts
+nothing, but `ResourceServerOnlyTest` is `@SpringBootTest(webEnvironment = RANDOM_PORT)` and brings up a real Tomcat
+— on a random port, so it cannot clash with a running instance, and against an `.invalid` issuer, so no
+Authorization Server has to exist. Say what is actually true: the suite is **offline** and needs no AS and no
+reachable database. And say why the database part is not a guarantee — the DataSource is fully wired and Hikari
+merely connects lazily, so a green `./gradlew test` proves nothing about the DB. That is what `./setup.sh --check`
+is for.
+
+Then print the run commands — **print, do not run** them (they start servers and containers). Lead with the
+one-command install for a Linux/Ubuntu server, then the manual equivalents. **Explain each step in Korean; print
+every command byte-for-byte** — a translated or "tidied" command is one the user cannot paste.
 - **`./setup.sh`** — preflight-checks the environment and prerequisites, brings up the DB (if any), and runs the
   server. `./setup.sh --check` runs the checks only. (This is the final generated artifact.)
 - (mavenLocal path) `cd <protean repo> && ./gradlew publishToMavenLocal`.
@@ -554,16 +614,7 @@ Korean; print every command byte-for-byte** — a translated or "tidied" command
 - `./gradlew run` (JDK 21).
 - (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
 - Hit a deployed module endpoint; `curl localhost:{{PORT}}/platform/modules` for state.
-- Sanity checks that need no running deployment: `./gradlew compileJava` (compiles against the protean jar) and
-  `./gradlew test` (runs `ConfigMatchesSelectionTest` — asserts the generated config matches the selection; plus
-  `ResourceServerOnlyTest` when the MCP surface is secured, and both fragment bundles' tests).
-  **Do not describe this as "without the server".** `ConfigMatchesSelectionTest` starts nothing, but
-  `ResourceServerOnlyTest` is `@SpringBootTest(webEnvironment = RANDOM_PORT)` and brings up a real Tomcat — on a
-  random port, so it cannot clash with a running instance, and against an `.invalid` issuer, so no Authorization
-  Server has to exist. Say what is actually true: the suite is **offline** and needs no AS and no reachable
-  database. And say why the database part is not a guarantee — the DataSource is fully wired and Hikari merely
-  connects lazily, so a green `./gradlew test` proves nothing about the DB. That is what `./setup.sh --check` is
-  for.
+- `./gradlew test` again after any change — the suite step 10 just ran (and its result, in one line).
 - **(step 6 ≥ `container`) the container path**, printed as its own short block:
   ```
   cp .env.example .env          # fill in the required values — OAUTH_ISSUER_URI has no default

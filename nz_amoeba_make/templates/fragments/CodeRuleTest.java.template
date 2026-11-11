@@ -1,0 +1,45 @@
+// Companion test of the `code_rule` fragment — emitted with it and RENAMED WITH IT (step 9): this class becomes
+// <your rule class>Test and every ExampleCodeRule below becomes your class name.
+//
+// A CodeRule fails in two silent ways: it never runs (no @Component, so the Rule System never collects it) or it never
+// rejects anything (a check that always returns an empty list passes every deploy). Both are pinned here.
+//
+// GENERATOR: the example bans a package by class name. If you generated a real rule (one that reads the bytecode),
+// replace the rows below with one class it must reject and one it must let through — compile them with
+// javax.tools.ToolProvider if the rule needs real bytecode.
+package {{PKG}};
+
+import org.junit.jupiter.api.Test;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ExampleCodeRuleTest {
+
+    private final ExampleCodeRule rule = new ExampleCodeRule();
+
+    @Test
+    void itIsABeanSoTheRuleSystemRunsIt() {
+        assertNotNull(ExampleCodeRule.class.getAnnotation(Component.class));
+        assertFalse(rule.name() == null || rule.name().isBlank(), "a rejection is reported under this name");
+    }
+
+    @Test
+    void aClassInTheForbiddenPackageIsRejected() {
+        List<String> violations = rule.check("com.forbidden.Payments", new byte[0]);
+        assertEquals(1, violations.size(), violations.toString());
+        assertTrue(violations.get(0).contains("com.forbidden.Payments"), "say which class: " + violations);
+    }
+
+    @Test
+    void everythingElsePasses() {
+        assertTrue(rule.check("module.orders.OrdersService", new byte[0]).isEmpty());
+        assertTrue(rule.check("com.forbiddenfruit.Apple", new byte[0]).isEmpty(), "a prefix is not the package");
+        assertTrue(rule.check(null, new byte[0]).isEmpty());
+    }
+}

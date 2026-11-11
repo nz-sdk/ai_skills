@@ -47,10 +47,14 @@ fills from the option/vendor specs.
   `src/main/java/{{PKG_PATH}}/support/` with its class names kept: `BaseService` / `BaseMapper` (empty supertypes a
   deployed module's service and Mapper extend) and `CommonFilter` / `CommonInterceptor` / `WebSupportConfig`
   (pass-through hooks, registered and doing nothing). Not capability-gated — the point is that adding a
-  cross-cutting concern later is a one-file edit.
+  cross-cutting concern later is a one-file edit. `support/SupportWiringTest.java.template` is their test, always
+  emitted to `src/test/java/{{PKG_PATH}}/support/` with its name kept.
 - `fragments/*.java.template` — one per code-capability; include only the selected ones, renamed to a real class.
   Each fragment's header states its dependency (e.g. requires `mcp.enabled`).
-  A key's `test_fragment` is the exception: `ResourceServerOnlyTest.java.template` goes to `src/test/java/` **with
+  Each single fragment has a **companion test**, `fragments/<Fragment>Test.java.template` (the record's
+  `companion_test`), emitted to `src/test/java/{{PKG_PATH}}/` and **renamed with the fragment**: `ExampleAuthorizer`
+  → `ScopePolicy` makes `ExampleAuthorizerTest` → `ScopePolicyTest`, references included.
+  A key's `test_fragment` is the opposite: `ResourceServerOnlyTest.java.template` goes to `src/test/java/` **with
   its class name kept**, because it asserts a structural guarantee rather than a project-specific policy.
 - `infra/` — **deployment infrastructure**, emitted per the level chosen in SKILL.md step 6
   (`none` / `container` / `container + CI` / `full`). Filenames are rewritten on emit:

@@ -1,0 +1,38 @@
+# 기능 요청 — 새 기능 · 개선.
+# 칸 이름이 본문 소제목이 되고 Jira 설명에도 그대로 간다.
+# Jira 에 「기능」 유형이 없는 스페이스(TEST1)는 github-jira-map.yml 에서 「작업」으로 바뀐다.
+name: 기능 요청
+description: 새 기능 · 개선 요청
+title: "feat: "
+type: Feature
+body:
+  - type: input
+    id: screen
+    attributes:
+      label: 화면
+      description: 기능이 들어갈 화면 · 영역
+    validations:
+      required: true
+  - type: input
+    id: epic
+    attributes:
+      label: 상위 에픽 키
+      description: Jira 상위 항목(에픽) 키 — 화면 에픽이 없는 일은 공통 에픽 키
+      placeholder: TEST1-1
+    validations:
+      required: true
+  - type: textarea
+    id: request
+    attributes:
+      label: 요청 내용
+    validations:
+      required: true
+  - type: textarea
+    id: reason
+    attributes:
+      label: 배경 · 이유
+  - type: textarea
+    id: detail
+    attributes:
+      label: 기술 상세
+      description: 참고 설계서 · 디자인 · 링크

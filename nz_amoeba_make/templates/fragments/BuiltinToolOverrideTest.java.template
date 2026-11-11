@@ -1,0 +1,130 @@
+// Companion test of the `builtin_tool_override` fragment — emitted with it and RENAMED WITH IT (step 9): this class
+// becomes <your override class>Test and every ExampleToolOverride below becomes your class name.
+//
+// The override REPLACES a built-in under the built-in's own name, so a mistake here does not add a broken tool — it
+// breaks one every client already uses. These tests pin the two halves: the wrapper still is the built-in (same name,
+// schemas, annotations, action — and its result), and the Registrar replaces exactly that tool, once, and stays out of
+// the way when MCP is off.
+//
+// GENERATOR: TARGET below must be the same string as the fragment's TARGET. If you changed what the result is
+// augmented with, change successIsDelegatedThenAugmented() to match.
+package {{PKG}};
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpDispatcher;
+import org.htcom.protean.mcp.McpTool;
+import org.htcom.protean.mcp.McpToolAnnotations;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer.ModuleAction;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.DefaultApplicationArguments;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.same;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class ExampleToolOverrideTest {
+
+    private static final String TARGET = "protean.module_metrics";
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final McpTool builtin = builtinNamed(TARGET);
+
+    @Test
+    void itStillDescribesItselfAsTheToolItReplaces() {
+        ExampleToolOverride override = new ExampleToolOverride(builtin);
+        assertEquals(TARGET, override.name(), "same name is what makes it a replacement");
+        assertSame(builtin.inputSchema(), override.inputSchema());
+        assertSame(builtin.outputSchema(), override.outputSchema());
+        assertSame(builtin.annotations(), override.annotations());
+        assertEquals(builtin.action(), override.action(), "the authorizer must see the built-in's action");
+        assertEquals(builtin.title(), override.title());
+        assertTrue(override.description().startsWith(builtin.description()), override.description());
+    }
+
+    @Test
+    void successIsDelegatedThenAugmented() {
+        // A fresh result per call, as the real built-in builds one: the override writes into the structured node.
+        when(builtin.call(any(), any())).thenAnswer(
+                call -> McpToolResult.ok("3 modules", mapper.createObjectNode().put("modules", 3)));
+        ExampleToolOverride override = new ExampleToolOverride(builtin);
+        ObjectNode args = mapper.createObjectNode();
+
+        McpToolResult first = override.call(args, McpCallContext.anonymous());
+        McpToolResult second = override.call(args, McpCallContext.anonymous());
+
+        verify(builtin, times(2)).call(same(args), any());
+        assertFalse(first.isError(), first.text());
+        assertEquals(3, first.structured().path("modules").asInt(), "the built-in's own result is kept");
+        assertTrue(first.structured().path("observedByOverride").asBoolean());
+        assertEquals(1, first.structured().path("callSeq").asLong());
+        assertEquals(2, second.structured().path("callSeq").asLong());
+        assertTrue(first.text().startsWith("3 modules"), first.text());
+    }
+
+    @Test
+    void anErrorPassesThroughUntouched() {
+        McpToolResult failure = McpToolResult.error("module not found");
+        when(builtin.call(any(), any())).thenReturn(failure);
+        assertSame(failure, new ExampleToolOverride(builtin).call(mapper.createObjectNode(), McpCallContext.anonymous()));
+    }
+
+    @Test
+    void theRegistrarDoesNothingWhenMcpIsOff() {
+        ObjectProvider<McpDispatcher> noDispatcher = provider(null);
+        ExampleToolOverride.Registrar registrar = new ExampleToolOverride.Registrar(noDispatcher, List.of(builtin));
+        assertDoesNotThrow(() -> registrar.run(new DefaultApplicationArguments()));
+    }
+
+    @Test
+    void theRegistrarReplacesTheTargetOnce() {
+        McpDispatcher dispatcher = mock(McpDispatcher.class);
+        List<McpTool> tools = List.of(builtinNamed("protean.list_modules"), builtin);
+        new ExampleToolOverride.Registrar(provider(dispatcher), tools).run(new DefaultApplicationArguments());
+        verify(dispatcher, times(1)).registerTool(
+                argThat(t -> t instanceof ExampleToolOverride && TARGET.equals(t.name())));
+    }
+
+    @Test
+    void theRegistrarLeavesEverythingAloneWhenTheTargetIsMissing() {
+        McpDispatcher dispatcher = mock(McpDispatcher.class);
+        new ExampleToolOverride.Registrar(provider(dispatcher), List.of(builtinNamed("protean.list_modules")))
+                .run(new DefaultApplicationArguments());
+        verify(dispatcher, never()).registerTool(any());
+    }
+
+    private McpTool builtinNamed(String name) {
+        McpTool tool = mock(McpTool.class);
+        when(tool.name()).thenReturn(name);
+        when(tool.description()).thenReturn("built-in " + name);
+        when(tool.title()).thenReturn("Built-in");
+        when(tool.inputSchema()).thenReturn(mapper.createObjectNode().put("type", "object"));
+        when(tool.outputSchema()).thenReturn(mapper.createObjectNode().put("type", "object"));
+        when(tool.annotations()).thenReturn(McpToolAnnotations.readOnly());
+        when(tool.action()).thenReturn(ModuleAction.READ);
+        return tool;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ObjectProvider<McpDispatcher> provider(McpDispatcher dispatcher) {
+        ObjectProvider<McpDispatcher> provider = mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(dispatcher);
+        return provider;
+    }
+}

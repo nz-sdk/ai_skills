@@ -11,6 +11,7 @@
 
 ### 기능
 
+* **issue-sync-install:** 새 스킬 — GitHub ↔ Jira 양방향 동기화(+이슈 등록 스킬 · Slack 알림)를 새 상품 저장소에 설치한다. 설치 키트(전달서 · 설치 안내 · Jira 규칙 템플릿 · 설치/검증 스크립트)가 함께 있다. 기준 상품 한 쌍(저장소 1 ↔ 스페이스 1)에서 시험한 판이고 범용 스킬로 바꿀 예정이다 ([#19](https://github.com/nz-sdk/ai_skills/pull/19))
 * **dev-pc-setup:** 새 스킬 — AX 개발자 Windows PC 를 읽기 전용 스크립트(`scripts/check.ps1`)로 점검하고 빠진 것만 채운다(도구 · gh 로그인 · DS 패키지 classic PAT · 저장소 · 작성자 · 커넥터 · 첫 세션 · Jira 대조표). 토큰 값은 보지도 출력하지도 않는다 ([#15](https://github.com/nz-sdk/ai_skills/pull/15))
 * **nz_amoeba_make:** 생성되는 리소스 서버가 액세스 토큰의 `aud` 를 검증한다 ([#5](https://github.com/nz-sdk/ai_skills/pull/5))
 * **nz_amoeba_make:** capability `db_metadata_tools` — 스키마 · 테이블 조회 MCP 도구 ([#7](https://github.com/nz-sdk/ai_skills/pull/7))

@@ -556,6 +556,7 @@ groups:
         advanced: true
         desc: Vendor for scope provisioning (or register a custom DbDialect bean, see fragment).
         fragment: DbDialect
+        build_deps: ["implementation 'org.springframework:spring-jdbc'"]   # the fragment's JdbcTemplate — see db_dialect
       - key: protean.worker.db.admin-url
         type: string
         default: ""
@@ -727,7 +728,12 @@ capabilities:
     # The drivers of the live vendor tests. TEST runtime only: the module compile classpath is java.class.path under
     # `./gradlew run`, which test scopes never reach, so a deployed module still sees only the app's own driver.
     # Versions come from the Spring Boot BOM. Every live test self-skips without its DB_TOOLS_TEST_<VENDOR>_URL.
+    # MySQL is listed too, although it is the usual host vendor: the host may be H2 or PostgreSQL, and
+    # LiveMetadataTest (DB_TOOLS_TEST_URL) and db_query_tools' DbQueryConfigTest still point at jdbc:mysql — the
+    # latter unconditionally, so without the driver it fails on every non-MySQL host. When the vendor IS mysql, its
+    # runtimeOnly driver_dep already covers the test runtime: emit ONE line, the wider scope wins.
     build_deps:
+      - "testRuntimeOnly 'com.mysql:mysql-connector-j'"
       - "testRuntimeOnly 'org.postgresql:postgresql'"
       - "testRuntimeOnly 'com.oracle.database.jdbc:ojdbc11'"
       - "testRuntimeOnly 'com.microsoft.sqlserver:mssql-jdbc'"
@@ -800,7 +806,9 @@ capabilities:
     # Builds on db_metadata_tools (resolveLocation, DbToolSchemas, DbFixtures — a real compile dependency) and needs a
     # scope policy, without which "mcp.write only" means nothing — both are other STEP-5 capabilities, so selecting
     # this one turns them on (SKILL.md step 5).
-    requires: [protean.mcp.enabled=true, data_access, db_metadata_tools, authorizer]
+    # strict-schema because the tools' argument contract is enforced at dispatch, not in the tools: with it off an
+    # undeclared argument binds silently. QueryToolsMcpEndToEndTest asserts the rejection, so it fails without it.
+    requires: [protean.mcp.enabled=true, protean.mcp.strict-schema=true, data_access, db_metadata_tools, authorizer]
     fragment_bundle:
       dir: db
       package: "{{PKG}}.db"
@@ -833,8 +841,12 @@ capabilities:
         - { src: query/LiveSqlServerQueryTest.java.template,      to: test }
     # jwt() for QueryToolsMcpEndToEndTest, which drives the real /platform/mcp through the security chain. Harmless
     # when that member is skipped (no secured_mcp).
+    # networknt because query/QueryFixtures imports com.networknt.schema.* to check the tools' output against their
+    # declared schema. Without interface_spec_validator nothing else puts it on the compile path — strict-schema
+    # adds it runtimeOnly. Same jar, same scope rule as interface_spec_validator: ONE line, implementation wins.
     build_deps:
       - "testImplementation 'org.springframework.security:spring-security-test'"
+      - "implementation 'com.networknt:json-schema-validator:1.5.9'"
     options:
       - key: amoeba.db-query.default-rows
         type: int
@@ -970,8 +982,15 @@ capabilities:
   - id: interface_spec_validator
     title: Interface-driven module authoring (declare the contract, generate the skeleton, enforce it everywhere)
     requires: [swagger_annotations]
+    # MyBatis at TEST scope: the generator's own tests (SkeletonGeneratorTest, ServiceLayerOptionTest,
+    # InterfaceContractRuleTest) compile a dataAccess=MYBATIS skeleton against java.class.path, so they need the jars
+    # even in a project whose modules only use NONE. Test scope keeps them off the app and the module classpath —
+    # actually DEPLOYING a MYBATIS module still needs the `mybatis` module_classpath entry (which brings data_access).
+    # When that entry is selected its implementation lines win: emit ONE line per jar.
     build_deps:
       - "implementation 'com.networknt:json-schema-validator:1.5.9'"
+      - "testImplementation 'org.mybatis:mybatis:3.5.19'"
+      - "testImplementation 'org.mybatis:mybatis-spring:3.0.4'"
     # The amoeba.* surface this capability owns. Both are read with a @Value fallback, so the feature works with the
     # block absent — which is exactly the problem: the project's service-layer standard would be invisible in its
     # own config, and a change of the library default would silently reshape the next module defined. ASK THEM IN
@@ -1335,8 +1354,9 @@ capabilities:
       networknt IS A build_dep HERE AT implementation SCOPE, WHICH IS NOT WHAT strict-schema GIVES YOU.
       protean.mcp.strict-schema adds the same jar as runtimeOnly — enough for protean to validate tool arguments at
       dispatch, NOT enough to compile mcp/InterfaceSpecSchemaTest, which imports com.networknt.schema.* to check the
-      L1 schema with the very engine the server uses. When both are selected emit ONE line at implementation; the
-      wider scope wins and a second declaration is noise.
+      L1 schema with the very engine the server uses. When both are selected — or db_query_tools too, which declares
+      the same line for its QueryFixtures — emit ONE line at implementation; the wider scope wins and a second
+      declaration is noise.
 
       MEMBER GATING IS BY LAYER. The root contract classes, gen/ and render/ are plain library code and always
       emit. gate/* needs review-enabled, since a CodeRule bean with the gate off is dead weight. mcp/* and deploy/*
@@ -1356,6 +1376,11 @@ capabilities:
     title: Custom DB dialect (DbDialect SPI)
     requires: [protean.worker.db.auto-provision=true]
     fragment: DbDialect
+    # The SPI's methods take a JdbcTemplate. protean carries spring-jdbc at RUNTIME scope only, so the fragment does
+    # not compile without this. spring-jdbc rather than the starter: the starter would add DataSource
+    # autoconfiguration to an app that has no data_access (auto-provision forces worker isolation).
+    build_deps:
+      - "implementation 'org.springframework:spring-jdbc'"
     desc: >-
       Add/override a per-vendor SCOPE provisioning strategy (createScope/dropScope/detachScope/destroyScope/
       scopedUrl); id() overrides a built-in (mysql/postgresql). Not the module store (that's module_store_dialect).

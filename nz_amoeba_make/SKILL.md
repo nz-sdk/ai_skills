@@ -171,7 +171,9 @@ stale the moment another is added, which is the same failure mode rule 4 below e
 `authorizer`). Such a `requires` entry does **not** filter it out of the offering — offer it whenever everything
 else it requires is satisfiable, and when it is selected, **turn the other one on and say so** in the same turn
 ("`db_query_tools` needs `authorizer` — added"). Ask the other one's own questions (a name for the authorizer) as
-if it had been picked.
+if it had been picked. A `protean.*` key in the same list is forced the same way and said the same way:
+`db_query_tools` also sets `protean.mcp.strict-schema=true` — the tools rely on dispatch-time argument checks, and
+their end-to-end test asserts the rejection.
 
 AskUserQuestion caps 4 options per question, so make the offering **deterministic** rather than improvising a
 split — that is what keeps an entry from silently vanishing:

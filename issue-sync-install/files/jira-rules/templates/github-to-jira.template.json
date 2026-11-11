@@ -1,0 +1,1689 @@
+{
+  "cloud": true,
+  "rules": [
+    {
+      "id": 433511555017171,
+      "clientKey": "86cdccfb-e189-4517-8bda-ffd0c676aa6a",
+      "name": "<<PREFIX>> Github -> Jira Issue",
+      "state": "DISABLED",
+      "description": "",
+      "authorAccountId": "<<OWNER_ACCOUNT_ID>>",
+      "actor": {
+        "type": "ACCOUNT_ID",
+        "value": "<<ACTOR_ACCOUNT_ID>>"
+      },
+      "created": 1793064901694,
+      "updated": 1793280409804,
+      "trigger": {
+        "id": "c56d8591-4d51-4873-953f-a78aaff763de",
+        "parentId": null,
+        "conditionParentId": null,
+        "component": "TRIGGER",
+        "type": "jira.incoming.webhook",
+        "value": {
+          "webhookToken": "",
+          "searchOrProvide": "none",
+          "jql": null
+        },
+        "conditions": [],
+        "children": [],
+        "schemaVersion": 1,
+        "connectionId": null,
+        "checksum": null
+      },
+      "components": [
+        {
+          "id": "33e20816-b68f-42e9-886b-a53cc60d8da1",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "ACTION",
+          "type": "codebarrel.action.log",
+          "value": "{{webhookData.action}} / {{webhookData.issue.title}}",
+          "conditions": [],
+          "children": [],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        },
+        {
+          "id": "6bb9d1a2-a528-451a-a398-5aca01822fa2",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "CONDITION",
+          "type": "jira.condition.container.block",
+          "value": null,
+          "conditions": [],
+          "children": [
+            {
+              "id": "fbb1d7c8-20b9-4446-a377-0c5db2d31043",
+              "parentId": "6bb9d1a2-a528-451a-a398-5aca01822fa2",
+              "conditionParentId": null,
+              "component": "CONDITION_BLOCK",
+              "type": "jira.condition.if.block",
+              "value": {
+                "conditionMatchType": "ALL"
+              },
+              "conditions": [
+                {
+                  "id": "ee8f7a73-b5bf-4649-ae70-37131c680b7c",
+                  "parentId": null,
+                  "conditionParentId": "fbb1d7c8-20b9-4446-a377-0c5db2d31043",
+                  "component": "CONDITION",
+                  "type": "jira.comparator.condition",
+                  "value": {
+                    "first": "{{webhookData.kind}}",
+                    "second": "edit",
+                    "operator": "EQUALS"
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "children": [
+                {
+                  "id": "7476cdd1-55d3-466d-80e4-8418248a1630",
+                  "parentId": "fbb1d7c8-20b9-4446-a377-0c5db2d31043",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "jql",
+                    "jql": "key = {{webhookData.key}}",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "93452931-0947-44b9-a9e0-44d595c48e15",
+                      "parentId": "7476cdd1-55d3-466d-80e4-8418248a1630",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.edit",
+                      "value": {
+                        "operations": [
+                          {
+                            "field": {
+                              "type": "ID",
+                              "value": "description"
+                            },
+                            "fieldType": "description",
+                            "type": "SET",
+                            "value": "{{webhookData.description}}"
+                          },
+                          {
+                            "field": {
+                              "type": "ID",
+                              "value": "summary"
+                            },
+                            "fieldType": "summary",
+                            "type": "SET",
+                            "value": "{{webhookData.summary}}"
+                          }
+                        ],
+                        "advancedFields": null,
+                        "sendNotifications": false
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 12,
+                      "connectionId": null,
+                      "checksum": null
+                    },
+                    {
+                      "id": "663ac501-4e79-408e-8c8a-80e80aff0de5",
+                      "parentId": "7476cdd1-55d3-466d-80e4-8418248a1630",
+                      "conditionParentId": null,
+                      "component": "CONDITION",
+                      "type": "jira.comparator.condition",
+                      "value": {
+                        "first": "{{webhookData.epicChanged}}",
+                        "second": "true",
+                        "operator": "EQUALS"
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 1,
+                      "connectionId": null,
+                      "checksum": null
+                    },
+                    {
+                      "id": "467a427b-7ff5-4374-be3c-06208d33f0d3",
+                      "parentId": "7476cdd1-55d3-466d-80e4-8418248a1630",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.lookup.issues",
+                      "value": {
+                        "id": "_customsmartvalue_id_1793265623976",
+                        "name": {
+                          "type": "FREE",
+                          "value": "lookupIssues"
+                        },
+                        "type": "JQL",
+                        "query": {
+                          "type": "SMART",
+                          "value": "project = <<SPACE>> AND hierarchyLevel = 1 AND key = \"{{webhookData.epicKey|<<SPACE>>-0}}\""
+                        },
+                        "lazy": false
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 1,
+                      "connectionId": null,
+                      "checksum": null
+                    },
+                    {
+                      "id": "ae2c01e0-84ff-4235-8d84-5c7e1e6fdd9a",
+                      "parentId": "7476cdd1-55d3-466d-80e4-8418248a1630",
+                      "conditionParentId": null,
+                      "component": "CONDITION",
+                      "type": "jira.comparator.condition",
+                      "value": {
+                        "first": "{{lookupIssues.size}}",
+                        "second": "1",
+                        "operator": "EQUALS"
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 1,
+                      "connectionId": null,
+                      "checksum": null
+                    },
+                    {
+                      "id": "0a1f4472-ab60-4c66-87e5-1c5305472103",
+                      "parentId": "7476cdd1-55d3-466d-80e4-8418248a1630",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.edit",
+                      "value": {
+                        "operations": [
+                          {
+                            "field": {
+                              "type": "ID",
+                              "value": "parent"
+                            },
+                            "fieldType": "parent",
+                            "type": "SET",
+                            "value": {
+                              "type": "SMART",
+                              "value": "{{webhookData.epicKey}}"
+                            }
+                          }
+                        ],
+                        "advancedFields": "",
+                        "sendNotifications": false
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 12,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                },
+                {
+                  "id": "6d133a81-a33b-43e9-8324-84646f9db223",
+                  "parentId": "fbb1d7c8-20b9-4446-a377-0c5db2d31043",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "jql",
+                    "jql": "key = {{webhookData.key}}",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "e38505db-4f31-4536-84a5-ad186cdb517d",
+                      "parentId": "6d133a81-a33b-43e9-8324-84646f9db223",
+                      "conditionParentId": null,
+                      "component": "CONDITION",
+                      "type": "jira.comparator.condition",
+                      "value": {
+                        "first": "{{webhookData.epicChanged}}",
+                        "second": "true",
+                        "operator": "EQUALS"
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 1,
+                      "connectionId": null,
+                      "checksum": null
+                    },
+                    {
+                      "id": "3a4a41ba-e4e1-49bc-bdf8-a592f6a3a544",
+                      "parentId": "6d133a81-a33b-43e9-8324-84646f9db223",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.lookup.issues",
+                      "value": {
+                        "id": "_customsmartvalue_id_1793280397709",
+                        "name": {
+                          "type": "FREE",
+                          "value": "lookupIssues"
+                        },
+                        "type": "JQL",
+                        "query": {
+                          "type": "SMART",
+                          "value": "project = <<SPACE>> AND hierarchyLevel = 1 AND key = \"{{webhookData.epicKey|<<SPACE>>-0}}\""
+                        },
+                        "lazy": false
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 1,
+                      "connectionId": null,
+                      "checksum": null
+                    },
+                    {
+                      "id": "f649f876-8db3-4390-b929-5ea819a31faa",
+                      "parentId": "6d133a81-a33b-43e9-8324-84646f9db223",
+                      "conditionParentId": null,
+                      "component": "CONDITION",
+                      "type": "jira.comparator.condition",
+                      "value": {
+                        "first": "{{lookupIssues.size}}",
+                        "second": "0",
+                        "operator": "EQUALS"
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 1,
+                      "connectionId": null,
+                      "checksum": null
+                    },
+                    {
+                      "id": "75968244-a12b-40b2-b865-0671b51b2549",
+                      "parentId": "6d133a81-a33b-43e9-8324-84646f9db223",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "slack.notification",
+                      "value": {
+                        "webhookUrl": "<<SLACK_WEBHOOK_URL>>",
+                        "body": ":warning: *상위 에픽 키 확인 실패 — 상위를 바꾸지 않았습니다*\n<https://<<SITE>>/browse/{{issue.key}}|{{issue.key}}> {{issue.summary}}\n고친 키: {{webhookData.epicRaw}} · 지금 상위: {{issue.parent.key}} {{issue.parent.summary}}\n수정: {{webhookData.actor}} (GitHub 본문)",
+                        "channel": "",
+                        "automationSender": true,
+                        "webhookUrlSecure": false
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 1,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "schemaVersion": 1,
+              "connectionId": null,
+              "checksum": null
+            },
+            {
+              "id": "4b829254-3c15-4436-8d20-a43f6034169c",
+              "parentId": "6bb9d1a2-a528-451a-a398-5aca01822fa2",
+              "conditionParentId": null,
+              "component": "CONDITION_BLOCK",
+              "type": "jira.condition.if.block",
+              "value": {
+                "conditionMatchType": "ALL"
+              },
+              "conditions": [
+                {
+                  "id": "6a0ea0e0-65a9-49b3-8ce6-36781ece06b4",
+                  "parentId": null,
+                  "conditionParentId": "4b829254-3c15-4436-8d20-a43f6034169c",
+                  "component": "CONDITION",
+                  "type": "jira.comparator.condition",
+                  "value": {
+                    "first": "{{webhookData.kind}}",
+                    "second": "comment",
+                    "operator": "EQUALS"
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "children": [
+                {
+                  "id": "a8b090c5-6458-4ad0-b771-a359ad4b87f4",
+                  "parentId": "4b829254-3c15-4436-8d20-a43f6034169c",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "jql",
+                    "jql": "key = {{webhookData.key}}",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "5f8cd234-3111-413e-b3f0-e1bf6c559f4f",
+                      "parentId": "a8b090c5-6458-4ad0-b771-a359ad4b87f4",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.comment",
+                      "value": {
+                        "comment": "{{webhookData.comment}}",
+                        "publicComment": false,
+                        "commentVisibility": null,
+                        "sendNotifications": true,
+                        "addCommentOnce": false
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 2,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "schemaVersion": 1,
+              "connectionId": null,
+              "checksum": null
+            },
+            {
+              "id": "800feb1a-6341-4182-b110-1409c51261be",
+              "parentId": "6bb9d1a2-a528-451a-a398-5aca01822fa2",
+              "conditionParentId": null,
+              "component": "CONDITION_BLOCK",
+              "type": "jira.condition.if.block",
+              "value": {
+                "conditionMatchType": "ALL"
+              },
+              "conditions": [
+                {
+                  "id": "e90303e6-832d-4d76-9cee-e86e821abfba",
+                  "parentId": null,
+                  "conditionParentId": "800feb1a-6341-4182-b110-1409c51261be",
+                  "component": "CONDITION",
+                  "type": "jira.comparator.condition",
+                  "value": {
+                    "first": "{{webhookData.kind}}",
+                    "second": "close",
+                    "operator": "EQUALS"
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "children": [
+                {
+                  "id": "11824e30-fcdf-4d16-ac7d-df6b0e435b35",
+                  "parentId": "800feb1a-6341-4182-b110-1409c51261be",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "jql",
+                    "jql": "key = {{webhookData.key}}",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "5ff500ff-4cb6-465d-b93b-7a4dc0d79ce6",
+                      "parentId": "11824e30-fcdf-4d16-ac7d-df6b0e435b35",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.transition",
+                      "value": {
+                        "operations": [],
+                        "advancedFields": null,
+                        "sendNotifications": true,
+                        "destinationStatus": {
+                          "type": "NAME",
+                          "value": "<<TRANSITION_DONE>>"
+                        },
+                        "transitionMatch": ""
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 11,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "schemaVersion": 1,
+              "connectionId": null,
+              "checksum": null
+            },
+            {
+              "id": "685e8bcd-02be-4425-9307-1d48f3eb7d37",
+              "parentId": "6bb9d1a2-a528-451a-a398-5aca01822fa2",
+              "conditionParentId": null,
+              "component": "CONDITION_BLOCK",
+              "type": "jira.condition.if.block",
+              "value": {
+                "conditionMatchType": "ALL"
+              },
+              "conditions": [
+                {
+                  "id": "38675076-4269-4267-b7e6-79632d97cbb0",
+                  "parentId": null,
+                  "conditionParentId": "685e8bcd-02be-4425-9307-1d48f3eb7d37",
+                  "component": "CONDITION",
+                  "type": "jira.comparator.condition",
+                  "value": {
+                    "first": "{{webhookData.kind}}",
+                    "second": "reopen",
+                    "operator": "EQUALS"
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "children": [
+                {
+                  "id": "a29aaea6-ebb8-45e0-b6fa-4736d0adf3a1",
+                  "parentId": "685e8bcd-02be-4425-9307-1d48f3eb7d37",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "jql",
+                    "jql": "key = {{webhookData.key}}",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "ba281b1d-be41-4615-81a0-6019dbf5dc0e",
+                      "parentId": "a29aaea6-ebb8-45e0-b6fa-4736d0adf3a1",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.transition",
+                      "value": {
+                        "operations": [],
+                        "advancedFields": null,
+                        "sendNotifications": true,
+                        "destinationStatus": {
+                          "type": "NAME",
+                          "value": "<<TRANSITION_REOPEN>>"
+                        },
+                        "transitionMatch": ""
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 11,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "schemaVersion": 1,
+              "connectionId": null,
+              "checksum": null
+            },
+            {
+              "id": "47096cf0-3c86-485e-9fcb-cd8ccab1bd6e",
+              "parentId": "6bb9d1a2-a528-451a-a398-5aca01822fa2",
+              "conditionParentId": null,
+              "component": "CONDITION_BLOCK",
+              "type": "jira.condition.if.block",
+              "value": {
+                "conditionMatchType": "ALL"
+              },
+              "conditions": [
+                {
+                  "id": "564435b1-fc54-4faf-802a-1cf760bde342",
+                  "parentId": null,
+                  "conditionParentId": "47096cf0-3c86-485e-9fcb-cd8ccab1bd6e",
+                  "component": "CONDITION",
+                  "type": "jira.comparator.condition",
+                  "value": {
+                    "first": "{{webhookData.kind}}",
+                    "second": "assign",
+                    "operator": "EQUALS"
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "children": [
+                {
+                  "id": "85c86554-fc79-4528-a456-61a42578cb51",
+                  "parentId": "47096cf0-3c86-485e-9fcb-cd8ccab1bd6e",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "jql",
+                    "jql": "key = {{webhookData.key}}",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "40244d14-6798-41f2-9b78-f45ce096f2ef",
+                      "parentId": "85c86554-fc79-4528-a456-61a42578cb51",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.edit",
+                      "value": {
+                        "operations": [],
+                        "advancedFields": "{\"fields\":{\"assignee\": {{#if(webhookData.assignee.isNotEmpty())}}{\"id\":\"{{webhookData.assignee}}\"}{{/}}{{#if(webhookData.assignee.isEmpty())}}null{{/}} }}",
+                        "sendNotifications": true
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 12,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "schemaVersion": 1,
+              "connectionId": null,
+              "checksum": null
+            }
+          ],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        },
+        {
+          "id": "d224b3d7-5f9d-4dfe-bbad-41333351ca1a",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "CONDITION",
+          "type": "jira.comparator.condition",
+          "value": {
+            "first": "{{webhookData.action}}",
+            "second": "opened",
+            "operator": "EQUALS"
+          },
+          "conditions": [],
+          "children": [],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        },
+        {
+          "id": "0ecd27f3-fbc3-4664-8e9e-6d6d4de03166",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "CONDITION",
+          "type": "jira.comparator.condition",
+          "value": {
+            "first": "{{webhookData.issue.title}}",
+            "second": "^\\[JIRA [A-Z][A-Z0-9]+-[0-9]+\\].*",
+            "operator": "REGEX_NOT_MATCHES"
+          },
+          "conditions": [],
+          "children": [],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        },
+        {
+          "id": "8244e528-aeb2-44dc-992a-f769fcd73886",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "ACTION",
+          "type": "jira.lookup.issues",
+          "value": {
+            "id": "_customsmartvalue_id_1791953398326",
+            "name": {
+              "type": "FREE",
+              "value": "lookupIssues"
+            },
+            "type": "JQL",
+            "query": {
+              "type": "SMART",
+              "value": "project = <<SPACE>> AND labels = \"gh-{{webhookData.repository.name}}-{{webhookData.issue.number}}\""
+            },
+            "lazy": false
+          },
+          "conditions": [],
+          "children": [],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        },
+        {
+          "id": "4879ecba-aec7-47ba-a023-44c067ac433e",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "CONDITION",
+          "type": "jira.comparator.condition",
+          "value": {
+            "first": "{{lookupIssues.size}}",
+            "second": "0",
+            "operator": "EQUALS"
+          },
+          "conditions": [],
+          "children": [],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        },
+        {
+          "id": "b5bd7be2-9bd0-4816-985d-999d2f47949b",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "ACTION",
+          "type": "jira.lookup.issues",
+          "value": {
+            "id": "_customsmartvalue_id_1793265018617",
+            "name": {
+              "type": "FREE",
+              "value": "lookupIssues"
+            },
+            "type": "JQL",
+            "query": {
+              "type": "SMART",
+              "value": "project = <<SPACE>> AND hierarchyLevel = 1 AND key = \"{{webhookData.bridge.epicKey|<<SPACE>>-0}}\""
+            },
+            "lazy": false
+          },
+          "conditions": [],
+          "children": [],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        },
+        {
+          "id": "4b25f4d4-89b0-4e5c-8127-55030d14ffef",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "CONDITION",
+          "type": "jira.condition.container.block",
+          "value": null,
+          "conditions": [],
+          "children": [
+            {
+              "id": "90104e7c-24bb-4b62-9501-fc967643e35a",
+              "parentId": "4b25f4d4-89b0-4e5c-8127-55030d14ffef",
+              "conditionParentId": null,
+              "component": "CONDITION_BLOCK",
+              "type": "jira.condition.if.block",
+              "value": {
+                "conditionMatchType": "ALL"
+              },
+              "conditions": [
+                {
+                  "id": "a89b5e26-decb-4b4b-891b-1d7c76b9fd4b",
+                  "parentId": null,
+                  "conditionParentId": "90104e7c-24bb-4b62-9501-fc967643e35a",
+                  "component": "CONDITION",
+                  "type": "jira.comparator.condition",
+                  "value": {
+                    "first": "{{lookupIssues.size}}",
+                    "second": "0",
+                    "operator": "EQUALS"
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "children": [
+                {
+                  "id": "4dd011a4-09e3-45f8-8a80-38ec3da58c4f",
+                  "parentId": "90104e7c-24bb-4b62-9501-fc967643e35a",
+                  "conditionParentId": null,
+                  "component": "ACTION",
+                  "type": "slack.notification",
+                  "value": {
+                    "webhookUrl": "<<SLACK_WEBHOOK_URL>>",
+                    "body": ":warning: *상위 에픽 키 확인 실패 — Jira 사본을 만들지 않았습니다*\n<{{webhookData.issue.html_url}}|GitHub #{{webhookData.issue.number}} {{webhookData.issue.title}}>\n상위 에픽 키: {{webhookData.bridge.epicRaw}} (없는 번호이거나 에픽이 아님)\n등록: {{webhookData.bridge.actor}}\n→ GitHub 이슈 본문의 「상위 에픽 키」를 맞는 에픽 키로 고치면 다시 등록됩니다",
+                    "channel": "",
+                    "automationSender": true,
+                    "webhookUrlSecure": false
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "schemaVersion": 1,
+              "connectionId": null,
+              "checksum": null
+            }
+          ],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        },
+        {
+          "id": "178ec655-76e4-4a1c-a182-60bb3b00f808",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "CONDITION",
+          "type": "jira.comparator.condition",
+          "value": {
+            "first": "{{lookupIssues.size}}",
+            "second": "1",
+            "operator": "EQUALS"
+          },
+          "conditions": [],
+          "children": [],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        },
+        {
+          "id": "613624a3-3b64-49c9-b062-c0a20d8454b3",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "CONDITION",
+          "type": "jira.condition.container.block",
+          "value": null,
+          "conditions": [],
+          "children": [
+            {
+              "id": "90aa9457-8039-4ec0-be1d-52deb917bc5a",
+              "parentId": "613624a3-3b64-49c9-b062-c0a20d8454b3",
+              "conditionParentId": null,
+              "component": "CONDITION_BLOCK",
+              "type": "jira.condition.if.block",
+              "value": {
+                "conditionMatchType": "ALL"
+              },
+              "conditions": [
+                {
+                  "id": "12b71062-b879-40af-8a24-3cb72c4af024",
+                  "parentId": null,
+                  "conditionParentId": "90aa9457-8039-4ec0-be1d-52deb917bc5a",
+                  "component": "CONDITION",
+                  "type": "jira.comparator.condition",
+                  "value": {
+                    "first": "{{webhookData.bridge.jiraType}}",
+                    "second": "<<JIRA_TYPE_BUG>>",
+                    "operator": "EQUALS"
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "children": [
+                {
+                  "id": "728ac5a4-6354-4ab1-bb10-6be7a3455c01",
+                  "parentId": "90aa9457-8039-4ec0-be1d-52deb917bc5a",
+                  "conditionParentId": null,
+                  "component": "ACTION",
+                  "type": "jira.issue.create",
+                  "value": {
+                    "operations": [
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "summary"
+                        },
+                        "fieldType": "summary",
+                        "type": "SET",
+                        "value": "[GH #{{webhookData.issue.number}}] {{webhookData.issue.title}}"
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "description"
+                        },
+                        "fieldType": "description",
+                        "type": "SET",
+                        "value": ""
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "project"
+                        },
+                        "fieldType": "project",
+                        "type": "SET",
+                        "value": {
+                          "type": "ID",
+                          "value": "<<PROJECT_ID>>"
+                        }
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "issuetype"
+                        },
+                        "fieldType": "issuetype",
+                        "type": "SET",
+                        "value": {
+                          "type": "ID",
+                          "value": "<<ISSUE_TYPE_ID_BUG>>"
+                        }
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "parent"
+                        },
+                        "fieldType": "parent",
+                        "type": "SET",
+                        "value": null
+                      }
+                    ],
+                    "advancedFields": "{\"fields\":{\n  \"labels\":[\"github\",\"gh-{{webhookData.repository.name}}-{{webhookData.issue.number}}\"{{#webhookData.bridge.labels}}, \"{{.}}\"{{/}}],\n  \"<<START_DATE_FIELD>>\":\"{{webhookData.bridge.startDate}}\"\n  {{#if(webhookData.bridge.assignee.isNotEmpty())}},\"assignee\":{\"id\":\"{{webhookData.bridge.assignee}}\"}{{/}}\n  {{#if(webhookData.bridge.reporter.isNotEmpty())}},\"reporter\":{\"id\":\"{{webhookData.bridge.reporter}}\"}{{/}}\n}}",
+                    "sendNotifications": false
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 12,
+                  "connectionId": null,
+                  "checksum": null
+                },
+                {
+                  "id": "da9cfdb8-7489-4587-bfd6-ddcbcf68bf60",
+                  "parentId": "90aa9457-8039-4ec0-be1d-52deb917bc5a",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "recentlycreated",
+                    "jql": "",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "ed4c42db-b718-4988-b173-8eb54b40d4ff",
+                      "parentId": "da9cfdb8-7489-4587-bfd6-ddcbcf68bf60",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.edit",
+                      "value": {
+                        "operations": [
+                          {
+                            "field": {
+                              "type": "ID",
+                              "value": "description"
+                            },
+                            "fieldType": "description",
+                            "type": "SET",
+                            "value": "{{webhookData.issue.body}}\n\nh3. 출처\nGitHub : [Issue #{{webhookData.issue.number}} · {{webhookData.issue.title.replace(\"[\",\"［\").replace(\"]\",\"］\").replace(\"|\",\"｜\")}}|{{webhookData.issue.html_url}}]"
+                          }
+                        ],
+                        "advancedFields": null,
+                        "sendNotifications": true
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 12,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                },
+                {
+                  "id": "9ae6a798-15f5-4ebf-a55a-859d3535351e",
+                  "parentId": "90aa9457-8039-4ec0-be1d-52deb917bc5a",
+                  "conditionParentId": null,
+                  "component": "ACTION",
+                  "type": "jira.issue.outgoing.webhook",
+                  "value": {
+                    "url": "https://api.github.com/repos/<<REPO>>/actions/workflows/issue-sync.yml/dispatches",
+                    "urlSecure": false,
+                    "headers": [
+                      {
+                        "id": "_header_1792657085192",
+                        "name": "Authorization",
+                        "value": "",
+                        "headerSecure": true
+                      },
+                      {
+                        "id": "_header_1792657219844",
+                        "name": "Accept",
+                        "value": "application/vnd.github+json",
+                        "headerSecure": false
+                      },
+                      {
+                        "id": "_header_1792657220945",
+                        "name": "X-GitHub-Api-Version",
+                        "value": "2022-11-28",
+                        "headerSecure": false
+                      },
+                      {
+                        "id": "_header_1792657221739",
+                        "name": "Content-Type",
+                        "value": "application/json",
+                        "headerSecure": false
+                      }
+                    ],
+                    "sendIssue": false,
+                    "contentType": "custom",
+                    "customBody": "{\"ref\":\"main\",\"inputs\":{\"kind\":\"link\",\"key\":\"{{createdIssue.key}}\",\"number\":\"{{webhookData.issue.number}}\"}}",
+                    "method": "POST",
+                    "responseEnabled": false,
+                    "continueOnErrorEnabled": false
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                },
+                {
+                  "id": "2debdf56-0742-436c-8a6f-c32da1a98a2e",
+                  "parentId": "90aa9457-8039-4ec0-be1d-52deb917bc5a",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "recentlycreated",
+                    "jql": "",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "73dfa4bc-643e-4141-b647-c2e1096fdcd0",
+                      "parentId": "2debdf56-0742-436c-8a6f-c32da1a98a2e",
+                      "conditionParentId": null,
+                      "component": "CONDITION",
+                      "type": "jira.comparator.condition",
+                      "value": {
+                        "first": "{{webhookData.bridge.epicKey}}",
+                        "second": "^[A-Z][A-Z0-9]+-[0-9]+$",
+                        "operator": "REGEX_CONTAINS"
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 1,
+                      "connectionId": null,
+                      "checksum": null
+                    },
+                    {
+                      "id": "1d9af7a7-bfe2-4b33-9fcc-2734a85cd8c2",
+                      "parentId": "2debdf56-0742-436c-8a6f-c32da1a98a2e",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.edit",
+                      "value": {
+                        "operations": [
+                          {
+                            "field": {
+                              "type": "ID",
+                              "value": "parent"
+                            },
+                            "fieldType": "parent",
+                            "type": "SET",
+                            "value": {
+                              "type": "SMART",
+                              "value": "{{webhookData.bridge.epicKey}}"
+                            }
+                          }
+                        ],
+                        "advancedFields": "",
+                        "sendNotifications": false
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 12,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "schemaVersion": 1,
+              "connectionId": null,
+              "checksum": null
+            },
+            {
+              "id": "fd4077d8-a1e8-4a15-bc52-c12157bbc827",
+              "parentId": "613624a3-3b64-49c9-b062-c0a20d8454b3",
+              "conditionParentId": null,
+              "component": "CONDITION_BLOCK",
+              "type": "jira.condition.if.block",
+              "value": {
+                "conditionMatchType": "ALL"
+              },
+              "conditions": [
+                {
+                  "id": "a365b9ab-03c9-4f0b-bccb-b17d7009bdd4",
+                  "parentId": null,
+                  "conditionParentId": "fd4077d8-a1e8-4a15-bc52-c12157bbc827",
+                  "component": "CONDITION",
+                  "type": "jira.comparator.condition",
+                  "value": {
+                    "first": "{{webhookData.bridge.jiraType}}",
+                    "second": "<<JIRA_TYPE_FEATURE>>",
+                    "operator": "EQUALS"
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "children": [
+                {
+                  "id": "630cd4ab-72af-4e02-99f8-fb21a8ee8ab1",
+                  "parentId": "fd4077d8-a1e8-4a15-bc52-c12157bbc827",
+                  "conditionParentId": null,
+                  "component": "ACTION",
+                  "type": "jira.issue.create",
+                  "value": {
+                    "operations": [
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "summary"
+                        },
+                        "fieldType": "summary",
+                        "type": "SET",
+                        "value": "[GH #{{webhookData.issue.number}}] {{webhookData.issue.title}}"
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "description"
+                        },
+                        "fieldType": "description",
+                        "type": "SET",
+                        "value": ""
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "project"
+                        },
+                        "fieldType": "project",
+                        "type": "SET",
+                        "value": {
+                          "type": "ID",
+                          "value": "<<PROJECT_ID>>"
+                        }
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "issuetype"
+                        },
+                        "fieldType": "issuetype",
+                        "type": "SET",
+                        "value": {
+                          "type": "ID",
+                          "value": "<<ISSUE_TYPE_ID_FEATURE>>"
+                        }
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "parent"
+                        },
+                        "fieldType": "parent",
+                        "type": "SET",
+                        "value": null
+                      }
+                    ],
+                    "advancedFields": "{\"fields\":{\n  \"labels\":[\"github\",\"gh-{{webhookData.repository.name}}-{{webhookData.issue.number}}\"{{#webhookData.bridge.labels}}, \"{{.}}\"{{/}}],\n  \"<<START_DATE_FIELD>>\":\"{{webhookData.bridge.startDate}}\"\n  {{#if(webhookData.bridge.assignee.isNotEmpty())}},\"assignee\":{\"id\":\"{{webhookData.bridge.assignee}}\"}{{/}}\n  {{#if(webhookData.bridge.reporter.isNotEmpty())}},\"reporter\":{\"id\":\"{{webhookData.bridge.reporter}}\"}{{/}}\n}}",
+                    "sendNotifications": false
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 12,
+                  "connectionId": null,
+                  "checksum": null
+                },
+                {
+                  "id": "fa2d6cda-b592-4209-83e3-77a9e23fdb06",
+                  "parentId": "fd4077d8-a1e8-4a15-bc52-c12157bbc827",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "recentlycreated",
+                    "jql": "",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "0795fdf0-c58c-41d0-b496-bf04543f74f8",
+                      "parentId": "fa2d6cda-b592-4209-83e3-77a9e23fdb06",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.edit",
+                      "value": {
+                        "operations": [
+                          {
+                            "field": {
+                              "type": "ID",
+                              "value": "description"
+                            },
+                            "fieldType": "description",
+                            "type": "SET",
+                            "value": "{{webhookData.issue.body}}\n\nh3. 출처\nGitHub : [Issue #{{webhookData.issue.number}} · {{webhookData.issue.title.replace(\"[\",\"［\").replace(\"]\",\"］\").replace(\"|\",\"｜\")}}|{{webhookData.issue.html_url}}]"
+                          }
+                        ],
+                        "advancedFields": null,
+                        "sendNotifications": true
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 12,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                },
+                {
+                  "id": "f811b0ca-b0c9-4d26-a05e-fdfbd1ba3fe7",
+                  "parentId": "fd4077d8-a1e8-4a15-bc52-c12157bbc827",
+                  "conditionParentId": null,
+                  "component": "ACTION",
+                  "type": "jira.issue.outgoing.webhook",
+                  "value": {
+                    "url": "https://api.github.com/repos/<<REPO>>/actions/workflows/issue-sync.yml/dispatches",
+                    "urlSecure": false,
+                    "headers": [
+                      {
+                        "id": "_header_1792657085192",
+                        "name": "Authorization",
+                        "value": "",
+                        "headerSecure": true
+                      },
+                      {
+                        "id": "_header_1792657219844",
+                        "name": "Accept",
+                        "value": "application/vnd.github+json",
+                        "headerSecure": false
+                      },
+                      {
+                        "id": "_header_1792657220945",
+                        "name": "X-GitHub-Api-Version",
+                        "value": "2022-11-28",
+                        "headerSecure": false
+                      },
+                      {
+                        "id": "_header_1792657221739",
+                        "name": "Content-Type",
+                        "value": "application/json",
+                        "headerSecure": false
+                      }
+                    ],
+                    "sendIssue": false,
+                    "contentType": "custom",
+                    "customBody": "{\"ref\":\"main\",\"inputs\":{\"kind\":\"link\",\"key\":\"{{createdIssue.key}}\",\"number\":\"{{webhookData.issue.number}}\"}}\n",
+                    "method": "POST",
+                    "responseEnabled": false,
+                    "continueOnErrorEnabled": false
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                },
+                {
+                  "id": "508c475d-787f-45fd-9dd3-9bef5b691c54",
+                  "parentId": "fd4077d8-a1e8-4a15-bc52-c12157bbc827",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "recentlycreated",
+                    "jql": "",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "937c9d99-77e7-4f08-9b8e-5af6e7115d12",
+                      "parentId": "508c475d-787f-45fd-9dd3-9bef5b691c54",
+                      "conditionParentId": null,
+                      "component": "CONDITION",
+                      "type": "jira.comparator.condition",
+                      "value": {
+                        "first": "{{webhookData.bridge.epicKey}}",
+                        "second": "^[A-Z][A-Z0-9]+-[0-9]+$",
+                        "operator": "REGEX_CONTAINS"
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 1,
+                      "connectionId": null,
+                      "checksum": null
+                    },
+                    {
+                      "id": "c2046865-56f4-4b1b-8f65-d328186730e4",
+                      "parentId": "508c475d-787f-45fd-9dd3-9bef5b691c54",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.edit",
+                      "value": {
+                        "operations": [
+                          {
+                            "field": {
+                              "type": "ID",
+                              "value": "parent"
+                            },
+                            "fieldType": "parent",
+                            "type": "SET",
+                            "value": {
+                              "type": "SMART",
+                              "value": "{{webhookData.bridge.epicKey}}"
+                            }
+                          }
+                        ],
+                        "advancedFields": "",
+                        "sendNotifications": false
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 12,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "schemaVersion": 1,
+              "connectionId": null,
+              "checksum": null
+            },
+            {
+              "id": "a16dd09b-894f-44c8-b480-566e0ec9a0b1",
+              "parentId": "613624a3-3b64-49c9-b062-c0a20d8454b3",
+              "conditionParentId": null,
+              "component": "CONDITION_BLOCK",
+              "type": "jira.condition.if.block",
+              "value": {
+                "conditionMatchType": "ALL"
+              },
+              "conditions": [],
+              "children": [
+                {
+                  "id": "0f74562e-a12c-4c05-9c95-e8f8f8ccd615",
+                  "parentId": "a16dd09b-894f-44c8-b480-566e0ec9a0b1",
+                  "conditionParentId": null,
+                  "component": "ACTION",
+                  "type": "jira.issue.create",
+                  "value": {
+                    "operations": [
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "summary"
+                        },
+                        "fieldType": "summary",
+                        "type": "SET",
+                        "value": "[GH #{{webhookData.issue.number}}] {{webhookData.issue.title}}"
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "description"
+                        },
+                        "fieldType": "description",
+                        "type": "SET",
+                        "value": ""
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "project"
+                        },
+                        "fieldType": "project",
+                        "type": "SET",
+                        "value": {
+                          "type": "ID",
+                          "value": "<<PROJECT_ID>>"
+                        }
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "issuetype"
+                        },
+                        "fieldType": "issuetype",
+                        "type": "SET",
+                        "value": {
+                          "type": "ID",
+                          "value": "<<ISSUE_TYPE_ID_TASK>>"
+                        }
+                      },
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "parent"
+                        },
+                        "fieldType": "parent",
+                        "type": "SET",
+                        "value": null
+                      }
+                    ],
+                    "advancedFields": "{\"fields\":{\n  \"labels\":[\"github\",\"gh-{{webhookData.repository.name}}-{{webhookData.issue.number}}\"{{#webhookData.bridge.labels}}, \"{{.}}\"{{/}}],\n  \"<<START_DATE_FIELD>>\":\"{{webhookData.bridge.startDate}}\"\n  {{#if(webhookData.bridge.assignee.isNotEmpty())}},\"assignee\":{\"id\":\"{{webhookData.bridge.assignee}}\"}{{/}}\n  {{#if(webhookData.bridge.reporter.isNotEmpty())}},\"reporter\":{\"id\":\"{{webhookData.bridge.reporter}}\"}{{/}}\n}}",
+                    "sendNotifications": false
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 12,
+                  "connectionId": null,
+                  "checksum": null
+                },
+                {
+                  "id": "271345b8-e5dc-45fb-8a95-7eaaff5f380f",
+                  "parentId": "a16dd09b-894f-44c8-b480-566e0ec9a0b1",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "recentlycreated",
+                    "jql": "",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "3a1c61f1-3526-4cc8-9d36-ae37d65952a8",
+                      "parentId": "271345b8-e5dc-45fb-8a95-7eaaff5f380f",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.edit",
+                      "value": {
+                        "operations": [
+                          {
+                            "field": {
+                              "type": "ID",
+                              "value": "description"
+                            },
+                            "fieldType": "description",
+                            "type": "SET",
+                            "value": "{{webhookData.issue.body}}\n\nh3. 출처\nGitHub : [Issue #{{webhookData.issue.number}} · {{webhookData.issue.title.replace(\"[\",\"［\").replace(\"]\",\"］\").replace(\"|\",\"｜\")}}|{{webhookData.issue.html_url}}]"
+                          }
+                        ],
+                        "advancedFields": null,
+                        "sendNotifications": false
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 12,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                },
+                {
+                  "id": "7c1f5758-b7fd-4436-8c51-8c03212baf95",
+                  "parentId": "a16dd09b-894f-44c8-b480-566e0ec9a0b1",
+                  "conditionParentId": null,
+                  "component": "ACTION",
+                  "type": "jira.issue.outgoing.webhook",
+                  "value": {
+                    "url": "https://api.github.com/repos/<<REPO>>/actions/workflows/issue-sync.yml/dispatches",
+                    "urlSecure": false,
+                    "headers": [
+                      {
+                        "id": "_header_1792657085192",
+                        "name": "Authorization",
+                        "value": "",
+                        "headerSecure": true
+                      },
+                      {
+                        "id": "_header_1792657219844",
+                        "name": "Accept",
+                        "value": "application/vnd.github+json",
+                        "headerSecure": false
+                      },
+                      {
+                        "id": "_header_1792657220945",
+                        "name": "X-GitHub-Api-Version",
+                        "value": "2022-11-28",
+                        "headerSecure": false
+                      },
+                      {
+                        "id": "_header_1792657221739",
+                        "name": "Content-Type",
+                        "value": "application/json",
+                        "headerSecure": false
+                      }
+                    ],
+                    "sendIssue": false,
+                    "contentType": "custom",
+                    "customBody": "{\"ref\":\"main\",\"inputs\":{\"kind\":\"link\",\"key\":\"{{createdIssue.key}}\",\"number\":\"{{webhookData.issue.number}}\"}}\n",
+                    "method": "POST",
+                    "responseEnabled": false,
+                    "continueOnErrorEnabled": false
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                },
+                {
+                  "id": "33e4d984-4ab3-4e40-abf1-84723422fbd1",
+                  "parentId": "a16dd09b-894f-44c8-b480-566e0ec9a0b1",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "recentlycreated",
+                    "jql": "",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "c61181ee-93f6-4e5d-99fa-db8ede32a85a",
+                      "parentId": "33e4d984-4ab3-4e40-abf1-84723422fbd1",
+                      "conditionParentId": null,
+                      "component": "CONDITION",
+                      "type": "jira.comparator.condition",
+                      "value": {
+                        "first": "{{webhookData.bridge.epicKey}}",
+                        "second": "^[A-Z][A-Z0-9]+-[0-9]+$",
+                        "operator": "REGEX_CONTAINS"
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 1,
+                      "connectionId": null,
+                      "checksum": null
+                    },
+                    {
+                      "id": "9c814464-f685-4e7c-a0ad-47289d813bc5",
+                      "parentId": "33e4d984-4ab3-4e40-abf1-84723422fbd1",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.edit",
+                      "value": {
+                        "operations": [
+                          {
+                            "field": {
+                              "type": "ID",
+                              "value": "parent"
+                            },
+                            "fieldType": "parent",
+                            "type": "SET",
+                            "value": {
+                              "type": "SMART",
+                              "value": "{{webhookData.bridge.epicKey}}"
+                            }
+                          }
+                        ],
+                        "advancedFields": "",
+                        "sendNotifications": false
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 12,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "schemaVersion": 1,
+              "connectionId": null,
+              "checksum": null
+            }
+          ],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        }
+      ],
+      "canOtherRuleTrigger": false,
+      "notifyOnError": "FIRSTERROR",
+      "projects": [],
+      "labels": [],
+      "tags": [
+        {
+          "id": 437127178198874,
+          "ruleIdUuid": "01a17aff-1c3e-78e3-bd39-a2e824e41216",
+          "tagType": "ORCHESTRATION_VERSION",
+          "tagValue": "47"
+        },
+        {
+          "id": 437127178198876,
+          "ruleIdUuid": "01a17aff-1c3e-78e3-bd39-a2e824e41216",
+          "tagType": "IS_RULE_UPDATED",
+          "tagValue": "true"
+        },
+        {
+          "id": 437127178198872,
+          "ruleIdUuid": "01a17aff-1c3e-78e3-bd39-a2e824e41216",
+          "tagType": "WEBHOOK_TOKEN",
+          "tagValue": "701c45862ce7ea1b3c243a2cc3f99e7b82fe4759"
+        },
+        {
+          "id": 437127211188324,
+          "ruleIdUuid": "01a17aff-1c3e-78e3-bd39-a2e824e41216",
+          "tagType": "ORCHESTRATION_CONFIG_ID",
+          "tagValue": "66587d1e-d39c-11f1-9278-e5fd6984df7e"
+        },
+        {
+          "id": 437127178198875,
+          "ruleIdUuid": "01a17aff-1c3e-78e3-bd39-a2e824e41216",
+          "tagType": "IS_RULE_AN_ORCHESTRATION",
+          "tagValue": "true"
+        }
+      ],
+      "ruleScope": {
+        "resources": [
+          "ari:cloud:jira:<<CLOUD_ID>>:project/<<PROJECT_ID>>"
+        ]
+      },
+      "ruleHome": {
+        "ruleLifecycleHome": {
+          "locationARI": "ari:cloud:jira:<<CLOUD_ID>>:project/<<PROJECT_ID>>"
+        },
+        "ruleBillingHome": {
+          "locationARI": "ari:cloud:jira-software::site/<<CLOUD_ID>>"
+        }
+      },
+      "writeAccessType": "OWNER_ONLY",
+      "readAccessType": "UNRESTRICTED",
+      "collaborators": [],
+      "billingType": "NORMAL",
+      "idUuid": "01a17aff-1c3e-78e3-bd39-a2e824e41216",
+      "partitionId": "86cdccfb-e189-4517-8bda-ffd0c676aa6a",
+      "checksum": {
+        "version": 3,
+        "value": "10b6db0e300f8a61c050354f326d6e71badbb3e84bb8e1f4d2ee99d034be6828"
+      },
+      "currentVersionId": null,
+      "ruleArchetype": null,
+      "draftId": null,
+      "editRestrictions": null
+    }
+  ]
+}

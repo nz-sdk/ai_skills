@@ -1,0 +1,8 @@
+# ci.yml 의 steps 안, checkout · setup-node 뒤에 붙이는 단계 (운영 repo/.github/workflows/ci.yml 59-65행과 같다)
+# Node 가 필요하다(npx). 판을 고정해 둔 이유: 계정 ID 형식 검사가 판마다 달라지는 것을 막는다.
+      # GitHub ↔ Jira 대조표가 규칙(이름 · 이메일 금지 · 계정 ID 형식 · 필수 칸)에 맞는지 본다.
+      - name: Check github-jira-map.yml
+        run: |
+          npx --yes yaml@2.6.1 --json --single < .github/github-jira-map.yml > "$RUNNER_TEMP/github-jira-map.json"
+          npx --yes ajv-cli@5.0.0 validate --spec=draft7 --all-errors --errors=text \
+            -s .github/github-jira-map.schema.json -d "$RUNNER_TEMP/github-jira-map.json"

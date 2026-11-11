@@ -1,0 +1,34 @@
+# 작업 — 버그 · 기능이 아닌 일반 작업.
+# 칸 이름이 본문 소제목이 되고 Jira 설명에도 그대로 간다.
+# name 은 3자 이상 — 짧으면 GitHub 이 양식 목록에서 조용히 뺀다(「Name is too short」).
+name: 일반 작업
+description: 일반 작업(정리 · 설정 · 문서 등)
+title: "task: "
+type: Task
+body:
+  - type: input
+    id: target
+    attributes:
+      label: 대상
+      description: 화면 · 모듈 · 문서 등
+    validations:
+      required: true
+  - type: input
+    id: epic
+    attributes:
+      label: 상위 에픽 키
+      description: Jira 상위 항목(에픽) 키 — 화면 에픽이 없는 일은 공통 에픽 키
+      placeholder: <<SPACE>>-1
+    validations:
+      required: true
+  - type: textarea
+    id: todo
+    attributes:
+      label: 할 일
+    validations:
+      required: true
+  - type: textarea
+    id: detail
+    attributes:
+      label: 기술 상세
+      description: 참고 파일 · 링크

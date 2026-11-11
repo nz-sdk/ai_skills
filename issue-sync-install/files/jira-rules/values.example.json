@@ -1,0 +1,20 @@
+{
+  "_설명": "복사해서 자기 상품 값으로 모두 바꾼다. 이름 앞이 _ 인 칸은 무시된다. 비밀값(PAT · 웹후크 암호)은 여기에 적지 않는다.",
+  "PREFIX": "[AB]",
+  "SPACE": "ABC",
+  "PROJECT_ID": "10000",
+  "CLOUD_ID": "00000000-0000-0000-0000-000000000000",
+  "SITE": "example.atlassian.net",
+  "REPO": "owner/repo",
+  "ISSUE_TYPE_ID_BUG": "10001",
+  "ISSUE_TYPE_ID_FEATURE": "10003",
+  "ISSUE_TYPE_ID_TASK": "10003",
+  "JIRA_TYPE_BUG": "버그",
+  "JIRA_TYPE_FEATURE": "기능",
+  "START_DATE_FIELD": "customfield_10015",
+  "TRANSITION_DONE": "완료",
+  "TRANSITION_REOPEN": "할 일",
+  "OWNER_ACCOUNT_ID": "000000000000000000000000",
+  "ACTOR_ACCOUNT_ID": "000000000000000000000000",
+  "SLACK_WEBHOOK_URL": ""
+}

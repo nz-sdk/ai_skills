@@ -1,0 +1,95 @@
+// Companion test of the `db_dialect` fragment — emitted with it and RENAMED WITH IT (step 9): this class becomes
+// <your dialect class>Test and every ExampleDialect below becomes your class name.
+//
+// A dialect runs DDL as the provisioning ADMIN account, so its mistakes cost data. The tests capture the SQL it sends
+// to a mocked JdbcTemplate and check PROPERTIES rather than exact strings, so they hold for any vendor the dialect is
+// adapted to:
+//   - createScope names the scope and its password, and never drops anything — it also re-enables a detached scope,
+//     whose data must survive;
+//   - detachScope is data-safe: it may drop the login, never the database/schema;
+//   - dropScope and destroyScope really remove the database/schema;
+//   - scopedUrl points at the scope, whether or not the admin URL ends in a slash.
+//
+// GENERATOR: if the vendor adaptation drops a scope some other way (DROP OWNED, a stored procedure), widen DROPS_DATA
+// to match it rather than deleting the check.
+package {{PKG}};
+
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Component;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.regex.Pattern;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+
+class ExampleDialectTest {
+
+    private static final Pattern DROPS_DATA =
+            Pattern.compile("(?i)\\b(DROP\\s+(DATABASE|SCHEMA)|TRUNCATE|DELETE\\s+FROM)\\b");
+    private static final String SCOPE = "scope_orders";
+    private static final String PASSWORD = "S3cret-pw";
+
+    private final ExampleDialect dialect = new ExampleDialect();
+
+    @Test
+    void itIsABeanWithAnIdAndANameLimit() {
+        assertNotNull(ExampleDialect.class.getAnnotation(Component.class));
+        assertFalse(dialect.id() == null || dialect.id().isBlank(), "matched against protean.worker.db.dialect");
+        assertTrue(dialect.maxNameLength() > 0, "names longer than this are hash-shortened by the caller");
+    }
+
+    @Test
+    void createScopeProvisionsTheNamedScopeAndDropsNothing() {
+        List<String> sql = sqlSentBy(admin -> dialect.createScope(admin, SCOPE, PASSWORD));
+        assertTrue(sql.stream().anyMatch(s -> s.contains(SCOPE)), "the scope is named: " + sql);
+        assertTrue(sql.stream().anyMatch(s -> s.contains(PASSWORD)), "the login gets the password: " + sql);
+        assertTrue(sql.stream().noneMatch(s -> DROPS_DATA.matcher(s).find()),
+                "createScope re-enables a detached scope — it must not remove data: " + sql);
+    }
+
+    @Test
+    void detachScopeKeepsTheData() {
+        List<String> sql = sqlSentBy(admin -> dialect.detachScope(admin, SCOPE));
+        assertTrue(sql.stream().noneMatch(s -> DROPS_DATA.matcher(s).find()),
+                "detach is the data-safe, reversible step: " + sql);
+    }
+
+    @Test
+    void dropAndDestroyRemoveTheScopesData() {
+        for (List<String> sql : List.of(
+                sqlSentBy(admin -> dialect.dropScope(admin, SCOPE)),
+                sqlSentBy(admin -> dialect.destroyScope(admin, SCOPE)))) {
+            assertTrue(sql.stream().anyMatch(s -> DROPS_DATA.matcher(s).find() && s.contains(SCOPE)),
+                    "the scope's database/schema is dropped: " + sql);
+        }
+    }
+
+    @Test
+    void scopedUrlPointsAtTheScope() {
+        String adminUrl = "jdbc:vendor://db.internal:3306";
+        String scoped = dialect.scopedUrl(adminUrl, SCOPE);
+        assertTrue(scoped.contains(SCOPE), scoped);
+        assertFalse(scoped.equals(adminUrl), "the scoped URL must differ from the admin URL");
+        assertEquals(scoped, dialect.scopedUrl(adminUrl + "/", SCOPE), "a trailing slash must not change the URL");
+        assertFalse(scoped.contains("//" + SCOPE), scoped);
+    }
+
+    /** Every String argument the dialect passed to the admin JdbcTemplate — execute, update, batchUpdate alike. */
+    private static List<String> sqlSentBy(java.util.function.Consumer<JdbcTemplate> action) {
+        JdbcTemplate admin = mock(JdbcTemplate.class);
+        action.accept(admin);
+        return Mockito.mockingDetails(admin).getInvocations().stream()
+                .flatMap(invocation -> Arrays.stream(invocation.getArguments()))
+                .flatMap(arg -> arg instanceof String[] many ? Arrays.stream(many) : java.util.stream.Stream.of(arg))
+                .filter(String.class::isInstance)
+                .map(String.class::cast)
+                .toList();
+    }
+}

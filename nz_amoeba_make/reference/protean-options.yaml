@@ -14,6 +14,12 @@
 #   test_fragment  a fragment emitted to src/TEST/java alongside `fragment`, same file naming, no rename.
 #                  For a guarantee that lives in what the generated app does NOT contain, which no amount of
 #                  reading the main source can confirm.
+#   companion_test  the UNIT TEST of a single `fragment`, emitted with it to src/test/java/{{PKG_PATH}}/ and
+#                  RENAMED WITH IT — the opposite of test_fragment. Template `<Fragment>Test.java.template` declares
+#                  `Example<X>Test` and refers to `Example<X>`; when the fragment becomes `<Name>`, the test becomes
+#                  `<Name>Test` (class and file) and every `Example<X>` in it becomes `<Name>`. A fragment named by
+#                  two records (DbDialect) still emits ONE test. When step 8 or a GENERATOR note changes the
+#                  fragment's behaviour, the test changes with it — each template's header says which rows.
 #   emit        generation-time instruction attached to a capability — keys that MUST be written even though
 #                  their library default is empty. Read it in step 9; it is not a user-facing question.
 #   fragment_bundle  a MULTI-FILE fragment: a whole templates/fragments/<dir>/ emitted into a SUB-PACKAGE.
@@ -556,6 +562,7 @@ groups:
         advanced: true
         desc: Vendor for scope provisioning (or register a custom DbDialect bean, see fragment).
         fragment: DbDialect
+        companion_test: DbDialectTest
         build_deps: ["implementation 'org.springframework:spring-jdbc'"]   # the fragment's JdbcTemplate — see db_dialect
       - key: protean.worker.db.admin-url
         type: string
@@ -627,12 +634,14 @@ capabilities:
     title: Custom MCP tool (McpTool SPI)
     requires: [protean.mcp.enabled=true]
     fragment: CustomMcpTool
+    companion_test: CustomMcpToolTest
     name_input: true     # ask the user to TYPE the tool name (e.g. myapp.query)
     desc: A @Component McpTool listed alongside built-ins in tools/list.
   - id: builtin_tool_override
     title: Override a built-in MCP tool
     requires: [protean.mcp.enabled=true]
     fragment: BuiltinToolOverride
+    companion_test: BuiltinToolOverrideTest
     desc: Replace a protean.* built-in via registerTool while delegating to the original.
   - id: module_source_tools
     title: Module source read-back tools (amoeba.list_module_files / search_module_source / export_module_source)
@@ -940,6 +949,7 @@ capabilities:
     title: Custom code-review rule (CodeRule SPI)
     requires: [protean.gate.review-enabled=true]
     fragment: CodeRule
+    companion_test: CodeRuleTest
     desc: A @Component CodeRule that runs at gate ② alongside ForbiddenApiRule.
   - id: secured_mcp
     title: Secured MCP control plane (Spring Security OAuth2 Resource Server)
@@ -963,6 +973,7 @@ capabilities:
     title: MCP authorization policy (ModuleActionAuthorizer SPI)
     requires: [protean.mcp.enabled=true]
     fragment: ModuleActionAuthorizer
+    companion_test: ModuleActionAuthorizerTest
     build_deps:
       - "implementation 'org.springframework.boot:spring-boot-starter-security'"
     desc: >-
@@ -1371,11 +1382,13 @@ capabilities:
     title: Module unload hook (ModuleUnloadCallback SPI)
     requires: [protean.isolation.mode=in-process]
     fragment: ModuleUnloadCallback
+    companion_test: ModuleUnloadCallbackTest
     desc: Clean up out-of-context resources just before a module's context closes.
   - id: db_dialect
     title: Custom DB dialect (DbDialect SPI)
     requires: [protean.worker.db.auto-provision=true]
     fragment: DbDialect
+    companion_test: DbDialectTest
     # The SPI's methods take a JdbcTemplate. protean carries spring-jdbc at RUNTIME scope only, so the fragment does
     # not compile without this. spring-jdbc rather than the starter: the starter would add DataSource
     # autoconfiguration to an app that has no data_access (auto-provision forces worker isolation).
@@ -1396,6 +1409,7 @@ capabilities:
     title: Custom module-store dialect (ModuleStoreDialect SPI)
     requires: [protean.module-store.backend=jdbc]
     fragment: ModuleStoreDialect
+    companion_test: ModuleStoreDialectTest
     desc: >-
       Add/override the jdbc module-store's per-vendor DDL (large-text column + auto-increment). Built-in
       h2/mysql/postgresql already work; register this for another vendor (e.g. Oracle) or to override a built-in

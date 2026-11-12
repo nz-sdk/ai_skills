@@ -12,7 +12,7 @@
 |---|---|
 | `name` | `nz_amoeba_make` |
 | 표시 이름 | Amoeba Maker |
-| `metadata.version` | `0.3.0` |
+| `metadata.version` | `0.4.0` |
 | `license` | `AGPL-3.0-only` |
 | `description` | `prototype/<name>` 아래에 실행 가능한 Protean 소비 샘플 서버를 처음부터 스캐폴딩한다. **Protean 옵션 표면 전체**(모든 `protean.*` 설정 + 모든 소비자 확장 지점 + 데이터베이스 서브플로우)를 사용자와 함께 훑고, 그에 맞는 build·config·code·infra·README 를 생성한다. Protean 을 모르는 사용자를 위해 만들어졌다 — 어떤 설정이든 기본값과 평이한 설명을 곁들여 스킬을 통해 구성할 수 있다. 새 Protean 샘플/예제 서버를 만들거나, capability 를 시험해 보거나, 다운스트림 Protean 통합을 부트스트랩할 때 사용한다. 트리거: "make a protean sample", "scaffold a protean server", "new protean example", "protean sample 만들어" |
 
@@ -33,7 +33,9 @@
 - **`templates/`** — 파일 템플릿 + capability 별 코드 프래그먼트 + 벤더별 DB 템플릿.
 
 규칙: 모든 것을 템플릿에서 생성한다(기존 샘플이 없다고 가정). 생성되는 모든 산출물은 **영어**다(## 언어 참조).
-요청받지 않았다면 아무것도 실행·배포하지 말고, 실행/검증 명령을 출력하며 끝낸다.
+요청받지 않았다면 아무것도 실행·배포하지 않는다 — **예외는 하나**, 10 단계가 생성물의 오프라인 테스트 스위트
+(`./gradlew test`)를 실행하고 결과를 보고한다. 그 밖의 것(`setup.sh`, `docker compose`, `./gradlew run`)은 실행하지
+않고 출력만 한다.
 
 ## 언어
 
@@ -41,7 +43,8 @@
 고르는 사람과, 나중에 저장소를 읽는 사람.
 
 **한국어** — 세션 중에 말하는 모든 것: 질문 문구, 선택지 라벨과 그 설명, 그룹·단계 제목, 진행 표시("적용 가능한
-확장 기능 7개 중 1/2"), 검증 리포트(OK / 경고 / 차단), 최종 확정 구성 echo, 그리고 실행/검증 명령을 둘러싼 서술.
+확장 기능 7개 중 1/2"), 검증 리포트(OK / 경고 / 차단), 최종 확정 구성 echo, 테스트 실행 보고(10 단계), 그리고
+실행 명령을 둘러싼 서술.
 
 **절대 번역하지 않고 원문 그대로 인용하는 것** — `protean.*` 속성 키, 그 값·enum 멤버·기본값, 클래스·파일·
 디렉토리명, Maven 좌표, 환경변수명(`OAUTH_ISSUER_URI`, `SERVER_PORT`, …), 셸 명령, URL, 그리고 capability `id`.
@@ -424,10 +427,14 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   `tasks.named('bootJar') { archiveClassifier = 'boot' }` 의 주석을 해제한다(container 트랙이
   `build/libs/*-boot.jar` 를 그 리터럴 접미사로 자동 탐지한다). `runtime=sidecar` 면 bootJar 를 쓰지 않는다 —
   사용자가 flat `-worker` sidecar jar 를 직접 빌드하는 경우에만 shadow 플러그인을 대신 추가한다.
-- **공통 지원 패키지 (항상)** — `templates/support/*.template` 5개를 모두 클래스명을 유지한 채
+- **공통 지원 패키지 (항상)** — `templates/support/` 의 main 템플릿 5개를 클래스명을 유지한 채
   `src/main/java/{{PKG_PATH}}/support/` 로 복사한다. 이들은 capability 로 게이팅되지 **않는다**: 모든 샘플이
   받으며 네 동작 전부 비어 있거나 패스스루다. 나중에 공통 처리를 넣을 때 배선 작업이 아니라 한 파일 편집으로
-  끝나게 하기 위한 것이다.
+  끝나게 하기 위한 것이다. 그 테스트 `SupportWiringTest.java.template` 은 `src/test/java/{{PKG_PATH}}/support/`
+  로 이름 그대로 나간다 — 필터가 요청을 바꾸지 않고 넘기며 protean 의 추적 필터와 Spring Security 사이에 있는지,
+  인터셉터가 protean 이 모듈 라우트를 등록하는 방식(런타임 `registerMapping`)으로 붙인 라우트에도 걸리는지,
+  `@EnableWebMvc` 가 없는지, `BaseMapper`/`BaseService` 에 추상 메서드 · 가변 static 이 없는지를 본다. 나중에
+  hook 을 채우면 새 동작의 테스트도 여기에 넣는다.
   - `BaseService`(abstract, 빈)와 `BaseMapper`(interface, 빈) — 배포된 모듈의 service 와 Mapper 가 상속하는
     상위 타입. 이들은 **호스트 앱**에 있어야 한다: 모듈은 소스로 배포되고 `RuntimeCompiler` 가
     `java.class.path` 를 상속하므로, 모듈이 이름을 부른 상위 타입은 거기서 해소돼야 한다. 모듈 소스에서 이들을
@@ -448,6 +455,20 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   프로젝트별 정책이 아니라 구조적 보증을 단정하는 테스트라 이름을 바꿀 근거가 없다. 현재는
   `protean.mcp.authorization.resource` → `ResourceServerOnlyTest` 하나이며, 이 앱이 **토큰을 검증만 하고 발급하지
   않는다**는 것을 못박는다 — 앱이 *갖고 있지 않은 것*에 있는 보증이라 main 소스를 아무리 읽어도 확인할 수 없다.
+- **동반 테스트(companion test)** — 단일 fragment 의 레코드는 모두 **`companion_test`** 도 가진다. 그 fragment 의
+  단위 테스트 `templates/fragments/<Fragment>Test.java.template` 을 `src/test/java/{{PKG_PATH}}/` 로 내보내되,
+  `test_fragment` 와 반대로 **fragment 와 함께 rename** 한다 — `ExampleAuthorizer` 가 `ScopePolicy` 가 되면 테스트는
+  `ScopePolicyTest`(클래스 · 파일)가 되고 그 안의 `ExampleAuthorizer` 도 모두 `ScopePolicy` 가 된다. 내보낸
+  fragment 마다 테스트 하나(DbDialect 는 레코드 둘이 가리켜도 하나). 테스트는 일부러 벤더 · 이름에 중립적으로
+  썼지만, **fragment 의 동작을 바꾸면 같은 단계에서 그 테스트도 바꾼다** — 각 템플릿 머리말이 어느 행인지 적는다:
+  - 8 단계에서 로컬 데모용으로 `authorizer` 를 완화(일부 동작을 `Decision.allow()`)했다 → authorizer 테스트
+    `callers()` 의 그 행을 바꾼다. DEBUG · 미인증 행은 그것까지 열지 않았다면 그대로 둔다.
+  - `custom_mcp_tool` 을 읽기 전용으로 만들었다(그 `GENERATOR:` 메모) → 테스트는 `READ` 와 read-only hint 를
+    기대한다. `call()` 을 달리 만들었다면 echo 테스트를 고쳐 쓰고 계약 테스트는 남긴다.
+  - `builtin_tool_override` 가 다른 도구를 감싼다 → 테스트의 `TARGET` 을 같은 문자열로.
+  - `code_rule` / `db_dialect` / `module_store_dialect` 를 예시 이상으로 바꿨다 → 머리말이 가리키는 행을 고치고,
+    안전 검사(detach 는 데이터를 남긴다, create 는 아무것도 지우지 않는다, descriptor 텍스트는 길이 제한 없음)는
+    지우지 않는다.
 - **`emit` 지시** — `emit` 을 가진 키·capability 는 라이브러리 기본값이 비어 있어도 반드시 써야 하는 설정을
   지정한다. `secured_mcp` 는 `scopes-supported: [mcp.read, mcp.write, mcp.admin]` 과
   `bearer-methods-supported: [header]` 를 요구한다. `SecurityConfig` 가 정확히 그 세 스코프 이름으로 게이팅하므로,
@@ -494,13 +515,15 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
     `docker compose -f docker-compose.yml -f docker-compose.local-db.yml` 를 실행한다 — CI 가 초록이 된 뒤
     운영 호스트에서 compose 단계가 실패한다. 그 선택지 줄을 지운다.
   - **★ rename 한 프래그먼트는 자기 파일만이 아니라 모든 곳에서 rename 해야 한다.** 단일 `fragment` 는 실제
-    클래스명으로 바뀌는데(9 단계), 다른 템플릿이 그 클래스를 산문과 `<<fragment-checks>>` 에서 언급한다. 생성
-    후 생성물 트리에서 템플릿의 자리표시 이름(`ExampleTool`, `ExampleAuthorizer`, `ExampleCodeRule`,
-    `ExampleUnloadCallback`, `ExampleToolOverride`)을 grep 해서 실제 사용한 이름으로 바꾼다 — `README.md`,
-    `SecurityConfig.java`, `module_source_tools` 번들의 테스트가 authorizer 나 커스텀 툴을 언급하고,
-    `db_query_tools` 번들의 `QueryToolRegistrationTest` 는 `ExampleAuthorizer` 를 import 해 생성한다. 남은
-    자리표시 이름은 존재하지 않는 클래스를 가리키는 참조다. (`fragment_bundle` 멤버는 반대다: `rename: false`
-    이므로 절대 건드리지 않는다.)
+    클래스명으로 바뀌는데(9 단계), 다른 파일이 그 클래스를 산문 · 코드 · `<<fragment-checks>>` 에서 언급한다.
+    생성 후 생성물 트리에서 템플릿의 자리표시 이름(`ExampleTool`, `ExampleToolOverride`, `ExampleAuthorizer`,
+    `ExampleCodeRule`, `ExampleUnloadCallback`, `ExampleDialect`, `ExampleModuleStoreDialect` — 단어 경계로
+    찾는다. `ExampleTool` 이 `ExampleToolOverride` 에 걸리지 않게)을 grep 해서 실제 사용한 이름으로 바꾼다.
+    컴파일에 걸리는 참조는 각 fragment 의 **동반 테스트**(클래스명과 본문)와, `ExampleAuthorizer` 를 import 해
+    생성하는 `db_query_tools` 번들의 `QueryToolRegistrationTest` 다(`QueryToolSupport` ·
+    `QueryToolsMcpEndToEndTest` 는 주석에서 언급한다). 남은 자리표시 이름은 존재하지 않는 클래스를 가리키는
+    참조이고, 10 단계의 `./gradlew test` 가 거기서 실패한다. (`fragment_bundle` 멤버는 반대다: `rename: false`
+    이므로 그 클래스들은 절대 rename 하지 않는다.)
   - **`{{...}}` 가 항상 플레이스홀더는 아니다.** `ci.yml` 에는 `{{.State.Health.Status}}` 가 있고 이것은
     docker inspect 의 Go 템플릿이다. 스킬 플레이스홀더는 `{{UPPER_SNAKE_CASE}}` 뿐이며, 그 밖의 것은 그대로 둔다.
   - **load-bearing 한 부분을 "정리"하지 말 것.** 각각이 조용히 나는 실패를 설명하는 주석이다: `java -jar` 금지,
@@ -554,10 +577,44 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   일치하는지 단언하며, 서버를 기동하지 않는다.
   (MCP 표면을 보호하면 `ResourceServerOnlyTest` 도 함께 나간다 — 9 단계의 `test_fragment` 항목 참고.)
 
-### 10. 검증 (출력만, 실행하지 않음)
+### 10. 테스트를 실행하고, 실행 명령을 출력한다
 
-Linux/Ubuntu 서버용 원커맨드 설치를 앞세우고, 그다음 수동 등가물을 보여준다. **각 단계를 한국어로 설명하고,
-모든 명령은 한 바이트도 바꾸지 말고 출력한다** — 번역하거나 "정돈한" 명령은 사용자가 붙여넣을 수 없는 명령이다.
+**넘겨주기 전에 생성물의 테스트 스위트를 실행한다 — 이 스킬이 실행하는 유일한 명령이다.** 9 단계가 쓴 것에는
+모두 테스트가 있다: `ConfigMatchesSelectionTest`, `SupportWiringTest`, fragment 마다의 동반 테스트, MCP 표면을
+보호했다면 `ResourceServerOnlyTest`, 그리고 번들의 테스트. 모두 **오프라인**으로 돈다 — 인가 서버도, 닿는 DB 도,
+Docker 도 필요 없다. 그래서 실패는 기계 탓이 아니라 생성물 탓이다.
+
+1. **전제 확인 — 확인만 하고 설치하지 않는다.** `gradlew` 가 있다(9 단계 wrapper). `javac -version` 이 21 이다
+   (아니면 `settings.gradle` 의 foojay resolver 가 첫 실행에서 받는다 — 그렇다고 말한다). Maven Central 에 닿는다.
+   하나라도 안 되면 4 로 간다.
+2. **생성된 폴더에서 실행한다**: `./gradlew test --console=plain`(Linux · macOS · Git Bash) 또는
+   `.\gradlew.bat test --console=plain`(PowerShell). 첫 실행은 Spring Boot · protean · 테스트 의존성을 내려받으므로
+   10분까지 기다린다. 그다음부터는 1분도 안 걸린다.
+3. **결과는 콘솔이 아니라 `build/test-results/test/*.xml` 에서 읽는다** — tests · failures · errors · skipped 를 센다.
+   테스트가 돌기 전에 빌드가 실패하면(`compileJava` / `compileTestJava` FAILED) XML 이 생기지 않는다 — 그때는
+   콘솔의 컴파일러 오류가 결과다. 그것을 읽고 빨강으로 다룬다.
+   - **초록** → 수를 한국어로 보고한다. 여기서 skipped 의 뜻도 말한다: `Live*` 벤더 테스트는 `DB_TOOLS_TEST_*`
+     변수가 있어야 돌고, `ExportedTreeCompilesTest` / `RealDescriptorLayoutTest` 는 그 샘플 파일이 있어야 돈다.
+   - **빨강** → 실패한 테스트마다 메시지와 스택을 읽고 둘 중 무엇인지 가른다:
+     - **(a) 생성 실수** — 남은 플레이스홀더나 `Example*` 이름, 쓰지 않은 `build_deps` 줄, 파일 하나를 빠뜨린
+       rename, 바꾼 fragment 에 맞추지 않은 동반 테스트, `application.yml` 에 빠진 키. **생성물**을 고치고 다시 돈다.
+     - **(b) 손대지 않은 템플릿 코드 안의 실패** — 템플릿 결함이다. 조용히 덮지 않는다: 그렇게 보고하고(테스트
+       이름 + 메시지 첫 줄) `ai_skills` 저장소에 알리라고 말한다. 생성물 쪽 수정이 분명하면 고쳐도 되지만, 고쳤다는
+       것과 무엇을 고쳤는지 말한다.
+     고치고-다시-돌리기는 **최대 2회**. 그 뒤에는 멈추고 남은 실패를 그대로 보고한다.
+4. **돌리지 못했다** → 어떤 전제가 안 됐는지 말하고 나중에 칠 명령을 출력한다. **돌지 않은 테스트를 통과했다고
+   보고하지 않는다.**
+
+초록을 보고할 때 **"서버 없이"라고 설명하지 말 것.** `ConfigMatchesSelectionTest` 는 아무것도 띄우지 않지만
+`ResourceServerOnlyTest` 는 `@SpringBootTest(webEnvironment = RANDOM_PORT)` 라서 실제 Tomcat 을 띄운다 — 임의
+포트라 실행 중인 인스턴스와 충돌하지 않고, `.invalid` issuer 를 쓰므로 인가 서버가 없어도 된다. 사실대로 적는다:
+이 스위트는 **오프라인**이며 AS 도 닿는 DB 도 필요 없다. 그리고 DB 쪽이 보장이 아닌 이유도 적는다 — DataSource 는
+완전히 배선돼 있고 Hikari 가 게으르게 접속할 뿐이라, `./gradlew test` 가 초록이어도 DB 에 대해 증명하는 것은 없다.
+그것이 `./setup.sh --check` 의 역할이다.
+
+그다음 실행 명령을 출력한다 — 서버와 컨테이너를 띄우는 명령이라 **실행하지 않고 출력만** 한다. Linux/Ubuntu
+서버용 원커맨드 설치를 앞세우고, 그다음 수동 등가물을 보여준다. **각 단계를 한국어로 설명하고, 모든 명령은 한
+바이트도 바꾸지 말고 출력한다** — 번역하거나 "정돈한" 명령은 사용자가 붙여넣을 수 없는 명령이다.
 
 - **`./setup.sh`** — 환경과 전제조건을 preflight 하고, (있다면) DB 를 띄우고, 서버를 실행한다.
   `./setup.sh --check` 는 검사만 한다. (이것이 마지막으로 생성되는 산출물이다.)
@@ -566,15 +623,7 @@ Linux/Ubuntu 서버용 원커맨드 설치를 앞세우고, 그다음 수동 등
 - `./gradlew run` (JDK 21).
 - (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
 - 배포된 모듈 엔드포인트를 호출해 본다. 상태는 `curl localhost:{{PORT}}/platform/modules`.
-- 배포 없이 돌릴 수 있는 sanity check: `./gradlew compileJava`(protean jar 를 대상으로 컴파일)와
-  `./gradlew test`(`ConfigMatchesSelectionTest` 실행 — 생성된 설정이 선택과 일치하는지 단언. MCP 표면을
-  보호했다면 `ResourceServerOnlyTest` 도 함께, 그리고 두 프래그먼트 번들의 테스트도).
-  **이것을 "서버 없이"라고 설명하지 말 것.** `ConfigMatchesSelectionTest` 는 아무것도 띄우지 않지만
-  `ResourceServerOnlyTest` 는 `@SpringBootTest(webEnvironment = RANDOM_PORT)` 라서 실제 Tomcat 을 띄운다 —
-  임의 포트라 실행 중인 인스턴스와 충돌하지 않고, `.invalid` issuer 를 쓰므로 인가 서버가 없어도 된다. 사실대로
-  적는다: 이 스위트는 **오프라인**이며 AS 도 닿는 DB 도 필요 없다. 그리고 DB 쪽이 보장이 아닌 이유도 적는다 —
-  DataSource 는 완전히 배선돼 있고 Hikari 가 게으르게 접속할 뿐이라, `./gradlew test` 가 초록이어도 DB 에 대해
-  증명하는 것은 없다. 그것이 `./setup.sh --check` 의 역할이다.
+- 바꾼 뒤에는 `./gradlew test` 를 다시 — 10 단계가 방금 돌린 스위트다(그 결과를 한 줄로 함께).
 - **(6 단계 ≥ `container`) 컨테이너 경로**를 별도의 짧은 블록으로 출력한다:
   ```
   cp .env.example .env          # 필수값을 채운다 — OAUTH_ISSUER_URI 는 기본값이 없다

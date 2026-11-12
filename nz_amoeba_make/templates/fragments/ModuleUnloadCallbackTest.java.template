@@ -1,0 +1,32 @@
+// Companion test of the `unload_callback` fragment — emitted with it and RENAMED WITH IT (step 9): this class becomes
+// <your callback class>Test and every ExampleUnloadCallback below becomes your class name.
+//
+// protean swallows and logs what a callback throws, so a broken cleanup never fails anything — the module unloads and
+// the leak it was meant to prevent stays. That is why the "does not throw" check lives here and not in production.
+//
+// GENERATOR: once the callback releases something real (a ThreadLocal, a static cache, an MBean), add a test that
+// registers that resource for a module id, calls onUnload, and asserts it is gone.
+package {{PKG}};
+
+import org.junit.jupiter.api.Test;
+import org.springframework.stereotype.Component;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+
+class ExampleUnloadCallbackTest {
+
+    private final ExampleUnloadCallback callback = new ExampleUnloadCallback();
+
+    @Test
+    void itIsABeanSoProteanCallsIt() {
+        assertNotNull(ExampleUnloadCallback.class.getAnnotation(Component.class));
+    }
+
+    @Test
+    void unloadingAModuleDoesNotThrow() {
+        assertDoesNotThrow(() -> callback.onUnload("orders"));
+        // Calling it twice for the same module must be harmless: an unload can be retried.
+        assertDoesNotThrow(() -> callback.onUnload("orders"));
+    }
+}

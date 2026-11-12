@@ -28,6 +28,7 @@
 * **nz_amoeba_make:** 생성 CI 가 bootjar(~35 MB)를 커밋마다 artifact 로 올려(14일 보관) 무료 플랜 조직 Actions 저장 한도(500 MB)를 채우던 문제 — 업로드를 뺀다 ([#11](https://github.com/nz-sdk/ai_skills/pull/11))
 * **nz_amoeba_make:** 생성되는 서버의 기본 protean 을 0.0.2 로 — MCP 보안 권고 2건(GHSA-3wwm-m437-9pmp · GHSA-82hq-333x-wffq)과 `list_runtimes` · `trustTier` 필터 버그가 고쳐진 버전 ([#12](https://github.com/nz-sdk/ai_skills/pull/12))
 * **nz_amoeba_make:** 🔴 생성되는 서버가 protean 의 `POST /__bridge/invoke`(host bean 리플렉션 호출)를 인증 없이 열어 두던 문제 — `SecurityConfig` 가 `/__bridge/**` 를 막고 `ResourceServerOnlyTest` 가 고정한다. rpc-bridge 를 켤 때는 bridge 인증과 함께 바꾼다 ([#14](https://github.com/nz-sdk/ai_skills/pull/14))
+* **nz_amoeba_make:** 일부 선택 조합에서 생성물의 빌드 · 테스트가 깨지던 문제 5건 — `db_dialect` 의 spring-jdbc, `db_query_tools` 의 networknt · `strict-schema` 강제, `interface_spec_validator` 의 MyBatis(테스트 범위), 비 MySQL 호스트의 MySQL 테스트 드라이버 ([#17](https://github.com/nz-sdk/ai_skills/pull/17))
 
 
 ### 문서

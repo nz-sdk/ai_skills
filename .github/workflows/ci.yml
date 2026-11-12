@@ -1,0 +1,42 @@
+# CI — GitHub ↔ Jira 대조표 검사
+#
+#   pull_request → main · push → main : 대조표(github-jira-map.yml)가 스키마에 맞는지 본다.
+#   대조표 · 스키마 · 이 파일이 바뀔 때만 돈다(스킬 파일만 고친 PR 에는 돌지 않는다).
+#   검사 단계 원문: issue-sync-install/files/github/ci-check-map.snippet.yml
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/github-jira-map.yml
+      - .github/github-jira-map.schema.json
+      - .github/workflows/ci.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/github-jira-map.yml
+      - .github/github-jira-map.schema.json
+      - .github/workflows/ci.yml
+
+permissions:
+  contents: read
+
+jobs:
+  check-map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # GitHub ↔ Jira 대조표가 규칙(이름 · 이메일 금지 · 계정 ID 형식 · 필수 칸)에 맞는지 본다.
+      - name: Check github-jira-map.yml
+        run: |
+          npx --yes yaml@2.6.1 --json --single < .github/github-jira-map.yml > "$RUNNER_TEMP/github-jira-map.json"
+          npx --yes ajv-cli@5.0.0 validate --spec=draft7 --all-errors --errors=text \
+            -s .github/github-jira-map.schema.json -d "$RUNNER_TEMP/github-jira-map.json"

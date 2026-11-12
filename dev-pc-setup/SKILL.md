@@ -6,7 +6,7 @@ compatibility:
   agents:
     - claude
 metadata:
-  version: 0.1.1
+  version: 0.1.2
 ---
 
 # dev-pc-setup — 개발자 PC 초기 설정
@@ -84,7 +84,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<base directory>\scripts\ch
 |---|---|
 | 세션 루트 · claude_design | 먼저 현재 작업 폴더가 bridge-web 또는 bridge-backoffice 저장소 루트인지 본다.<br>아니면 claude_design 은 반드시 안 보인다. 저장소 `.mcp.json` 의 프로젝트 MCP 이기 때문이다. 이때는 「세션 루트」 한 행으로만 보고하고 claude_design 은 따로 세지 않는다.<br>루트가 맞을 때만 도구 목록(지연 로드 목록 포함)에 `mcp__claude_design__*` 가 있는지 따로 판정한다 |
 | BridgeX | 도구 목록에 `mcp__claude_ai_BridgeX__*` 가 있는지 본다. 지연 도구면 ToolSearch 로 스키마를 먼저 불러온다.<br>있으면 `protean_list_modules` 를 불러 모듈 표가 오는지 본다.<br>다른 BridgeX 도구 중 `protean_list_runtimes` 는 늘 스키마 오류를 내므로 연결 판단에 쓰지 않는다 |
-| Atlassian | `mcp__claude_ai_Atlassian__*` 가 있으면 `atlassianUserInfo` 로 본인 계정이 나오는지 본다 |
+| Atlassian | `mcp__claude_ai_Atlassian_MCP__*`(5-4 의 사용자 지정 커넥터 「Atlassian MCP」 · v2)가 있으면 `atlassianUserInfo` 로 본인 계정이 나오는지 본다.<br>v2 는 `discover` 도구가 함께 있다. 옛 `mcp__claude_ai_Atlassian__*` 에 `addCommentToJiraIssue` 가 있으면 v1 이다.<br>v1 만 있으면 「v1 — 5-4 대로 v2 로 다시 연결」 경고(이슈 등록 스킬이 v1 이면 Jira 를 빼고 멈춘다), 둘 다 있으면 옛 커넥터를 지우라고 안내한다(같은 이름 도구가 두 벌 보인다) |
 | 7단계 대조표 | 스크립트가 활성 gh 계정이 `people` 에 있는지 본다.<br>Claude 는 그 계정 줄의 `jiraAccountId` 가 `atlassianUserInfo` 의 accountId 와 같은지 본다.<br>gh 계정이 여럿이고 대조표에 다른 계정이 있으면, 어느 계정으로 일할지 사용자 결정 항목으로 올린다. PR 은 활성 gh 계정으로 열린다 |
 | 0단계 계정 | 이미 확인된 것은 묻지 않는다.<br>· 조직 초대: 저장소 권한 ok 면 확인된 것이다.<br>· claude.ai 팀 좌석: BridgeX 팀 커넥터가 보이면 확인된 것이다.<br>· Jira: `atlassianUserInfo` 가 되면 확인된 것이다.<br>· bridge-auth 승인: `protean_list_modules` 가 되면 확인된 것이다.<br>남은 것(주로 Claude Design 공유)만 한 번에 묻는다 |
 | 6단계 검사 | 점검 단계에서는 돌리지 않고 「안 돌림」으로 적는다. 설정 모드의 6단계에서 돌린다 |
@@ -129,7 +129,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<base directory>\scripts\ch
 | 2 GitHub | `gh auth setup-git` 실행, 토큰 화면 경로 안내, 환경 변수 창 열기(`rundll32 sysdm.cpl,EditEnvironmentVariables`) | 별도 창에서 `gh auth login … --web`, classic PAT 만들기, `NODE_AUTH_TOKEN` 입력. gh 계정이 여럿이면 쓸 계정 고르기(`gh auth switch -u <계정>`) | 활성 gh 계정이 oauth, `npm view` 가 판 번호 |
 | 3 저장소 | clone 또는 최신화(main 이면 `git pull --ff-only`), local `git config`, `npm ci`, 백오피스 `.env` 두 줄(모두 승인 후) | 이름 · 회사 메일 답하기(AskUserQuestion) | 3단계 모두 ok |
 | 4 Claude Code | API 키 변수가 있는지 확인 | `/status` 로 팀 계정 확인 | API key variables ok |
-| 5 커넥터 | 가입 → 승인 요청 → 연결 순서와 요청 문구 안내 | bridge-auth 가입, 관리자 승인 요청, claude.ai 에서 BridgeX · Atlassian 연결 | 새 세션에서 도구가 보임 |
+| 5 커넥터 | 가입 → 승인 요청 → 연결 순서와 요청 문구 안내 | bridge-auth 가입, 관리자 승인 요청, claude.ai 에서 BridgeX 연결 · 사용자 지정 커넥터 「Atlassian MCP」(v2) 추가 · 옛 Atlassian 커넥터 삭제 | 새 세션에서 도구가 보임 |
 | 6 첫 세션 | `/mcp` 안내, `protean_list_modules` · `atlassianUserInfo` 호출, 검사 4종 실행 | 저장소 루트로 새 창 열기, 프로젝트 MCP 승인, 필요하면 `/design-login` | 모두 통과 |
 | 7 팀 등록 | `github-jira-map.yml` 의 `people` 추가 PR. 그 저장소의 브랜치 + PR 규칙을 따르고 승인 후 진행 | 쓸 GitHub 계정 결정 | 활성 gh 계정이 `people` 에 있고 accountId 가 맞음 |
 | old 정리 | 지울 줄 · 명령 안내, 저장소 파일은 승인 후 수정 | hosts 수정(관리자 권한) | `old` 행 모두 ok |

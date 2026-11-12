@@ -184,7 +184,9 @@ AskUserQuestion 은 질문당 선택지 4개가 상한이므로, 나누기를 �
 **capability 가 다른 step-5 capability 를 requires 할 수 있다**(`db_query_tools` 는 `db_metadata_tools` 와
 `authorizer` 를 requires 한다). 그런 `requires` 항목은 제시 목록에서 걸러내는 조건이 **아니다** — 그 밖의 requires 가
 충족되면 제시하고, 선택되면 **그 다른 capability 를 켜고 같은 턴에 그렇게 말한다**("`db_query_tools` 에 `authorizer`
-가 필요해 함께 켰다"). 켜진 쪽의 질문(authorizer 이름 등)은 직접 고른 것처럼 묻는다.
+가 필요해 함께 켰다"). 켜진 쪽의 질문(authorizer 이름 등)은 직접 고른 것처럼 묻는다. 같은 목록의 `protean.*` 키도
+같은 식으로 켜고 같은 식으로 말한다 — `db_query_tools` 는 `protean.mcp.strict-schema=true` 도 켠다. 이 도구들은
+디스패치 시점의 인자 검사에 기대고, end-to-end 테스트가 그 거부를 검사한다.
 
 워크드 예시, in-process + MCP 활성 + 데이터 접근(흔한 경우): 9개가 남는다 — `custom_mcp_tool`,
 `builtin_tool_override`, `module_source_tools`, `db_metadata_tools`, `db_query_tools`, `code_rule`, `authorizer`,

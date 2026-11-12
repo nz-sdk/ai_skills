@@ -1,0 +1,61 @@
+# 버그 요청 — 동작이 설계와 다르거나 오류가 나는 경우.
+# 칸 이름(label)이 본문 소제목(### 칸 이름)이 되고 Jira 설명에도 그대로 간다 — 이름 · 순서를 바꾸면 양쪽이 같이 바뀐다.
+# type 은 GitHub 이슈 유형 → .github/github-jira-map.yml 의 spaces.<키>.issueTypes 로 Jira 업무 유형이 정해진다.
+# name 은 3자 이상 — 짧으면 GitHub 이 양식 목록에서 조용히 뺀다(「Name is too short」).
+name: 버그 요청
+description: 동작이 설계와 다르거나 오류가 나는 경우
+title: "bug: "
+type: Bug
+body:
+  - type: input
+    id: screen
+    attributes:
+      label: 화면
+      description: 문제가 난 화면 이름
+      placeholder: 주문등록
+    validations:
+      required: true
+  - type: input
+    id: epic
+    attributes:
+      label: 상위 에픽 키
+      description: Jira 상위 항목(에픽) 키 — 화면 에픽이 없는 일은 공통 에픽 키
+      placeholder: TEST1-1
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 무슨 문제인가
+      description: 무엇이 어떻게 잘못되는지
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 재현 방법
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 기대 결과
+      description: 원래 어떻게 되어야 하는지(설계서 · 디자인 기준)
+  - type: dropdown
+    id: design-check
+    attributes:
+      label: 설계 확인 필요
+      options:
+        - 아니오 — 개발 수정
+        - 예 — 설계자 결정 필요
+    validations:
+      required: true
+  - type: textarea
+    id: detail
+    attributes:
+      label: 기술 상세
+      description: 파일 · 로그 · 오류 메시지 · 관련 문서 경로

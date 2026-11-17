@@ -94,6 +94,7 @@ function mapYaml(v) {
   for (const k of ['Bug', 'Task', 'Feature']) L.push(`      ${k}: ${v.ISSUE_TYPES[k]}`);
   L.push(`    default: ${v.DEFAULT_TYPE}`);
   if (v.START_DATE_FIELD) L.push(`    startDateField: ${v.START_DATE_FIELD}   # Jira 「시작 날짜」 — 등록 날짜를 넣는다`);
+  L.push(`    notPlannedResolutions: ${list(v.NOT_PLANNED_RESOLUTIONS || [])}   # 이 해결(resolution) 이름으로 완료되면 GitHub 을 「계획 안 함」 으로 닫는다 — 비면 모두 completed`);
   L.push('');
   L.push('# 영역 — 화면 폴더(src/screens/<폴더>) 묶음 · 스페이스 · 담당자 후보(선택지 앞에 놓는 순서 — 기본값 아님)');
   L.push('areas:');

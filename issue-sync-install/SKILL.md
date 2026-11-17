@@ -5,7 +5,7 @@ license: AGPL-3.0-only
 compatibility: Claude Code — AskUserQuestion · Atlassian MCP · gh · Node 18+ 사용
 argument-hint: "[상품 저장소 폴더 경로] (생략하면 묻는다)"
 metadata:
-  version: 0.0.1
+  version: 0.0.2
   copyright: Copyright (c) 2026 Newzen
   author:
     name: "yangyang12103@newzen.kr"

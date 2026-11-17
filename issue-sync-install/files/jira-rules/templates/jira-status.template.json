@@ -86,7 +86,7 @@
             ],
             "sendIssue": false,
             "contentType": "custom",
-            "customBody": "{\"ref\":\"main\",\"inputs\":{\"kind\":\"transition\",\"key\":\"{{issue.key}}\",\"status\":\"{{issue.status.statusCategory.key}}\"}}\n",
+            "customBody": "{\"ref\":\"main\",\"inputs\":{\"kind\":\"transition\",\"key\":\"{{issue.key}}\",\"status\":\"{{issue.status.statusCategory.key}}|{{issue.status.name.jsonEncode}}|{{issue.resolution.name.jsonEncode}}\"}}\n",
             "method": "POST",
             "responseEnabled": false,
             "continueOnErrorEnabled": false

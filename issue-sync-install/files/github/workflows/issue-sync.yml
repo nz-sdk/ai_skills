@@ -8,8 +8,8 @@
 #                kind = create(사본 등록) · link(원본에 짝 표시) · edit · transition · comment
 #                새 규칙은 kind 에 「|덧붙임」 을 싣는다 — edit|<바뀐 칸,…> · comment|<댓글 id>[|edit] (옛 규칙의 kind 는 옛 동작)
 #
-# 등록자 줄 — 사본 본문 맨 위 「등록: 이름(@GitHub 아이디)」(GitHub 계정이 없으면 「등록: 이름(Jira)」)
-#   사본 작성자는 늘 토큰 주인(github-actions · Jira 규칙)이라 누가 등록했는지를 본문에 남긴다. 사본을 고쳐 원본 쪽으로 보낼 때는 뗀다
+# 등록자 줄 — Jira 원본의 GitHub 사본 맨 위에만 「등록: 이름(Jira)」(사본 작성자가 늘 github-actions 라서). 사본을 고쳐 원본 쪽으로 보낼 때는 뗀다
+#   GitHub 원본의 Jira 사본에는 넣지 않는다 — Jira 보고자 칸에 등록한 사람이 들어간다
 # 레이블 — 동기화용 라벨(jira · github · gh-*)은 빼고 양쪽을 맞춘다. Jira 레이블은 띄어쓰기를 못 써 GitHub 라벨의 띄어쓰기는 _ 로 바꾼다
 # 닫을 때 — GitHub 닫힘 · Jira 완료 범주면 본문 할 일 「- [ ]」 → 「- [x]」(Jira 설명의 ☐ → ☒ 는 규칙이 한다). 다시 열 때는 그대로
 # 상위 — 본문에 「### 상위 에픽 키」 칸이 있으면 Jira → GitHub 때 그 칸을 「[키 · 에픽 이름](링크)」 하나로 맞추고 사본 출처의 「상위 :」 줄은 넣지 않는다
@@ -235,9 +235,7 @@ jobs:
           }
           # GitHub 마크다운 → Jira 위키 (소제목 자동 앵커를 끄고, 남는 빈 {anchor:} 는 지운다)
           tojira() { pandoc -f gfm+hard_line_breaks-gfm_auto_identifiers -t jira --wrap=none | sed -E 's/\{anchor:[^}]*\}//g'; }
-          # 등록자 줄 — 「등록: 이름(@아이디)」. 이름은 GitHub 프로필 이름(없으면 아이디)
-          reg_line() { local n; n=$(gh api "users/$1" --jq '.name // ""' 2>/dev/null || true); printf '등록: %s(@%s)' "${n:-$1}" "$1"; }
-          # 사본 본문 맨 위 등록자 줄을 뗀다(원본 쪽으로 보내지 않는다)
+          # 사본 본문 맨 위 등록자 줄을 뗀다(원본 쪽으로 보내지 않는다 · 예전 판이 Jira 사본에 넣은 줄도 뗀다)
           strip_reg() { perl -CSD -Mutf8 -0pe 's/\A\s*등록: [^\n]*\n+//'; }
           # 담당은 한 명 — Jira 담당 칸은 한 사람뿐이라 GitHub 담당이 여럿이면 첫 번째만 보낸다(정책) · 실행 요약 · notice 로 알린다
           one_assignee_note() {
@@ -255,7 +253,7 @@ jobs:
           if [ "$KIND" = create ]; then
             # 등록 — 이벤트 그대로 + 변환한 본문 + 대조표 값(bridge). 규칙이 {{webhookData.bridge.*}} 로 읽는다
             opener=$(jq -r '.issue.user.login' "$ev")
-            { reg_line "$opener"; printf '\n\n'; jq -r '.issue.body // ""' "$ev" | tojira; } > "$RUNNER_TEMP/body.txt"
+            jq -r '.issue.body // ""' "$ev" | tojira > "$RUNNER_TEMP/body.txt"   # 등록자는 Jira 보고자 칸으로 — 본문에 줄을 넣지 않는다
             gtype=$(jq -r '.issue.type.name // ""' "$ev")
             first=$(jq -r '.issue.assignees[0].login // ""' "$ev")
             jtype=$(S="$JIRA_SPACE" G="$gtype" yq -r '.spaces[strenv(S)] as $s | ($s.issueTypes[strenv(G)] // $s.default // "작업")' "$MAP")
@@ -314,7 +312,7 @@ jobs:
               else
                 summary="[GH #$number] $title"
                 ft=$(printf '%s' "$title" | sed -e 's/\[/［/g; s/\]/］/g; s/|/｜/g')
-                desc=$(reg_line "$(jq -r '.issue.user.login' "$ev")"; printf '\n\n'; tojira < "$RUNNER_TEMP/body.md"; printf '\n\nh3. 출처\nGitHub : [Issue #%s · %s|%s]' "$number" "$ft" "$html")
+                desc=$(tojira < "$RUNNER_TEMP/body.md"; printf '\n\nh3. 출처\nGitHub : [Issue #%s · %s|%s]' "$number" "$ft" "$html")
               fi ;;
             label)
               # 라벨 하나 붙임 · 뗌 — Jira 레이블에 같은 것을 더하거나 뺀다(띄어쓰기는 _)
@@ -490,12 +488,12 @@ jobs:
           login_of() { [ -z "$1" ] || A="$1" yq -r '.people // {} | to_entries | map(select(.value.jiraAccountId == strenv(A))) | .[0].key // ""' "$MAP"; }
           # 동기화가 쓰는 라벨 — 양쪽 레이블 맞추기에서 뺀다(jira:* = Jira 상태 라벨)
           is_sync_label() { case "$1" in jira|github|gh-*|jira:*) return 0 ;; esac; return 1; }
-          # 등록자 줄 — PERSON 「accountId|이름」 → 「등록: 이름(@아이디)」 · GitHub 계정이 없으면 「등록: 이름(Jira)」 · 비면 빈 글자
+          # 등록자 줄 — PERSON 「accountId|이름」 → 「등록: 이름(Jira)」(Jira 표시 이름) · 비면 빈 글자
+          # Jira 에 등록하는 사람은 GitHub 계정이 없다는 원칙이라 이름(Jira) 하나로 쓴다 — 사본 작성자는 늘 github-actions 라 이 줄로 누가 올렸는지 안다
           reg_of_person() {
-            local a n l; [[ "$PERSON" == *"|"* ]] || return 0
-            a="${PERSON%%|*}"; n="${PERSON#*|}"; [ -n "$n" ] || return 0
-            l=$(login_of "$a")
-            if [ -n "$l" ]; then printf '등록: %s(@%s)' "$n" "$l"; else printf '등록: %s(Jira)' "$n"; fi
+            local n; [[ "$PERSON" == *"|"* ]] || return 0
+            n="${PERSON#*|}"; [ -n "$n" ] || return 0
+            printf '등록: %s(Jira)' "$n"
           }
           # 위키 · 마크다운 맨 위 등록자 줄을 뗀다(사본 쪽에만 있는 줄 — 원본으로 보내지 않는다)
           strip_reg() { perl -CSD -Mutf8 -0pe 's/\A\s*등록: [^\n]*\n+//'; }
@@ -725,9 +723,8 @@ jobs:
               gh issue view "$NUMBER" --json title,body,url,author > "$RUNNER_TEMP/after.json"
               jq -r '.body // ""' "$RUNNER_TEMP/after.json" | perl -0pe 's/\n*<!-- jira:[A-Z][A-Z0-9]+-[0-9]+ -->\s*\z//' > "$RUNNER_TEMP/orig.md"
               at=$(jq -r .title "$RUNNER_TEMP/after.json"); au=$(jq -r .url "$RUNNER_TEMP/after.json"); al=$(jq -r '.author.login' "$RUNNER_TEMP/after.json")
-              an=$(gh api "users/$al" --jq '.name // ""' 2>/dev/null || true)
               ft=$(printf '%s' "$at" | sed -e 's/\[/［/g; s/\]/］/g; s/|/｜/g')
-              desc=$(printf '등록: %s(@%s)\n\n' "${an:-$al}" "$al"; tojira < "$RUNNER_TEMP/orig.md"; printf '\n\nh3. 출처\nGitHub : [Issue #%s · %s|%s]' "$NUMBER" "$ft" "$au")
+              desc=$(tojira < "$RUNNER_TEMP/orig.md"; printf '\n\nh3. 출처\nGitHub : [Issue #%s · %s|%s]' "$NUMBER" "$ft" "$au")
               jq -n --arg key "$KEY" --arg summary "[GH #$NUMBER] $at" --arg description "$desc" \
                 '{key: $key, kind: "edit", role: "original", summary: $summary, description: $description, assignee: "", comment: "",
                   op: "", label: "", epicKey: null, epicRaw: "", epicChanged: false, actor: "jira-parent"}' > "$RUNNER_TEMP/payload.json"

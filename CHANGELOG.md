@@ -11,6 +11,7 @@
 
 ### 기능
 
+* **issue-sync-install:** Jira 작업 목록(체크박스)이 GitHub 에 보통 목록 · 취소선으로 오던 것을 본문 「할 일」 칸 안에서 `- [ ]` · `- [x]` 로 되살린다. 시험 스위치 변수 `SYNC_ADF_TASKLIST=1` 이면 GitHub → Jira 설명의 체크박스 묶음을 `{adf}` 작업 목록으로 보낸다(기본 꺼짐) ([#46](https://github.com/nz-sdk/ai_skills/pull/46))
 * **issue-sync-install:** 상위 에픽 칸을 「[키 · 에픽 이름](링크)」 하나로(사본 출처의 상위 줄과 겹치지 않게), Jira 상태를 GitHub 라벨 `jira:<상태>` 로 · 정한 해결이면 「계획 안 함」 으로 닫기(대조표 `notPlannedResolutions`), 담당은 한 명 안내(실행 요약 · 양식 · 스킬). 옛 규칙 본문이면 옛 동작 ([#38](https://github.com/nz-sdk/ai_skills/pull/38))
 * **issue-sync-install:** 동기화 1단계 — 같은 이슈에 몰린 변경을 취소 없이 차례로(`queue: max`), Jira 설명이 바뀐 때만 GitHub 원본 본문을 고침, 한 줄 줄바꿈 유지, Jira 화면의 담당 지정 · 전환도 반영, 사본 맨 위 등록자 줄, 레이블 양방향, 상위 변경을 Jira 설명 칸에도, 닫을 때 할 일 체크, Jira 댓글 수정 → GitHub. 규칙 6개(새 「댓글 수정」) · 입력 10개 그대로(옛 규칙 호환) ([#33](https://github.com/nz-sdk/ai_skills/pull/33))
 * **issue-sync-install:** 새 스킬 — GitHub ↔ Jira 양방향 동기화(+이슈 등록 스킬 · Slack 알림)를 새 상품 저장소에 설치한다. 설치 키트(전달서 · 설치 안내 · Jira 규칙 템플릿 · 설치/검증 스크립트)가 함께 있다. 기준 상품 한 쌍(저장소 1 ↔ 스페이스 1)에서 시험한 판이고 범용 스킬로 바꿀 예정이다 ([#19](https://github.com/nz-sdk/ai_skills/pull/19))

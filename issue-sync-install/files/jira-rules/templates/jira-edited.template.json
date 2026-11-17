@@ -41,10 +41,16 @@
             {
               "value": "parent",
               "type": "field"
+            },
+            {
+              "value": "labels",
+              "type": "field"
             }
           ],
           "actions": [
-            "edit"
+            "edit",
+            "assign",
+            "transition"
           ]
         },
         "conditions": [],
@@ -104,7 +110,7 @@
             ],
             "sendIssue": false,
             "contentType": "custom",
-            "customBody": "{\"ref\":\"main\",\"inputs\":{\"kind\":\"edit\",\"key\":\"{{issue.key}}\",\"summary\":\"{{issue.summary.abbreviate(200).jsonEncode}}\",\"type\":\"{{issue.issueType.name.jsonEncode}}\",\"assignee\":\"{{issue.assignee.accountId}}\",\"body\":\"{{issue.description.abbreviate(20000).jsonEncode}}\",\"parent\":\"{{issue.parent.key}}|{{issue.parent.summary.jsonEncode}}\"}}",
+            "customBody": "{\"ref\":\"main\",\"inputs\":{\"kind\":\"edit|{{#changelog.summary}}summary,{{/}}{{#changelog.description}}description,{{/}}{{#changelog.assignee}}assignee,{{/}}{{#changelog.parent}}parent,{{/}}{{#changelog.IssueParentAssociation}}parent,{{/}}{{#changelog.labels}}labels,{{/}}\",\"key\":\"{{issue.key}}\",\"summary\":\"{{issue.summary.abbreviate(200).jsonEncode}}\",\"type\":\"{{issue.issueType.name.jsonEncode}}\",\"assignee\":\"{{issue.assignee.accountId}}\",\"body\":\"{{issue.description.abbreviate(20000).jsonEncode}}\",\"parent\":\"{{issue.parent.key}}|{{issue.parent.summary.jsonEncode}}\",\"status\":\"{{#changelog.labels}}{{fromString.jsonEncode}}|{{toString.jsonEncode}}{{/}}\",\"person\":\"{{issue.reporter.accountId}}|{{issue.reporter.displayName.jsonEncode}}\"}}",
             "method": "POST",
             "responseEnabled": false,
             "continueOnErrorEnabled": false

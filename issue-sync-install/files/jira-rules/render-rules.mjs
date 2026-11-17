@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Jira 자동화 규칙 5개 — 값 파일로 템플릿을 채워 「가져오기용 JSON」 5개를 만든다.
+// Jira 자동화 규칙 6개 — 값 파일로 템플릿을 채워 「가져오기용 JSON」 6개를 만든다.
 // 의존성 없음(Node 18 이상). 비밀값(PAT · Slack 주소 · 웹후크 암호)은 이 스크립트에 넣지 않는다.
 //
 // 사용:
 //   node render-rules.mjs --values my-values.json [--templates ./templates] [--out ./out]
 //   node render-rules.mjs --selftest        # 예시 값으로 렌더해 스크립트·템플릿이 맞는지만 확인
 //
-// 결과: <out>/<SPACE>-rule-N-….json 5개 — 모두 「꺼짐」 상태. Jira ▸ 자동화 ▸ 규칙 가져오기로 올린다.
+// 결과: <out>/<SPACE>-<템플릿 이름>.json 6개 — 모두 「꺼짐」 상태. Jira ▸ 자동화 ▸ 규칙 가져오기로 올린다.
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -82,7 +82,7 @@ function main() {
   const warnings = [];
   if (!v.SLACK_WEBHOOK_URL) warnings.push('SLACK_WEBHOOK_URL 이 비어 가짜 주소를 넣었다 — 틀린 상위 에픽 키 알림(규칙 ① Slack 2곳)은 실패한다');
   const templates = fs.readdirSync(tplDir).filter(f => f.endsWith('.template.json')).sort();
-  if (templates.length !== 5) fail(`템플릿이 5개가 아니다(${templates.length}개): ${tplDir}`);
+  if (templates.length !== 6) fail(`템플릿이 6개가 아니다(${templates.length}개): ${tplDir}`);
   fs.mkdirSync(outDir, { recursive: true });
 
   const rows = [];
@@ -99,13 +99,13 @@ function main() {
     fs.writeFileSync(out, JSON.stringify(j, null, 2) + '\n');
     rows.push([r.name, (t.match(new RegExp('repos/' + v.REPO.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/actions/workflows/issue-sync.yml/dispatches', 'g')) || []).length, path.basename(out)]);
   }
-  console.log(`✓ ${selftest ? '(자체 시험) ' : ''}규칙 5개를 만들었다 → ${outDir}`);
+  console.log(`✓ ${selftest ? '(자체 시험) ' : ''}규칙 6개를 만들었다 → ${outDir}`);
   for (const [name, n, file] of rows) console.log(`   ${file}  「${name}」  GitHub 웹 요청 ${n}곳`);
-  console.log(`   웹 요청 합계 ${rows.reduce((s, r) => s + r[1], 0)}곳 (기대: 7)`);
-  if (rows.reduce((s, r) => s + r[1], 0) !== 7) fail('웹 요청이 7곳이 아니다 — 템플릿을 확인한다');
+  console.log(`   웹 요청 합계 ${rows.reduce((s, r) => s + r[1], 0)}곳 (기대: 8)`);
+  if (rows.reduce((s, r) => s + r[1], 0) !== 8) fail('웹 요청이 8곳이 아니다 — 템플릿을 확인한다');
   for (const w of warnings) console.log('   ⚠ ' + w);
   if (!selftest) {
-    console.log('\n다음(사람이 직접): ① Jira 에 가져오기 ② 규칙 ①의 수신 웹후크 URL · 암호를 GitHub Secret 으로 ③ 웹 요청 7곳의 Authorization 에 PAT ④ 켜기');
+    console.log('\n다음(사람이 직접): ① Jira 에 가져오기 ② 규칙 ①의 수신 웹후크 URL · 암호를 GitHub Secret 으로 ③ 웹 요청 8곳의 Authorization 에 PAT ④ 켜기');
   }
 }
 main();

@@ -96,6 +96,98 @@
           "schemaVersion": 1,
           "connectionId": null,
           "checksum": null
+        },
+        {
+          "id": "9911ffc2-f748-455d-a1c4-6d131ff44623",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "CONDITION",
+          "type": "jira.condition.container.block",
+          "value": null,
+          "conditions": [],
+          "children": [
+            {
+              "id": "4f0c66d4-de26-4f63-8030-35a46a3301ee",
+              "parentId": "9911ffc2-f748-455d-a1c4-6d131ff44623",
+              "conditionParentId": null,
+              "component": "CONDITION_BLOCK",
+              "type": "jira.condition.if.block",
+              "value": {
+                "conditionMatchType": "ALL"
+              },
+              "conditions": [
+                {
+                  "id": "3a46e2e4-68e4-4427-bdd2-969ebf7c23c6",
+                  "parentId": null,
+                  "conditionParentId": "4f0c66d4-de26-4f63-8030-35a46a3301ee",
+                  "component": "CONDITION",
+                  "type": "jira.comparator.condition",
+                  "value": {
+                    "first": "{{issue.status.statusCategory.key}}",
+                    "second": "done",
+                    "operator": "EQUALS"
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                },
+                {
+                  "id": "97b1e119-8fb0-4a19-bf2c-e9a64712e362",
+                  "parentId": null,
+                  "conditionParentId": "4f0c66d4-de26-4f63-8030-35a46a3301ee",
+                  "component": "CONDITION",
+                  "type": "jira.comparator.condition",
+                  "value": {
+                    "first": "{{issue.description}}",
+                    "second": "☐",
+                    "operator": "REGEX_CONTAINS"
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "children": [
+                {
+                  "id": "f18eb2c4-de44-4d60-bbcb-ee930eee0877",
+                  "parentId": "4f0c66d4-de26-4f63-8030-35a46a3301ee",
+                  "conditionParentId": null,
+                  "component": "ACTION",
+                  "type": "jira.issue.edit",
+                  "value": {
+                    "operations": [
+                      {
+                        "field": {
+                          "type": "ID",
+                          "value": "description"
+                        },
+                        "fieldType": "description",
+                        "type": "SET",
+                        "value": "{{issue.description.replace(\"☐\",\"☒\")}}"
+                      }
+                    ],
+                    "advancedFields": null,
+                    "sendNotifications": false
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 12,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "schemaVersion": 1,
+              "connectionId": null,
+              "checksum": null
+            }
+          ],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
         }
       ],
       "canOtherRuleTrigger": false,

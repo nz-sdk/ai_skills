@@ -11,6 +11,7 @@
 
 ### 기능
 
+* **issue-sync-install:** 동기화 1단계 — 같은 이슈에 몰린 변경을 취소 없이 차례로(`queue: max`), Jira 설명이 바뀐 때만 GitHub 원본 본문을 고침, 한 줄 줄바꿈 유지, Jira 화면의 담당 지정 · 전환도 반영, 사본 맨 위 등록자 줄, 레이블 양방향, 상위 변경을 Jira 설명 칸에도, 닫을 때 할 일 체크, Jira 댓글 수정 → GitHub. 규칙 6개(새 「댓글 수정」) · 입력 10개 그대로(옛 규칙 호환) ([#33](https://github.com/nz-sdk/ai_skills/pull/33))
 * **issue-sync-install:** 새 스킬 — GitHub ↔ Jira 양방향 동기화(+이슈 등록 스킬 · Slack 알림)를 새 상품 저장소에 설치한다. 설치 키트(전달서 · 설치 안내 · Jira 규칙 템플릿 · 설치/검증 스크립트)가 함께 있다. 기준 상품 한 쌍(저장소 1 ↔ 스페이스 1)에서 시험한 판이고 범용 스킬로 바꿀 예정이다 ([#19](https://github.com/nz-sdk/ai_skills/pull/19))
 * **dev-pc-setup:** 새 스킬 — AX 개발자 Windows PC 를 읽기 전용 스크립트(`scripts/check.ps1`)로 점검하고 빠진 것만 채운다(도구 · gh 로그인 · DS 패키지 classic PAT · 저장소 · 작성자 · 커넥터 · 첫 세션 · Jira 대조표). 토큰 값은 보지도 출력하지도 않는다 ([#15](https://github.com/nz-sdk/ai_skills/pull/15))
 * **nz_amoeba_make:** 생성되는 리소스 서버가 액세스 토큰의 `aud` 를 검증한다 ([#5](https://github.com/nz-sdk/ai_skills/pull/5))

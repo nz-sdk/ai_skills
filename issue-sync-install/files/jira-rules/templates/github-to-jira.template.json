@@ -473,6 +473,50 @@
                       "schemaVersion": 11,
                       "connectionId": null,
                       "checksum": null
+                    },
+                    {
+                      "id": "d600ad74-f0cb-4557-8562-f34081ae597f",
+                      "parentId": "11824e30-fcdf-4d16-ac7d-df6b0e435b35",
+                      "conditionParentId": null,
+                      "component": "CONDITION",
+                      "type": "jira.comparator.condition",
+                      "value": {
+                        "first": "{{issue.description}}",
+                        "second": "☐",
+                        "operator": "REGEX_CONTAINS"
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 1,
+                      "connectionId": null,
+                      "checksum": null
+                    },
+                    {
+                      "id": "951a0bfe-9161-484e-89b0-a71f8365ef96",
+                      "parentId": "11824e30-fcdf-4d16-ac7d-df6b0e435b35",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.edit",
+                      "value": {
+                        "operations": [
+                          {
+                            "field": {
+                              "type": "ID",
+                              "value": "description"
+                            },
+                            "fieldType": "description",
+                            "type": "SET",
+                            "value": "{{issue.description.replace(\"☐\",\"☒\")}}"
+                          }
+                        ],
+                        "advancedFields": null,
+                        "sendNotifications": false
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 12,
+                      "connectionId": null,
+                      "checksum": null
                     }
                   ],
                   "schemaVersion": 1,
@@ -616,6 +660,78 @@
                         "operations": [],
                         "advancedFields": "{\"fields\":{\"assignee\": {{#if(webhookData.assignee.isNotEmpty())}}{\"id\":\"{{webhookData.assignee}}\"}{{/}}{{#if(webhookData.assignee.isEmpty())}}null{{/}} }}",
                         "sendNotifications": true
+                      },
+                      "conditions": [],
+                      "children": [],
+                      "schemaVersion": 12,
+                      "connectionId": null,
+                      "checksum": null
+                    }
+                  ],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "schemaVersion": 1,
+              "connectionId": null,
+              "checksum": null
+            },
+            {
+              "id": "8a4f1e8d-d625-4158-bae8-2cf513a7f23c",
+              "parentId": "6bb9d1a2-a528-451a-a398-5aca01822fa2",
+              "conditionParentId": null,
+              "component": "CONDITION_BLOCK",
+              "type": "jira.condition.if.block",
+              "value": {
+                "conditionMatchType": "ALL"
+              },
+              "conditions": [
+                {
+                  "id": "9f2edc3e-8bcc-4e2a-93cd-ac81cb83a4ad",
+                  "parentId": null,
+                  "conditionParentId": "8a4f1e8d-d625-4158-bae8-2cf513a7f23c",
+                  "component": "CONDITION",
+                  "type": "jira.comparator.condition",
+                  "value": {
+                    "first": "{{webhookData.kind}}",
+                    "second": "label",
+                    "operator": "EQUALS"
+                  },
+                  "conditions": [],
+                  "children": [],
+                  "schemaVersion": 1,
+                  "connectionId": null,
+                  "checksum": null
+                }
+              ],
+              "children": [
+                {
+                  "id": "75c3a1ef-b437-41d5-937f-52d9ea42bc97",
+                  "parentId": "8a4f1e8d-d625-4158-bae8-2cf513a7f23c",
+                  "conditionParentId": null,
+                  "component": "BRANCH",
+                  "type": "jira.issue.related",
+                  "value": {
+                    "relatedType": "jql",
+                    "jql": "key = {{webhookData.key}}",
+                    "linkTypes": [],
+                    "onlyUpdatedIssues": false,
+                    "similarityLimit": 40,
+                    "compareValue": 0
+                  },
+                  "conditions": [],
+                  "children": [
+                    {
+                      "id": "ab2b3bea-afb4-466d-9b17-d8f802eda391",
+                      "parentId": "75c3a1ef-b437-41d5-937f-52d9ea42bc97",
+                      "conditionParentId": null,
+                      "component": "ACTION",
+                      "type": "jira.issue.edit",
+                      "value": {
+                        "operations": [],
+                        "advancedFields": "{\"update\":{\"labels\":[{\"{{webhookData.op}}\":\"{{webhookData.label.jsonEncode}}\"}]}}",
+                        "sendNotifications": false
                       },
                       "conditions": [],
                       "children": [],

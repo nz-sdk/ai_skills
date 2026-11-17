@@ -83,7 +83,7 @@
             ],
             "sendIssue": false,
             "contentType": "custom",
-            "customBody": "{\"ref\":\"main\",\"inputs\":{\"kind\":\"comment\",\"key\":\"{{issue.key}}\",\"body\":\"{{comment.body.abbreviate(20000).jsonEncode}}\",\"person\":\"{{comment.author.accountId}}|{{comment.author.displayName.jsonEncode}}\"}}\n",
+            "customBody": "{\"ref\":\"main\",\"inputs\":{\"kind\":\"comment|{{comment.id}}\",\"key\":\"{{issue.key}}\",\"body\":\"{{comment.body.abbreviate(20000).jsonEncode}}\",\"person\":\"{{comment.author.accountId}}|{{comment.author.displayName.jsonEncode}}\"}}\n",
             "method": "POST",
             "responseEnabled": false,
             "continueOnErrorEnabled": false

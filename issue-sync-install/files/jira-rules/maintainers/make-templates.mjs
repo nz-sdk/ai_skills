@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 유지보수용 — 기준 상품의 Jira 규칙 내보내기 JSON(5개)에서 공통 템플릿 5개를 만든다.
+// 유지보수용 — 기준 상품의 Jira 규칙 내보내기 JSON(6개)에서 공통 템플릿 6개를 만든다.
 // 규칙 구조가 바뀌었을 때만 쓴다. 설치하는 사람은 쓰지 않는다(render-rules.mjs 만 쓴다).
 //
 // 사용: node make-templates.mjs <기준 상품 내보내기 폴더> <기준 값 JSON> <출력 폴더>
@@ -29,6 +29,7 @@ const slotOf = r => {
   if (t === 'jira.incoming.webhook') return 'github-to-jira';
   if (t.startsWith('jira.issue.event.trigger:created')) return 'jira-created';
   if (t === 'jira.issue.field.changed') return 'jira-edited';
+  if (/comment.?edit/i.test(t)) return 'jira-comment-edited';   // 「업무 항목 댓글 편집됨」 — 트리거 글자는 내보내기로 확인
   if (t.endsWith(':commented')) return 'jira-comment';
   if (t.endsWith(':transitioned')) return 'jira-status';
   return null;
@@ -98,6 +99,6 @@ for (const f of fs.readdirSync(inDir).filter(x => x.endsWith('.json'))) {
   fs.writeFileSync(path.join(outDir, slot + '.template.json'), t + '\n');
   console.log('만듦:', slot + '.template.json', '(자리표시자 ' + new Set(t.match(/<<[A-Z_0-9]+>>/g)).size + '종)');
 }
-if (seen.size !== 5) problems.push('템플릿이 5개가 아니다: ' + [...seen].join(', '));
+if (seen.size !== 6) problems.push('템플릿이 6개가 아니다: ' + [...seen].join(', '));
 if (problems.length) { console.error('\n문제:\n- ' + problems.join('\n- ')); process.exit(1); }
-console.log('완료 — 템플릿 5개');
+console.log('완료 — 템플릿 6개');

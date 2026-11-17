@@ -1,0 +1,132 @@
+{
+  "cloud": true,
+  "rules": [
+    {
+      "id": 612989651600300,
+      "clientKey": "86cdccfb-e189-4517-8bda-ffd0c676aa6a",
+      "name": "<<PREFIX>> Jira 댓글 수정 → Github",
+      "state": "DISABLED",
+      "description": "",
+      "authorAccountId": "<<OWNER_ACCOUNT_ID>>",
+      "actor": {
+        "type": "ACCOUNT_ID",
+        "value": "<<ACTOR_ACCOUNT_ID>>"
+      },
+      "created": 1793065124222,
+      "updated": 1793235653617,
+      "trigger": {
+        "id": "8a26f893-34f7-4e60-b182-353558672841",
+        "parentId": null,
+        "conditionParentId": null,
+        "component": "TRIGGER",
+        "type": "jira.issue.event.trigger:comment_edited",
+        "value": {
+          "eventTypes": [],
+          "eventFilters": [
+            "ari:cloud:jira:<<CLOUD_ID>>:project/<<PROJECT_ID>>"
+          ]
+        },
+        "conditions": [],
+        "children": [],
+        "schemaVersion": 1,
+        "connectionId": null,
+        "checksum": null
+      },
+      "components": [
+        {
+          "id": "a9b49890-062d-4811-a604-c70ad470ce18",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "CONDITION",
+          "type": "jira.jql.condition",
+          "value": "hierarchyLevel = 0",
+          "conditions": [],
+          "children": [],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        },
+        {
+          "id": "19009ca0-bb9b-4afd-8008-800e753321c0",
+          "parentId": null,
+          "conditionParentId": null,
+          "component": "ACTION",
+          "type": "jira.issue.outgoing.webhook",
+          "value": {
+            "url": "https://api.github.com/repos/<<REPO>>/actions/workflows/issue-sync.yml/dispatches",
+            "urlSecure": false,
+            "headers": [
+              {
+                "id": "_header_142078405654",
+                "name": "Authorization",
+                "value": "",
+                "headerSecure": true
+              },
+              {
+                "id": "_header_854104384983",
+                "name": "Accept",
+                "value": "application/vnd.github+json",
+                "headerSecure": false
+              },
+              {
+                "id": "_header_738145024542",
+                "name": "X-GitHub-Api-Version",
+                "value": "2022-11-28",
+                "headerSecure": false
+              },
+              {
+                "id": "_header_908777661134",
+                "name": "Content-Type",
+                "value": "application/json",
+                "headerSecure": false
+              }
+            ],
+            "sendIssue": false,
+            "contentType": "custom",
+            "customBody": "{\"ref\":\"main\",\"inputs\":{\"kind\":\"comment|{{comment.id}}|edit\",\"key\":\"{{issue.key}}\",\"body\":\"{{comment.body.abbreviate(20000).jsonEncode}}\",\"person\":\"{{comment.author.accountId}}|{{comment.author.displayName.jsonEncode}}\"}}\n",
+            "method": "POST",
+            "responseEnabled": false,
+            "continueOnErrorEnabled": false
+          },
+          "conditions": [],
+          "children": [],
+          "schemaVersion": 1,
+          "connectionId": null,
+          "checksum": null
+        }
+      ],
+      "canOtherRuleTrigger": false,
+      "notifyOnError": "FIRSTERROR",
+      "projects": [],
+      "labels": [],
+      "tags": [],
+      "ruleScope": {
+        "resources": [
+          "ari:cloud:jira:<<CLOUD_ID>>:project/<<PROJECT_ID>>"
+        ]
+      },
+      "ruleHome": {
+        "ruleLifecycleHome": {
+          "locationARI": "ari:cloud:jira:<<CLOUD_ID>>:project/<<PROJECT_ID>>"
+        },
+        "ruleBillingHome": {
+          "locationARI": "ari:cloud:jira-software::site/<<CLOUD_ID>>"
+        }
+      },
+      "writeAccessType": "OWNER_ONLY",
+      "readAccessType": "UNRESTRICTED",
+      "collaborators": [],
+      "billingType": "NORMAL",
+      "idUuid": "488b8f14-f1bb-47fe-bf2a-f1135fabd609",
+      "partitionId": "86cdccfb-e189-4517-8bda-ffd0c676aa6a",
+      "checksum": {
+        "version": 3,
+        "value": "5dcf664609695ce407fd8d2482049e0c4a077913e7d20491b56bc1df1982a164"
+      },
+      "currentVersionId": null,
+      "ruleArchetype": null,
+      "draftId": null,
+      "editRestrictions": null
+    }
+  ]
+}

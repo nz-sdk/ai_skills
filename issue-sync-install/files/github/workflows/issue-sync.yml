@@ -12,6 +12,10 @@
 #   GitHub 원본의 Jira 사본에는 넣지 않는다 — Jira 보고자 칸에 등록한 사람이 들어간다
 # 레이블 — 동기화용 라벨(jira · github · gh-*)은 빼고 양쪽을 맞춘다. Jira 레이블은 띄어쓰기를 못 써 GitHub 라벨의 띄어쓰기는 _ 로 바꾼다
 # 닫을 때 — GitHub 닫힘 · Jira 완료 범주면 본문 할 일 「- [ ]」 → 「- [x]」(Jira 설명의 ☐ → ☒ 는 규칙이 한다). 다시 열 때는 그대로
+# 할 일 칸 — Jira 작업 목록(체크박스)은 위키로 오면 「* 글」 · 「* -글-」 이 되어 체크 상태가 빠진다. Jira → GitHub 때 본문 「### 할 일」 칸 안의
+#   목록 줄만 체크박스로 되살린다(취소선 · ☒ → 「- [x]」, ☐ · 보통 줄 → 「- [ ]」). 칸 밖 목록은 그대로
+#   시험 스위치 — 변수 SYNC_ADF_TASKLIST=1 이면 GitHub → Jira 설명(등록 · 원본 수정 · 상위 칸 맞춤)의 「* ☐ / * ☒」 줄 묶음을
+#   {adf:display=block}<작업 목록 ADF>{adf} 로 보낸다(Jira 가 진짜 체크박스로 받는지 시험 · 기본 꺼짐 = ☐ · ☒ 글자)
 # 상위 — 본문에 「### 상위 에픽 키」 칸이 있으면 Jira → GitHub 때 그 칸을 「[키 · 에픽 이름](링크)」 하나로 맞추고 사본 출처의 「상위 :」 줄은 넣지 않는다
 #   (칸이 없으면 출처의 상위 줄). GitHub → Jira 는 칸에서 키만 읽는다 — 키만 써도, 링크여도 된다. 글만 바뀌고 키가 같으면 상위 변경이 아니다
 # Jira 상태 — 새 규칙 ⑤가 status 에 「범주|상태 이름|해결」 을 실으면 GitHub 라벨 「jira:<상태 이름>」 하나를 붙인다(옛 jira:* 는 뗀다).
@@ -41,7 +45,7 @@
 #
 # Secrets: JIRA_<<SPACE>>_WEBHOOK_URL · JIRA_<<SPACE>>_WEBHOOK_TOKEN(<<SPACE>> 규칙 「<<PREFIX>> Github -> Jira Issue」 수신 웹후크) · SYNC_BOT_TOKEN(선택)
 #   옛 JIRA_WEBHOOK_URL · JIRA_WEBHOOK_TOKEN 은 쓰지 않는다
-# Variables: SYNC_BOT_LOGIN(선택 — 전용 계정 아이디)
+# Variables: SYNC_BOT_LOGIN(선택 — 전용 계정 아이디) · SYNC_ADF_TASKLIST(선택 — 1 이면 위 {adf} 작업 목록 시험)
 #
 # ★ workflow_dispatch 입력은 지금 10개다 — 늘리지 않고 person · parent 처럼 「a|b」로 묶거나 kind 에 「|덧붙임」 으로 싣는다
 #   (옛 규칙이 켜진 채로 머지돼도 깨지지 않게 — 옛 kind 값은 옛 동작).
@@ -122,6 +126,7 @@ jobs:
       JIRA_SPACE: <<SPACE>>   # 등록 때 규칙이 티켓을 만드는 스페이스
       GH_TOKEN: ${{ secrets.SYNC_BOT_TOKEN || github.token }}   # 등록자 이름 읽기 · 닫을 때 체크박스
       GH_REPO: ${{ github.repository }}
+      SYNC_ADF_TASKLIST: ${{ vars.SYNC_ADF_TASKLIST }}   # 1 이면 설명의 체크박스 묶음을 {adf} 작업 목록으로(시험)
 
     steps:
       - name: Decide kind · pair
@@ -141,6 +146,12 @@ jobs:
           }
           # 동기화가 쓰는 라벨 — 양쪽 레이블 맞추기에서 뺀다(jira:* = Jira 상태 라벨)
           is_sync_label() { case "$1" in jira|github|gh-*|jira:*) return 0 ;; esac; return 1; }
+          # 위키 글의 첫 단계 「* ☐ 글」 · 「* ☒ 글」 연속 줄 묶음 → {adf:display=block}<taskList JSON>{adf} — SYNC_ADF_TASKLIST=1 일 때만(시험 · 꺼지면 그대로)
+          #   글은 꾸밈 없이 텍스트 노드로. 중첩(「** ☐」)은 바꾸지 않는다
+          adf_tasks() {
+            [ "${SYNC_ADF_TASKLIST:-}" = 1 ] || { cat; return; }
+            node -e 'const{randomUUID:u}=require("crypto");const o=[];let g=null;const f=()=>{if(g){o.push("{adf:display=block}"+JSON.stringify({type:"taskList",attrs:{localId:u()},content:g})+"{adf}");g=null}};for(const l of require("fs").readFileSync(0,"utf8").split("\n")){const m=/^\*[ \t]+([☐☒])[ \t]*(.*?)\r?$/.exec(l);if(m){(g=g||[]).push({type:"taskItem",attrs:{localId:u(),state:m[1]=="☒"?"DONE":"TODO"},content:m[2]?[{type:"text",text:m[2]}]:[]})}else{f();o.push(l)}}f();process.stdout.write(o.join("\n"))'
+          }
           SH
           . "$RUNNER_TEMP/epic.sh"
 
@@ -253,7 +264,7 @@ jobs:
           if [ "$KIND" = create ]; then
             # 등록 — 이벤트 그대로 + 변환한 본문 + 대조표 값(bridge). 규칙이 {{webhookData.bridge.*}} 로 읽는다
             opener=$(jq -r '.issue.user.login' "$ev")
-            jq -r '.issue.body // ""' "$ev" | tojira > "$RUNNER_TEMP/body.txt"   # 등록자는 Jira 보고자 칸으로 — 본문에 줄을 넣지 않는다
+            jq -r '.issue.body // ""' "$ev" | tojira | adf_tasks > "$RUNNER_TEMP/body.txt"   # 등록자는 Jira 보고자 칸으로 — 본문에 줄을 넣지 않는다
             gtype=$(jq -r '.issue.type.name // ""' "$ev")
             first=$(jq -r '.issue.assignees[0].login // ""' "$ev")
             jtype=$(S="$JIRA_SPACE" G="$gtype" yq -r '.spaces[strenv(S)] as $s | ($s.issueTypes[strenv(G)] // $s.default // "작업")' "$MAP")
@@ -312,7 +323,7 @@ jobs:
               else
                 summary="[GH #$number] $title"
                 ft=$(printf '%s' "$title" | sed -e 's/\[/［/g; s/\]/］/g; s/|/｜/g')
-                desc=$(tojira < "$RUNNER_TEMP/body.md"; printf '\n\nh3. 출처\nGitHub : [Issue #%s · %s|%s]' "$number" "$ft" "$html")
+                desc=$(tojira < "$RUNNER_TEMP/body.md" | adf_tasks; printf '\n\nh3. 출처\nGitHub : [Issue #%s · %s|%s]' "$number" "$ft" "$html")
               fi ;;
             label)
               # 라벨 하나 붙임 · 뗌 — Jira 레이블에 같은 것을 더하거나 뺀다(띄어쓰기는 _)
@@ -415,6 +426,7 @@ jobs:
       # 상위가 바뀐 GitHub 원본의 「상위 에픽 키」 칸을 Jira 사본 설명에도 보낸다(규칙 ①의 edit)
       URL: ${{ secrets.JIRA_<<SPACE>>_WEBHOOK_URL }}
       TOKEN: ${{ secrets.JIRA_<<SPACE>>_WEBHOOK_TOKEN }}
+      SYNC_ADF_TASKLIST: ${{ vars.SYNC_ADF_TASKLIST }}   # 1 이면 위 설명의 체크박스 묶음을 {adf} 작업 목록으로(시험)
 
     steps:
       - name: Check input · find pair
@@ -507,6 +519,39 @@ jobs:
           length_ok() { local a b; a=$(perl -CSD -0ne 's/\s//g; print length' "$1"); b=$(perl -CSD -0ne 's/\s//g; print length' "$2"); [ "$a" -lt 200 ] || [ $((b * 10)) -ge $((a * 6)) ]; }
           # GitHub 마크다운 → Jira 위키 (from-github 와 같은 변환)
           tojira() { pandoc -f gfm+hard_line_breaks-gfm_auto_identifiers -t jira --wrap=none | sed -E 's/\{anchor:[^}]*\}//g'; }
+          # from-github 와 같은 {adf} 작업 목록 시험(SYNC_ADF_TASKLIST=1 일 때만 · 꺼지면 그대로)
+          adf_tasks() {
+            [ "${SYNC_ADF_TASKLIST:-}" = 1 ] || { cat; return; }
+            node -e 'const{randomUUID:u}=require("crypto");const o=[];let g=null;const f=()=>{if(g){o.push("{adf:display=block}"+JSON.stringify({type:"taskList",attrs:{localId:u()},content:g})+"{adf}");g=null}};for(const l of require("fs").readFileSync(0,"utf8").split("\n")){const m=/^\*[ \t]+([☐☒])[ \t]*(.*?)\r?$/.exec(l);if(m){(g=g||[]).push({type:"taskItem",attrs:{localId:u(),state:m[1]=="☒"?"DONE":"TODO"},content:m[2]?[{type:"text",text:m[2]}]:[]})}else{f();o.push(l)}}f();process.stdout.write(o.join("\n"))'
+          }
+          # 「### 할 일」 칸(다음 ### 소제목 · 짝 표시 · 끝 전까지) 안의 목록 줄을 체크박스로 — Jira 작업 목록은 위키로 오면 상태가 빠진다
+          #   「- ~~글~~」 · 「- ☒ 글」 → 「- [x] 글」, 「- ☐ 글」 · 보통 「- 글」 → 「- [ ] 글」(이미 [ ] · [x] 면 그대로 · 이스케이프된 \[ \] 도). 중첩도 같다
+          #   체크박스 줄 사이 빈 줄은 뗀다(pandoc 이 항목마다 넣는다). 칸 밖은 건드리지 않는다
+          todo_tasks() {
+            perl -CSD -Mutf8 -0pe '
+              sub fx { my @l = split /\n/, $_[0], -1; my $cb = qr/^[ \t]*[-*+][ \t]+\[[ xX]\](?:[ \t]|\r?$)/;
+                for (@l) {
+                  next unless /^([ \t]*[-*+][ \t]+)(.*?)(\r?)$/;
+                  my ($p, $t, $cr) = ($1, $2, $3);
+                  if ($t =~ /^\\?\[([ xX])\\?\](?=[ \t]|$)(.*)$/) { $t = "[" . ($1 eq " " ? " " : "x") . "]$2" }
+                  elsif ($t =~ /^~~(.+)~~[ \t]*$/ && $1 !~ /~~/) { $t = "[x] $1" }
+                  elsif ($t =~ s/^☒[ \t]*//) { $t = "[x] $t" }
+                  elsif ($t =~ s/^☐[ \t]*//) { $t = "[ ] $t" }
+                  else { $t = "[ ] $t" }
+                  $_ = "$p$t$cr";
+                }
+                my @o;
+                for my $i (0 .. $#l) {
+                  if ($l[$i] =~ /^\s*$/ && @o && $o[-1] =~ $cb) {
+                    my $j = $i; $j++ while $j <= $#l && $l[$j] =~ /^\s*$/;
+                    next if $j <= $#l && $l[$j] =~ $cb;
+                  }
+                  push @o, $l[$i];
+                }
+                join "\n", @o;
+              }
+              s/^(###[ \t]*할 일[ \t]*\r?\n)(.*?)(?=^###[ \t]|^<!-- jira:|\z)/$1 . fx($2)/mse'
+          }
           # GitHub 본문 「상위 에픽 키」 칸의 키(대문자) — 칸이 없거나 키가 없으면 빈 글자
           epic_cell() { perl -CSD -Mutf8 -0ne 'if (/^###[ \t]*상위 에픽 키[ \t]*\r?\n(.*?)(?=^###[ \t]|^<!-- jira:|\z)/ms) { my $s = $1; print uc $1 if $s =~ /\b([A-Za-z][A-Za-z0-9]*-[0-9]+)\b/ }'; }
           # 「상위 에픽 키」 칸이 있나 · 칸 글(비교용 — 역슬래시 · 공백 차이는 같다고 본다) · 칸 글 바꾸기(값은 인자 — 한글 이름이 깨지지 않게 -CA)
@@ -542,7 +587,7 @@ jobs:
             link=$(epic_link)
             if [ -n "${REG:-}" ]; then printf '%s\n\n' "$REG"; fi
             if [ -n "$BODY" ]; then
-              printf '%s\n' "$BODY" | strip_reg | fromjira > "$RUNNER_TEMP/cb.md"
+              printf '%s\n' "$BODY" | strip_reg | fromjira | todo_tasks > "$RUNNER_TEMP/cb.md"
               if [ -n "$link" ] && has_epic_cell < "$RUNNER_TEMP/cb.md"; then
                 set_epic_cell "$link" < "$RUNNER_TEMP/cb.md" > "$RUNNER_TEMP/cb2.md" && mv "$RUNNER_TEMP/cb2.md" "$RUNNER_TEMP/cb.md"
                 incell=1
@@ -669,7 +714,7 @@ jobs:
               [ -z "$NEW_RULE" ] || [ -n "$EXTRA" ] || echo "::notice::바뀐 칸 표시가 비었다 — Jira 설명으로 본문을 맞춘다(옛 동작)"
               printf '%s\n' "$BODY" | strip_reg | perl -0pe 's/\n*h3\. 출처\n(?:(?!\nh\d\. ).)*\z//s' > "$RUNNER_TEMP/desc.txt"
               {
-                if [ -s "$RUNNER_TEMP/desc.txt" ]; then fromjira < "$RUNNER_TEMP/desc.txt"; fi
+                if [ -s "$RUNNER_TEMP/desc.txt" ]; then fromjira < "$RUNNER_TEMP/desc.txt" | todo_tasks; fi
                 printf '\n<!-- jira:%s -->\n' "$KEY"
               } > "$RUNNER_TEMP/body.md"
               # 변환이 글을 크게 잃었으면(닫히지 않은 매크로 등) 원본 본문을 덮어쓰지 않는다 — 제목 · 담당은 그대로 맞춘다
@@ -726,7 +771,7 @@ jobs:
               jq -r '.body // ""' "$RUNNER_TEMP/after.json" | perl -0pe 's/\n*<!-- jira:[A-Z][A-Z0-9]+-[0-9]+ -->\s*\z//' > "$RUNNER_TEMP/orig.md"
               at=$(jq -r .title "$RUNNER_TEMP/after.json"); au=$(jq -r .url "$RUNNER_TEMP/after.json"); al=$(jq -r '.author.login' "$RUNNER_TEMP/after.json")
               ft=$(printf '%s' "$at" | sed -e 's/\[/［/g; s/\]/］/g; s/|/｜/g')
-              desc=$(tojira < "$RUNNER_TEMP/orig.md"; printf '\n\nh3. 출처\nGitHub : [Issue #%s · %s|%s]' "$NUMBER" "$ft" "$au")
+              desc=$(tojira < "$RUNNER_TEMP/orig.md" | adf_tasks; printf '\n\nh3. 출처\nGitHub : [Issue #%s · %s|%s]' "$NUMBER" "$ft" "$au")
               jq -n --arg key "$KEY" --arg summary "[GH #$NUMBER] $at" --arg description "$desc" \
                 '{key: $key, kind: "edit", role: "original", summary: $summary, description: $description, assignee: "", comment: "",
                   op: "", label: "", epicKey: null, epicRaw: "", epicChanged: false, actor: "jira-parent"}' > "$RUNNER_TEMP/payload.json"

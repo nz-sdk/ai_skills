@@ -5,7 +5,7 @@ license: AGPL-3.0-only
 compatibility: Claude Code — AskUserQuestion · Atlassian MCP v2 사용
 argument-hint: "[무엇을 등록할지 한 줄] | <키 | #번호> 제목 · 본문 · 댓글 · 상태 · 담당 바꿔줘 | <키> 작업 시작 | <키> 완료 보고"
 metadata:
-  version: 0.0.2
+  version: 0.0.3
   copyright: Copyright (c) 2026 Newzen
   author:
     name: "yangyang12103@newzen.kr"
@@ -351,7 +351,7 @@ GitHub gh issue list -R <저장소> --state open --search "<화면> in:title" --
    gh api repos/<저장소>/issues --method POST --input <스크래치>/payload.json --jq .number
    ```
 
-- 양식 칸 「상위 에픽 키」(id `epic`)는 ②-0 의 에픽으로 채운다 — 값은 `[<에픽 키> · <에픽 요약>](https://<대조표 jira.site>/browse/<에픽 키>)`(요약 안의 `[` `]` 는 `\[` `\]`).
+- 양식 칸 「상위 에픽 키」(id `epic`)는 ②-0 의 에픽으로 채운다 — 값은 `[<에픽 키> · <에픽 요약>](https://<대조표 jira.site>/browse/<에픽 키>)`(요약 안의 `[` `]` 는 전각 `［` `］` 로 — Jira 위키 링크는 글자 안 대괄호를 받지 못해 Jira 사본 칸이 깨진다).
   동기화는 이 칸에서 **키만** 읽어 Jira 사본 상위로 넣는다(사람이 키만 적어도 된다). Jira 에 올릴 때도 같은 본문이라 설명에 같은 링크가 들어간다.
 - 라벨은 양식 `labels` 만 — **`jira` 는 붙이지 않는다**(사본 표시). 저장소에 없는 라벨은 빼고 경고(새로 만들지 않음).
 - 실패하면:

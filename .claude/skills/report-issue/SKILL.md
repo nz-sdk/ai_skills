@@ -5,7 +5,7 @@ license: AGPL-3.0-only
 compatibility: Claude Code — AskUserQuestion · Atlassian MCP v2 사용
 argument-hint: "[무엇을 등록할지 한 줄] | <키 | #번호> 제목 · 본문 · 댓글 · 상태 · 담당 바꿔줘 | <키> 작업 시작 | <키> 완료 보고"
 metadata:
-  version: 0.0.1
+  version: 0.0.2
   copyright: Copyright (c) 2026 Newzen
   author:
     name: "yangyang12103@newzen.kr"
@@ -270,6 +270,10 @@ GitHub gh issue list -R <저장소> --state open --search "<화면> in:title" --
 
 담당은 **등록하는 쪽에만** 넣는다(반대쪽은 자동화가 대조표로 맞춘다).
 
+🔴 **담당은 한 명** — Jira 담당 칸은 한 사람뿐이다. 사용자가 담당을 **여럿** 말하면 「Jira 담당은 한 명입니다」 를 알리고,
+말한 사람들(+ 지정 안 함)을 선택지로 `AskUserQuestion` 「담당 한 명을 골라 주세요」 로 묻는다(4개를 넘으면 위 두 단계처럼).
+고른 **한 명만** 넣는다 — GitHub `assignees` 에도 그 한 명. GitHub 에 여럿을 넣으면 동기화는 첫 번째만 Jira 로 보낸다.
+
 | 등록할 곳 | 넣는 법 |
 |---|---|
 | Jira | `createJiraIssue` 의 `assignee` = 그 `jiraAccountId` |
@@ -347,7 +351,8 @@ GitHub gh issue list -R <저장소> --state open --search "<화면> in:title" --
    gh api repos/<저장소>/issues --method POST --input <스크래치>/payload.json --jq .number
    ```
 
-- 양식 칸 「상위 에픽 키」(id `epic`)는 ②-0 의 에픽 키로 채운다 — 동기화가 이 칸을 읽어 Jira 사본 상위로 넣는다.
+- 양식 칸 「상위 에픽 키」(id `epic`)는 ②-0 의 에픽으로 채운다 — 값은 `[<에픽 키> · <에픽 요약>](https://<대조표 jira.site>/browse/<에픽 키>)`(요약 안의 `[` `]` 는 `\[` `\]`).
+  동기화는 이 칸에서 **키만** 읽어 Jira 사본 상위로 넣는다(사람이 키만 적어도 된다). Jira 에 올릴 때도 같은 본문이라 설명에 같은 링크가 들어간다.
 - 라벨은 양식 `labels` 만 — **`jira` 는 붙이지 않는다**(사본 표시). 저장소에 없는 라벨은 빼고 경고(새로 만들지 않음).
 - 실패하면:
   - **422**(검증 실패) — 요청 전체가 거절된 것이라 이슈는 **생기지 않았다**. 오류의 `field`(`type` · `assignees` · `labels`)만 빼고(`payload.cjs … type` 처럼 넷째 인자부터) **한 번만** 다시 만든다. 보고에 「Type 을 붙이지 못함」 등 경고.
@@ -436,9 +441,9 @@ Jira 지켜보기(watcher)는 하지 않는다 — v2 `watchJiraIssue` 는 부�
 | 댓글 | `addOrEditJiraIssueComment`(멘션이 있으면 `contentFormat: "html"` + mention 요소 — 4-⑦, 없으면 markdown) | `gh issue comment --body-file`(멘션 `@<GitHub 아이디>`, `people` 만) | 「<이름> 님 … 댓글」 + 멘션은 대조표로(Jira → GitHub `@아이디` · `<키>(Jira)` / GitHub → Jira 실제 멘션) |
 | 상태 | `executeRead` `listJiraIssueTransitions` → 사용자가 상태 **이름**을 말했으면 `to.name` 이 같은 전환, 「완료 · 할 일」처럼 범주로 말했으면 `to.statusCategory.key`(`done` · `new` · `indeterminate`)가 같은 전환 — 1개면 그것, 여럿이면 `to.name` 을 선택지로 묻는다 → 그 id 로 `transitionJiraIssue` `transitionId` | 「완료 · 닫아」 `gh issue close --reason completed` · 「할 일 · 다시 열어」 `gh issue reopen`. 「진행 중 · 검토 중」은 GitHub 에 없는 상태 — **Jira 키로 할까요?** 묻는다 | Jira 완료 ↔ GitHub 닫힘, 그 밖 ↔ 열림 |
 | 담당 | `editJiraIssue` `fields: {"assignee": {"accountId": "<id>"}}`(지정 안 함 `{"assignee": null}`) — 바꾼 뒤 다시 읽어 값이 바뀌었는지 본다(5-5) | `gh issue edit --add-assignee` · `--remove-assignee`(`people` 의 GitHub 아이디) | 아래 표 |
-| 상위 | ②-0 「에픽 키 검사」 → 맞으면 `editJiraIssue` `fields: {"parent": {"key": "<에픽>"}}`. 짝이 **GitHub 원본**(Jira 가 사본)이면 GitHub 본문 「상위 에픽 키」 칸도 새 키로 고친다 — 상위를 비우지는 않는다(필수 · 요청이 오면 알리고 옮길 에픽을 묻는다) | 「상위 바꿔줘」 든 본문 「상위 에픽 키」 칸 수정이든 ②-0 「에픽 키 검사」 → 맞으면 ① GitHub 본문 칸을 새 키로 고치고 ② 5-1 로 찾은 **Jira 짝의 상위도** 같은 키로 바꾼다. 틀리면 **본문도 고치지 않는다** | GitHub 본문 「상위 에픽 키」 = Jira 상위. 자동화도 한쪽 변경을 반대쪽으로 옮기지만 늦을 수 있어 스킬이 양쪽을 바로 맞춘다 |
+| 상위 | ②-0 「에픽 키 검사」 → 맞으면 `editJiraIssue` `fields: {"parent": {"key": "<에픽>"}}`. 짝이 **GitHub 원본**(Jira 가 사본)이면 GitHub 본문 「상위 에픽 키」 칸도 새 에픽(`[키 · 요약](링크)` — 4-⑦)으로 고친다 — 상위를 비우지는 않는다(필수 · 요청이 오면 알리고 옮길 에픽을 묻는다) | 「상위 바꿔줘」 든 본문 「상위 에픽 키」 칸 수정이든 ②-0 「에픽 키 검사」 → 맞으면 ① GitHub 본문 칸을 새 에픽(`[키 · 요약](링크)`)으로 고치고 ② 5-1 로 찾은 **Jira 짝의 상위도** 같은 키로 바꾼다. 틀리면 **본문도 고치지 않는다** | GitHub 본문 「상위 에픽 키」 = Jira 상위. 자동화도 한쪽 변경을 반대쪽으로 옮기지만 늦을 수 있어 스킬이 양쪽을 바로 맞춘다 |
 
-- 문구는 사용자가 준 그대로, 없으면 묻는다. 담당자 이름만 오면 대조표 · Jira 에서 찾고, 없거나 둘 이상이면 4-⑤ 처럼 묻는다.
+- 문구는 사용자가 준 그대로, 없으면 묻는다. 담당자 이름만 오면 대조표 · Jira 에서 찾고, 없거나 둘 이상이면 4-⑤ 처럼 묻는다. 담당을 **여럿** 넣어 달라고 하면 4-⑤ 「담당은 한 명」 대로 한 명을 고르게 한다.
 - 이미 그 값이면 바꾸지 않고 「이미 <값>」으로 보고한다.
 - **예외** — GitHub 계정 없는 사람을 `#번호` 로 담당 지정: GitHub 에는 넣을 수 없다 → 「Jira 쪽(<키>)에서 지정할까요?」 동의하면 Jira 짝에.
 - **예외** — 상위 에픽은 양쪽을 스킬이 맞춘다(위 표 「상위」). 자동화도 GitHub 본문 키 ↔ Jira 상위를 옮기지만 Jira 자동화 실행이 몇 시간씩 밀릴 수 있어 그동안 본문 키와 실제 상위가 어긋난다. 같은 값을 다시 쓰므로 겹쳐도 바뀌는 것은 없다.
@@ -503,6 +508,8 @@ Jira 지켜보기(watcher)는 하지 않는다 — v2 `watchJiraIssue` 는 부�
 | ②-1 기존 건이면 댓글도 달지 않음 | 같은 티켓에 본문 댓글 · 멘션 댓글이 겹쳐 달린다 |
 | 영역 판정에서 `screenScanExclude` 제외 | 메뉴 등록부처럼 화면 이름만 모아 둔 폴더까지 세면 영역을 잘못 본다 |
 | ⑤ 4명을 넘으면 역할로 두 단계 | 선택 질문은 선택지가 4개까지라, 한 번에 물으면 4번째 이후 사람은 버튼이 없어 「Other」 에 번호를 적어야 했다 — 모든 사람을 버튼으로 고르게 한다 |
+| 담당은 한 명 · 여럿이면 하나를 고르게 | Jira 담당 칸은 한 사람뿐이다 — GitHub 에 여럿을 넣으면 동기화가 첫 번째만 보내 누가 Jira 담당인지 흐려진다(2026-11-12 정책) |
+| 상위 칸은 「키 · 이름」 링크 | 키만 있으면 어떤 에픽인지 Jira 를 열어야 안다. 동기화도 Jira 쪽 변경 때 같은 모양으로 맞추고, 칸에서 키만 읽으므로 키만 적어도 된다 |
 | ②-1 후보를 버튼으로 · 4건 이상이면 두 단계 | 후보를 질문 글에만 늘어놓으면 「기존 건 사용」 을 골라도 어느 건인지 정할 수 없었다 |
 | 「(권장)」 표시 없음 · ③ 은 역할로 미리 고르지 않음 | 권장 표시가 사용자 판단을 한쪽으로 끈다. 추정은 순서로만 드러낸다 |
 | ⑤ GitHub 지정 가능 여부를 미리 봄 | 저장소 권한 없는 아이디는 담당이 될 수 없다 — 미리 빼야 등록이 그 때문에 실패하거나 조용히 빠지지 않는다 |

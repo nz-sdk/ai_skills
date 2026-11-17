@@ -25,6 +25,7 @@
 
 ### 버그 수정
 
+* **issue-sync-install:** 에픽 이름에 대괄호가 있으면 Jira 설명의 상위 에픽 키 칸이 깨지던 문제 — 링크 글자 안 대괄호를 전각으로 ([#43](https://github.com/nz-sdk/ai_skills/pull/43))
 * **issue-sync-install:** 등록자 줄 「등록: 이름(Jira)」 을 GitHub 계정이 없는 보고자일 때만 쓴다 ([#41](https://github.com/nz-sdk/ai_skills/pull/41))
 * **issue-sync-install:** 등록자 줄을 Jira 원본의 GitHub 사본에만 「등록: 이름(Jira)」 로 쓰고, GitHub 원본의 Jira 사본에는 넣지 않는다(보고자 칸으로 충분) ([#39](https://github.com/nz-sdk/ai_skills/pull/39))
 * **issue-sync-install:** Jira 의 한 줄 코드 블록이 GitHub 본문을 잘라 덮어쓰던 문제 · GitHub 사본 본문만 고쳐도 Jira 원본 요약에 앞말(task: 등)이 붙던 문제 · 상위 칸을 맞출 때 생기던 끝 빈 줄 ([#37](https://github.com/nz-sdk/ai_skills/pull/37))

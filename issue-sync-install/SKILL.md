@@ -5,7 +5,7 @@ license: AGPL-3.0-only
 compatibility: Claude Code — AskUserQuestion · Atlassian MCP · gh · Node 18+ 사용
 argument-hint: "[상품 저장소 폴더 경로] (생략하면 묻는다)"
 metadata:
-  version: 0.0.0
+  version: 0.0.1
   copyright: Copyright (c) 2026 Newzen
   author:
     name: "yangyang12103@newzen.kr"
@@ -54,7 +54,7 @@ metadata:
 ### 1-1. 키트 위치
 **키트 폴더 = 이 `SKILL.md` 가 있는 폴더**다(스킬을 부를 때 알려 주는 기본 폴더 경로). 그 경로를 사용자에게 보이기만 하고, 경로를 알 수 없을 때만 묻는다. **상품 저장소 폴더 경로**는 묻는다(인자로 받았으면 확인만).
 다음이 **모두 있어야** 한다 — 하나라도 없으면 멈추고 알린다:
-`<키트>/adopt/02-설치-순서.md` · `<키트>/files/tools/install-files.mjs` · `<키트>/files/jira-rules/render-rules.mjs` · `<키트>/files/jira-rules/templates/`(템플릿 5개)
+`<키트>/adopt/02-설치-순서.md` · `<키트>/files/tools/install-files.mjs` · `<키트>/files/jira-rules/render-rules.mjs` · `<키트>/files/jira-rules/templates/`(템플릿 6개)
 
 ### 1-2. 문서 읽기
 `<키트>/adopt/00-결정-체크.md` · `01-바꿀-값.md` · `02-설치-순서.md` · `03-점검표.md` · `04-문제해결.md` 를 **전부 읽는다**(Read). 읽지 않은 문서의 내용으로 진행하지 않는다.
@@ -108,32 +108,32 @@ metadata:
 
 각 단계는 **A 한다 · B 요청한다 · C 확인한다 · D 넘어가는 조건** 순서다.
 
-### 단계 1. Jira 규칙 5개 (켜지 않는다)
+### 단계 1. Jira 규칙 6개 (켜지 않는다)
 **A**
 1. 임시 작업 폴더를 만든다(상품 저장소 **밖**, 예: OS 임시 폴더 아래 새 폴더). 경로를 사용자에게 알린다.
 2. 2절 값으로 **`rules-values.json`** 을 쓴다 — 형식은 `<키트>/files/jira-rules/values.example.json`(`_설명` 칸은 빼도 된다). `SLACK_WEBHOOK_URL` 은 `""`.
 3. 렌더: `node <키트>/files/jira-rules/render-rules.mjs --values <작업폴더>/rules-values.json --out <작업폴더>/rules-out`
-   - 성공 조건: 종료 코드 0 · 출력에 `규칙 5개를 만들었다` · `웹 요청 합계 7곳 (기대: 7)`. 아니면 **오류 원문**을 보이고, 스크립트가 적은 이유(값 이름 · 형식)대로 값 파일을 고쳐 다시 실행한다(값 형식은 `adopt/01` 2-0절 · 1-0절). 이유가 값 파일 오류로 설명되지 않으면 멈추고 묻는다(R4).
-4. `ls <작업폴더>/rules-out` 로 파일 5개를 확인한다.
+   - 성공 조건: 종료 코드 0 · 출력에 `규칙 6개를 만들었다` · `웹 요청 합계 8곳 (기대: 8)`. 아니면 **오류 원문**을 보이고, 스크립트가 적은 이유(값 이름 · 형식)대로 값 파일을 고쳐 다시 실행한다(값 형식은 `adopt/01` 2-0절 · 1-0절). 이유가 값 파일 오류로 설명되지 않으면 멈추고 묻는다(R4).
+4. `ls <작업폴더>/rules-out` 로 파일 6개를 확인한다.
 
 **B**(한 번에 하나)
-1. 「Jira ▸ `<SPACE>` 스페이스 설정 ▸ 자동화 ▸ 오른쪽 위 `…` ▸ 규칙(또는 흐름) 가져오기 에서 `<작업폴더>/rules-out` 의 5개 파일을 하나씩 가져와 주세요. 가져온 뒤 5개가 모두 **꺼짐**인지 보고 알려 주세요.」(메뉴가 없으면 「전역 관리」 화면 · 그래도 없으면 전역 자동화 관리자 권한이 필요하다고 알린다.)
+1. 「Jira ▸ `<SPACE>` 스페이스 설정 ▸ 자동화 ▸ 오른쪽 위 `…` ▸ 규칙(또는 흐름) 가져오기 에서 `<작업폴더>/rules-out` 의 6개 파일을 하나씩 가져와 주세요. 가져온 뒤 6개가 모두 **꺼짐**인지, `jira-edited` 트리거 「다음에 대해」 에 편집 · 담당 지정 · 전환이 체크됐는지 보고 알려 주세요. `jira-comment-edited` 가져오기가 실패하면 `jira-comment` 규칙을 복제해 트리거를 「업무 항목 댓글 편집됨」 으로, 웹 요청 본문의 kind 를 `comment|{{comment.id}}|edit` 로 바꿔 주세요.」(메뉴가 없으면 「전역 관리」 화면 · 그래도 없으면 전역 자동화 관리자 권한이 필요하다고 알린다.)
 2. 이어서 「`github-to-jira` 규칙(Jira 이름 `<PREFIX> Github -> Jira Issue`)의 맨 위 「수신 웹후크」에서 웹후크 URL 과 암호를 복사해 두세요. **이 대화에는 붙여 넣지 마세요.**」
 
 **C** — Claude 는 규칙을 조회할 수 없다. `03-점검표.md` 의 「가져온 직후 점검」 항목(이름 · 꺼짐 · 범위 · 「허용」 끔)을 **하나씩 사용자에게 묻는다.** 사용자가 목록 캡처를 주면 이름 · 상태를 캡처로 확인하고, 캡처로 알 수 없는 것은 「확인하지 못했다」고 기록한다.
-**D** — 5개 모두 꺼짐 · 접두사 일치 · 「허용」 끔이 확인될 때.
+**D** — 6개 모두 꺼짐 · 접두사 일치 · 「허용」 끔이 확인될 때.
 
 ### 단계 2. 토큰 · Slack
 **A** — PAT 설정값을 그대로 안내한다: Fine-grained · Resource owner = 저장소 소유 조직 · Repository access = **`<REPO>` 하나** · Permissions = **Actions: Read and write 하나만** · 만료 1년 안. 조직 승인이 필요할 수 있다(`adopt/02` 단계 2).
 **B**(순서대로 하나씩)
 1. 「위 설정으로 PAT 를 만드세요. 값은 한 번만 보입니다. **대화에 붙여 넣지 마세요.**」 (+ 조직 승인 대기면 Pending requests 승인)
 2. Slack 을 쓰면 「Slack ▸ Incoming Webhooks 앱을 추가하고 알림 채널을 고른 뒤 웹후크 URL 을 복사해 두세요.」
-3. 「Jira 에서 `github-to-jira` 규칙의 웹 요청 3곳 + 나머지 4개 규칙의 웹 요청 1곳씩, **모두 7곳의 `Authorization` 헤더** 값을 `Bearer <PAT>`(숨김)로 채우세요. URL 이 `https://api.github.com/repos/<REPO>/actions/workflows/issue-sync.yml/dispatches` 인지도 봐 주세요.」
-   요청 문장을 보이기 **전에 그림을 화면에 띄운다**: PowerShell 로 `Invoke-Item "<키트>/adopt/images/authorization-header.png"` 를 실행해 사용자 PC 의 기본 이미지 뷰어로 연다(macOS 는 `open`, Linux 는 `xdg-open`). 이어서 같은 파일을 Read 도구로도 읽어 대화 화면에 그림이 보이게 한다. 둘 다 실패하면 파일 경로를 글로 알리고 사용자가 직접 열게 한다. 그림 설명: 「웹 요청 전송」 동작 → 오른쪽 설정 창 「머리글」의 `Authorization` 줄(빨간 상자) → 값 칸에 붙여 넣고 「숨김」 체크. 그림은 예시이며 저장소 · 스페이스 이름은 가려져 있다. 7곳이라 그림은 **처음 한 번만** 띄운다.
+3. 「Jira 에서 `github-to-jira` 규칙의 웹 요청 3곳 + 나머지 5개 규칙의 웹 요청 1곳씩, **모두 8곳의 `Authorization` 헤더** 값을 `Bearer <PAT>`(숨김)로 채우세요. URL 이 `https://api.github.com/repos/<REPO>/actions/workflows/issue-sync.yml/dispatches` 인지도 봐 주세요.」
+   요청 문장을 보이기 **전에 그림을 화면에 띄운다**: PowerShell 로 `Invoke-Item "<키트>/adopt/images/authorization-header.png"` 를 실행해 사용자 PC 의 기본 이미지 뷰어로 연다(macOS 는 `open`, Linux 는 `xdg-open`). 이어서 같은 파일을 Read 도구로도 읽어 대화 화면에 그림이 보이게 한다. 둘 다 실패하면 파일 경로를 글로 알리고 사용자가 직접 열게 한다. 그림 설명: 「웹 요청 전송」 동작 → 오른쪽 설정 창 「머리글」의 `Authorization` 줄(빨간 상자) → 값 칸에 붙여 넣고 「숨김」 체크. 그림은 예시이며 저장소 · 스페이스 이름은 가려져 있다. 8곳이라 그림은 **처음 한 번만** 띄운다.
 4. Slack 사용 시: 「`github-to-jira` 규칙의 슬랙 동작 2곳(등록 경로 If 블록 · edit 분기 B)에 같은 웹후크 URL 을 붙여 넣으세요. 동작 이름이 「웹후크를 통해 Slack 메시지 보내기」인지 확인해 주세요.」 미사용 시: 가짜 주소가 그대로 남고 틀린 상위 에픽 키 알림이 가지 않는다고 알린다.
 
 **C** — Claude 가 **확인할 수 없다**(Jira 화면 · 비밀값). 사용자 답만 기록하고 `확인하지 못함(사용자 답)` 으로 표시한다.
-**D** — 7곳 Authorization · Slack 처리가 사용자 답으로 끝났을 때.
+**D** — 8곳 Authorization · Slack 처리가 사용자 답으로 끝났을 때.
 
 ### 단계 3. GitHub Secret
 **A** — 이름을 안내한다: `JIRA_<SPACE>_WEBHOOK_URL` · `JIRA_<SPACE>_WEBHOOK_TOKEN` (대소문자 · 밑줄까지 그대로). 값은 단계 1 의 B-2 에서 복사해 둔 URL · 암호다(암호를 URL 에 붙이지 않는다).
@@ -162,7 +162,7 @@ metadata:
 
 ### 단계 5. Jira 규칙 켜기
 **A** — `03-점검표.md` 「가져온 직후 점검」을 다시 한 번 읽어 준다.
-**B** — 「Jira 에서 `<PREFIX>` 규칙 5개를 **모두** 켜세요(단계 4 가 끝난 뒤에만). `github-to-jira` 규칙의 수신 웹후크 설정이 바뀌지 않았는지 봐 주세요.」
+**B** — 「Jira 에서 `<PREFIX>` 규칙 6개를 **모두** 켜세요(단계 4 가 끝난 뒤에만). `github-to-jira` 규칙의 수신 웹후크 설정이 바뀌지 않았는지 봐 주세요.」
 **C** — 확인할 수 없다(Jira 화면). 사용자 답을 기록하고, 켠 뒤의 실제 확인은 단계 7 의 S1 로 한다.
 **D** — 사용자가 켰다고 답했을 때.
 

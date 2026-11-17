@@ -146,6 +146,15 @@
             "type": "string",
             "pattern": "^customfield_[0-9]+$",
             "description": "Jira 「시작 날짜」 칸 id — 칸이 없는 스페이스는 넣지 않는다"
+          },
+          "notPlannedResolutions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "description": "Jira 해결(resolution) 이름 — 완료 범주로 바뀔 때 해결이 이 목록에 있으면 GitHub 이슈를 「계획 안 함(not planned)」 으로 닫는다. 비거나 없으면 모두 completed"
           }
         }
       }

@@ -25,6 +25,7 @@
 
 ### 버그 수정
 
+* **issue-sync-install:** 등록자 줄 「등록: 이름(Jira)」 을 GitHub 계정이 없는 보고자일 때만 쓴다 ([#41](https://github.com/nz-sdk/ai_skills/pull/41))
 * **issue-sync-install:** 등록자 줄을 Jira 원본의 GitHub 사본에만 「등록: 이름(Jira)」 로 쓰고, GitHub 원본의 Jira 사본에는 넣지 않는다(보고자 칸으로 충분) ([#39](https://github.com/nz-sdk/ai_skills/pull/39))
 * **issue-sync-install:** Jira 의 한 줄 코드 블록이 GitHub 본문을 잘라 덮어쓰던 문제 · GitHub 사본 본문만 고쳐도 Jira 원본 요약에 앞말(task: 등)이 붙던 문제 · 상위 칸을 맞출 때 생기던 끝 빈 줄 ([#37](https://github.com/nz-sdk/ai_skills/pull/37))
 * **report-issue:** Atlassian MCP v2 도구 이름 · 인자로 바꾼다 — v2 만 붙으면 등록 · 댓글 · 사람 찾기가 실패하고 담당이 조용히 비던 문제. 담당은 `{"accountId": …}` 로 쓰고 다시 읽어 대조, 사본은 짝 표시로 먼저 찾고, 진행 중 전환은 범주로 고른다 ([#32](https://github.com/nz-sdk/ai_skills/pull/32))

@@ -12,6 +12,12 @@
 #   사본 작성자는 늘 토큰 주인(github-actions · Jira 규칙)이라 누가 등록했는지를 본문에 남긴다. 사본을 고쳐 원본 쪽으로 보낼 때는 뗀다
 # 레이블 — 동기화용 라벨(jira · github · gh-*)은 빼고 양쪽을 맞춘다. Jira 레이블은 띄어쓰기를 못 써 GitHub 라벨의 띄어쓰기는 _ 로 바꾼다
 # 닫을 때 — GitHub 닫힘 · Jira 완료 범주면 본문 할 일 「- [ ]」 → 「- [x]」(Jira 설명의 ☐ → ☒ 는 규칙이 한다). 다시 열 때는 그대로
+# 상위 — 본문에 「### 상위 에픽 키」 칸이 있으면 Jira → GitHub 때 그 칸을 「[키 · 에픽 이름](링크)」 하나로 맞추고 사본 출처의 「상위 :」 줄은 넣지 않는다
+#   (칸이 없으면 출처의 상위 줄). GitHub → Jira 는 칸에서 키만 읽는다 — 키만 써도, 링크여도 된다. 글만 바뀌고 키가 같으면 상위 변경이 아니다
+# Jira 상태 — 새 규칙 ⑤가 status 에 「범주|상태 이름|해결」 을 실으면 GitHub 라벨 「jira:<상태 이름>」 하나를 붙인다(옛 jira:* 는 뗀다).
+#   해결이 대조표 spaces.<스페이스>.notPlannedResolutions 에 있으면 닫힘 이유 not planned. 옛 규칙(범주만)이면 열림 · 닫힘만
+#   jira:* 는 동기화용 라벨 — Jira 레이블로 보내지 않고, GitHub 에서 사람이 붙이거나 떼도 Jira 로 가지 않는다
+# 담당 — Jira 담당은 한 명이다. GitHub 담당이 여럿이면 첫 번째만 보내고 실행 요약 · notice 에 알린다
 #
 # 짝 찾기 (라벨 · 입력값에 기대지 않고 GitHub 안의 표시로 찾는다)
 #   GitHub 사본   제목 [JIRA 키] + 라벨 jira        → Jira 가 원본
@@ -72,7 +78,7 @@ on:
         description: '업무 유형 이름'
         required: false
       status:
-        description: '상태 분류 키 (new · indeterminate · done)'
+        description: '상태 — 범주 키(new · indeterminate · done) 또는 「범주|상태 이름|해결」 · edit 은 「옛 레이블|새 레이블」'
         required: false
       assignee:
         description: '담당자 accountId'
@@ -122,13 +128,19 @@ jobs:
         id: d
         run: |
           # 상위 에픽 키 — 양식 칸 「### 상위 에픽 키」 를 읽는 함수(Build payload 도 쓴다)
-          #   epic_raw: 칸의 첫 글줄 그대로(슬랙에 「적은 값」 으로) · epic_of: 그 칸의 키 모양만 대문자로(링크 · 소문자도 받는다)
+          #   epic_raw: 칸의 첫 글줄(링크면 글자만 · 슬랙에 「적은 값」 으로) · epic_of: 그 칸의 키 모양만 대문자로(「[키 · 이름](링크)」 · 소문자도 받는다)
           cat > "$RUNNER_TEMP/epic.sh" <<'SH'
-          epic_raw() { perl -CSD -Mutf8 -0ne 'if (/^###[ \t]*상위 에픽 키[ \t]*\r?\n(.*?)(?=^###[ \t]|\z)/ms) { my ($l) = grep { /\S/ } split /\r?\n/, $1; $l //= ""; $l =~ s/^\s+|\s+$//g; print substr($l, 0, 80) }'; }
+          epic_raw() { perl -CSD -Mutf8 -0ne 'if (/^###[ \t]*상위 에픽 키[ \t]*\r?\n(.*?)(?=^###[ \t]|\z)/ms) { my ($l) = grep { /\S/ } split /\r?\n/, $1; $l //= ""; $l =~ s/\[((?:\\.|[^\]\\])*)\]\([^)\s]*\)/$1/g; $l =~ s/\\([][])/$1/g; $l =~ s/^\s+|\s+$//g; print substr($l, 0, 80) }'; }
           epic_of()  { perl -CSD -Mutf8 -0ne 'if (/^###[ \t]*상위 에픽 키[ \t]*\r?\n(.*?)(?=^###[ \t]|\z)/ms) { my $s = $1; print uc $1 if $s =~ /\b([A-Za-z][A-Za-z0-9]*-[0-9]+)\b/ }'; }
           has_epic() { grep -qE '^###[[:space:]]*상위 에픽 키'; }
-          # 동기화가 쓰는 라벨 — 양쪽 레이블 맞추기에서 뺀다
-          is_sync_label() { case "$1" in jira|github|gh-*) return 0 ;; esac; return 1; }
+          # 상위가 바뀌었나 — 새 본문 · 옛 본문(글). 키가 있고 같으면 칸 글(링크 · 이름)만 바뀌어도 아니다. 키가 없으면 적은 글이 바뀐 것
+          epic_changed() {
+            local nk ok; nk=$(printf '%s' "$1" | epic_of); ok=$(printf '%s' "$2" | epic_of)
+            [ "$nk" != "$ok" ] && return 0
+            [ -z "$nk" ] && [ "$(printf '%s' "$1" | epic_raw)" != "$(printf '%s' "$2" | epic_raw)" ]
+          }
+          # 동기화가 쓰는 라벨 — 양쪽 레이블 맞추기에서 뺀다(jira:* = Jira 상태 라벨)
+          is_sync_label() { case "$1" in jira|github|gh-*|jira:*) return 0 ;; esac; return 1; }
           SH
           . "$RUNNER_TEMP/epic.sh"
 
@@ -173,7 +185,7 @@ jobs:
               old=$(jq -r '.changes.body.from // ""' "$ev")
               if [ "$kind" = edit ] && [ -z "$copy" ] && jq -e '.changes.body' "$ev" >/dev/null \
                  && printf '%s' "$body" | has_epic \
-                 && [ "$(printf '%s' "$body" | epic_raw)" != "$(printf '%s' "$old" | epic_raw)" ]; then
+                 && epic_changed "$body" "$old"; then
                 echo "짝 없음 · 상위 에픽 키가 바뀜 — 다시 등록한다"; kind=create
               else
                 echo "짝 없음 — 건너뛴다"; kind=""
@@ -227,6 +239,14 @@ jobs:
           reg_line() { local n; n=$(gh api "users/$1" --jq '.name // ""' 2>/dev/null || true); printf '등록: %s(@%s)' "${n:-$1}" "$1"; }
           # 사본 본문 맨 위 등록자 줄을 뗀다(원본 쪽으로 보내지 않는다)
           strip_reg() { perl -CSD -Mutf8 -0pe 's/\A\s*등록: [^\n]*\n+//'; }
+          # 담당은 한 명 — Jira 담당 칸은 한 사람뿐이라 GitHub 담당이 여럿이면 첫 번째만 보낸다(정책) · 실행 요약 · notice 로 알린다
+          one_assignee_note() {
+            local c; c=$(jq '.issue.assignees // [] | length' "$ev")
+            [ "$c" -gt 1 ] || return 0
+            local msg="Jira 담당은 한 명 — 첫 번째(@$1)만 보낸다(GitHub 담당 ${c}명)"
+            echo "::notice::#$number $msg"
+            echo "- #$number $msg" >> "$GITHUB_STEP_SUMMARY"
+          }
 
           number=$(jq -r '.issue.number' "$ev")
           title=$(jq -r '.issue.title' "$ev")
@@ -243,6 +263,7 @@ jobs:
             assignee=$(acct "$first")
             [ -n "$reporter" ] || echo "::notice::$opener 는 대조표 people 에 없다 — 보고자는 규칙 기본값"
             [ -z "$first" ] || [ -n "$assignee" ] || echo "::notice::담당 $first 는 대조표 people 에 없다 — 담당 없음"
+            one_assignee_note "$first"
             startField=$(S="$JIRA_SPACE" yq -r '.spaces[strenv(S)].startDateField // ""' "$MAP")
             startDate=$(TZ=Asia/Seoul date -d "$(jq -r '.issue.created_at' "$ev")" +%F)
             # 상위 에픽 — 규칙 ①이 키를 조회해 있는 에픽이면 사본을 만들고, 없으면(0건) 슬랙으로 알리고 멈춘다
@@ -263,7 +284,7 @@ jobs:
                               startDate: $sd, startDateField: $sf,
                               epicKey: (if $ek == "" then null else $ek end), epicRaw: $er,
                               actor: (.sender.login // ""),
-                              labels: [ .issue.labels[].name | select((. == "jira" or . == "github" or startswith("gh-")) | not) | gsub("\\s+"; "_") ] }' \
+                              labels: [ .issue.labels[].name | select((. == "jira" or . == "github" or startswith("gh-") or startswith("jira:")) | not) | gsub("\\s+"; "_") ] }' \
                "$ev" > "$RUNNER_TEMP/payload.json"
             jq '.bridge' "$RUNNER_TEMP/payload.json"
             exit 0
@@ -302,7 +323,8 @@ jobs:
             assign)
               first=$(jq -r '.issue.assignees[0].login // ""' "$ev")
               assignee=$(acct "$first")
-              [ -z "$first" ] || [ -n "$assignee" ] || echo "::notice::담당 $first 는 대조표에 없다 — Jira 담당을 비운다" ;;
+              [ -z "$first" ] || [ -n "$assignee" ] || echo "::notice::담당 $first 는 대조표에 없다 — Jira 담당을 비운다"
+              one_assignee_note "$first" ;;
             comment)
               who=$(jq -r '.comment.user.login' "$ev")
               text=$(jq -r '.comment.body // ""' "$ev" | tojira | mention)
@@ -310,10 +332,11 @@ jobs:
           esac
 
           # 상위 에픽 — 원본 본문의 「상위 에픽 키」 칸이 바뀐 수정만 epicChanged=true. 규칙 ①이 조회해 있으면 상위를 바꾸고, 없으면 슬랙
+          #   칸이 「키」 → 「[키 · 이름](링크)」 처럼 글만 바뀌고 키가 같으면 바뀐 것이 아니다(epic_changed)
           epicKey=""; epicRaw=""; epicChanged=false
           if [ "$KIND" = edit ] && [ "$ROLE" = original ] && jq -e '.changes.body' "$ev" >/dev/null; then
             epicRaw=$(jq -r '.issue.body // ""' "$ev" | epic_raw)
-            if [ "$epicRaw" != "$(jq -r '.changes.body.from // ""' "$ev" | epic_raw)" ]; then
+            if epic_changed "$(jq -r '.issue.body // ""' "$ev")" "$(jq -r '.changes.body.from // ""' "$ev")"; then
               epicChanged=true
               epicKey=$(jq -r '.issue.body // ""' "$ev" | epic_of)
               [[ "$epicKey" =~ ^${JIRA_SPACE}-[0-9]+$ ]] || epicKey=""
@@ -465,8 +488,8 @@ jobs:
           site=$(yq -r '.jira.site' "$MAP")
           # Jira accountId → 대조표 GitHub 아이디
           login_of() { [ -z "$1" ] || A="$1" yq -r '.people // {} | to_entries | map(select(.value.jiraAccountId == strenv(A))) | .[0].key // ""' "$MAP"; }
-          # 동기화가 쓰는 라벨 — 양쪽 레이블 맞추기에서 뺀다
-          is_sync_label() { case "$1" in jira|github|gh-*) return 0 ;; esac; return 1; }
+          # 동기화가 쓰는 라벨 — 양쪽 레이블 맞추기에서 뺀다(jira:* = Jira 상태 라벨)
+          is_sync_label() { case "$1" in jira|github|gh-*|jira:*) return 0 ;; esac; return 1; }
           # 등록자 줄 — PERSON 「accountId|이름」 → 「등록: 이름(@아이디)」 · GitHub 계정이 없으면 「등록: 이름(Jira)」 · 비면 빈 글자
           reg_of_person() {
             local a n l; [[ "$PERSON" == *"|"* ]] || return 0
@@ -487,6 +510,18 @@ jobs:
           tojira() { pandoc -f gfm+hard_line_breaks-gfm_auto_identifiers -t jira --wrap=none | sed -E 's/\{anchor:[^}]*\}//g'; }
           # GitHub 본문 「상위 에픽 키」 칸의 키(대문자) — 칸이 없거나 키가 없으면 빈 글자
           epic_cell() { perl -CSD -Mutf8 -0ne 'if (/^###[ \t]*상위 에픽 키[ \t]*\r?\n(.*?)(?=^###[ \t]|^<!-- jira:|\z)/ms) { my $s = $1; print uc $1 if $s =~ /\b([A-Za-z][A-Za-z0-9]*-[0-9]+)\b/ }'; }
+          # 「상위 에픽 키」 칸이 있나 · 칸 글(비교용 — 역슬래시 · 공백 차이는 같다고 본다) · 칸 글 바꾸기(값은 인자 — 한글 이름이 깨지지 않게 -CA)
+          has_epic_cell() { grep -qE '^###[[:space:]]*상위 에픽 키'; }
+          epic_cell_norm() { perl -CSD -Mutf8 -0ne 'if (/^###[ \t]*상위 에픽 키[ \t]*\r?\n(.*?)(?=^###[ \t]|^<!-- jira:|\z)/ms) { my $s = $1; $s =~ s/\\//g; $s =~ s/\s+/ /g; $s =~ s/^ | $//g; print $s }'; }
+          norm_text() { perl -CSDA -Mutf8 -e 'my $s = shift; $s =~ s/\\//g; $s =~ s/\s+/ /g; $s =~ s/^ | $//g; print $s' "$1"; }
+          set_epic_cell() { perl -CSDA -Mutf8 -0pe 'BEGIN { $v = shift @ARGV } s/^(###[ \t]*상위 에픽 키[ \t]*\r?\n).*?(?=^###[ \t]|^<!-- jira:|\z)/$1\n$v\n\n/ms' "$1"; }
+          # 상위 링크 「[키 · 에픽 이름](https://사이트/browse/키)」 — PARENT 「키|요약」 에서. 키가 없으면 빈 글자 · 이름이 없으면 「[키](링크)」
+          epic_link() {
+            local pk ps pt; pk="${PARENT%%|*}"; ps=""; [[ "$PARENT" == *"|"* ]] && ps="${PARENT#*|}"
+            [[ "$pk" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]] || return 0
+            pt=$(printf '%s%s' "$pk" "${ps:+ · $ps}" | sed -E 's/([][])/\\\1/g')
+            printf '[%s](https://%s/browse/%s)' "$pt" "$site" "$pk"
+          }
           # Jira 업무 유형 → GitHub Type (대조표에 스페이스가 없으면 기본 이름으로)
           gtype_of() {
             local t; t=$(T="$TYPE" S="${KEY%%-*}" yq -r '.spaces[strenv(S)].issueTypes // {} | to_entries | map(select(.value == strenv(T))) | .[0].key // ""' "$MAP")
@@ -501,18 +536,52 @@ jobs:
             printf '[JIRA %s] %s: %s' "$KEY" "$p" "$SUMMARY"
           }
           # GitHub 사본 본문 — 맨 위 등록자 줄(REG) · 설명 · 맨 아래 출처(Jira : [키 · 요약](링크) · 상위 : [에픽 키 · 요약](링크)) · 맨 끝 표시. 링크 글자 안의 [ ] 는 이스케이프한다
+          # 설명에 「상위 에픽 키」 칸이 있으면 상위는 그 칸 하나(「[키 · 이름](링크)」)로 — 출처의 「상위 :」 줄은 넣지 않는다(두 번 보이지 않게)
           # 상위 줄은 사람이 보는 안내다 — 짝 찾기는 <!-- jira:키 --> · 제목 [JIRA 키] 만 보고, 사본 수정(role=copy)은 등록자 줄 · 출처 칸째 떼고 Jira 로 보낸다
           copy_body() {
-            local lt pk ps pt; lt=$(printf '%s · %s' "$KEY" "$SUMMARY" | sed -E 's/([][])/\\\1/g')
+            local lt link incell=""; lt=$(printf '%s · %s' "$KEY" "$SUMMARY" | sed -E 's/([][])/\\\1/g')
+            link=$(epic_link)
             if [ -n "${REG:-}" ]; then printf '%s\n\n' "$REG"; fi
-            if [ -n "$BODY" ]; then printf '%s\n' "$BODY" | strip_reg | fromjira; printf '\n'; fi
-            printf '### 출처\n\nJira : [%s](https://%s/browse/%s)\n\n' "$lt" "$site" "$KEY"
-            pk="${PARENT%%|*}"; ps=""; [[ "$PARENT" == *"|"* ]] && ps="${PARENT#*|}"
-            if [[ "$pk" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]]; then
-              pt=$(printf '%s%s' "$pk" "${ps:+ · $ps}" | sed -E 's/([][])/\\\1/g')
-              printf '상위 : [%s](https://%s/browse/%s)\n\n' "$pt" "$site" "$pk"
+            if [ -n "$BODY" ]; then
+              printf '%s\n' "$BODY" | strip_reg | fromjira > "$RUNNER_TEMP/cb.md"
+              if [ -n "$link" ] && has_epic_cell < "$RUNNER_TEMP/cb.md"; then
+                set_epic_cell "$link" < "$RUNNER_TEMP/cb.md" > "$RUNNER_TEMP/cb2.md" && mv "$RUNNER_TEMP/cb2.md" "$RUNNER_TEMP/cb.md"
+                incell=1
+              fi
+              cat "$RUNNER_TEMP/cb.md"; printf '\n'
             fi
+            printf '### 출처\n\nJira : [%s](https://%s/browse/%s)\n\n' "$lt" "$site" "$KEY"
+            if [ -n "$link" ] && [ -z "$incell" ]; then printf '상위 : %s\n\n' "$link"; fi
             printf '<!-- jira:%s -->\n' "$KEY"
+          }
+          # STATUS → ST_CAT · ST_NAME · ST_RES. 새 규칙은 「범주|상태 이름|해결」(ST_NEW=1), 옛 규칙은 범주만(ST_NAME 빈 값 — 라벨 안 건드림)
+          #   범주 키로 시작하는 「a|…」 만 상태로 본다(edit 의 「옛 레이블|새 레이블」 과 헷갈리지 않게)
+          parse_status() {
+            ST_CAT="$STATUS"; ST_NAME=""; ST_RES=""; ST_NEW=""
+            [[ "$STATUS" =~ ^(new|indeterminate|done|undefined)\| ]] || return 0
+            local rest; ST_NEW=1; ST_CAT="${STATUS%%|*}"; rest="${STATUS#*|}"
+            if [[ "$rest" == *"|"* ]]; then ST_NAME="${rest%|*}"; ST_RES="${rest##*|}"; else ST_NAME="$rest"; fi
+            ST_NAME=$(printf '%s' "$ST_NAME" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g'); ST_RES=$(printf '%s' "$ST_RES" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+          }
+          # 해결 이름이 대조표 spaces.<스페이스>.notPlannedResolutions 에 있으면 참 — 닫힘 이유 not planned
+          not_planned() { [ -n "$1" ] && [ "$(S="${KEY%%-*}" R="$1" yq -r '.spaces[strenv(S)].notPlannedResolutions // [] | map(select(. == strenv(R))) | length' "$MAP")" -gt 0 ]; }
+          # Jira 상태 라벨 「jira:<상태 이름>」 하나로 맞춘다 — 인자: 이슈 번호 · 상태 이름 · 범주(라벨 색). 다른 jira:* 는 뗀다
+          #   이름에 쉼표가 있어도 되게 REST 로 붙이고 뗀다 · 라벨 이름은 50자까지
+          status_label() {
+            local n="$1" want cat="$3" color have l
+            want=$(perl -CSDA -e 'my $s = "jira:" . shift; $s =~ s/\s+/ /g; $s =~ s/^\s+|\s+$//g; print substr($s, 0, 50)' "$2")
+            [ "$want" != "jira:" ] || return 0
+            case "$cat" in new) color=DFE1E6 ;; indeterminate) color=0065FF ;; done) color=36B37E ;; *) color=EDEDED ;; esac
+            gh api "repos/$GH_REPO/issues/$n/labels?per_page=100" --jq '.[].name' > "$RUNNER_TEMP/have-status.txt"
+            have=""
+            while IFS= read -r l; do
+              case "$l" in jira:*) ;; *) continue ;; esac
+              if [ "$l" = "$want" ]; then have=1; continue; fi
+              if gh api -X DELETE "repos/$GH_REPO/issues/$n/labels/$(jq -rn --arg s "$l" '$s | @uri')" >/dev/null; then echo "라벨 -$l"; else echo "::warning::라벨 $l 를 떼지 못했다"; fi
+            done < "$RUNNER_TEMP/have-status.txt"
+            [ -z "$have" ] || { echo "상태 라벨 같음 ($want)"; return 0; }
+            gh label create "$want" --color "$color" --description 'Jira 상태' >/dev/null 2>&1 || true
+            if jq -n --arg l "$want" '{labels: [$l]}' | gh api -X POST "repos/$GH_REPO/issues/$n/labels" --input - >/dev/null; then echo "라벨 +$want"; else echo "::warning::라벨 $want 를 붙이지 못했다"; fi
           }
           EOF
 
@@ -546,6 +615,9 @@ jobs:
               || echo "::warning::담당 $login 을 넣지 못했다 — #$n Assignee 비어 있음"
           fi
           echo "created #$n"
+          # 규칙 ②가 status 에 「범주|상태 이름|해결」 을 실으면 지금 상태 라벨을 붙인다(옛 규칙은 status 없음 — 첫 전환 때 붙는다)
+          parse_status
+          [ -z "$ST_NAME" ] || status_label "$n" "$ST_NAME" "$ST_CAT" || true
           echo "- [$KEY] → #$n 사본 · Type $gtype · 담당 ${login:-없음}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Link original
@@ -607,11 +679,16 @@ jobs:
               fi
             fi
             # 「상위 에픽 키」 칸은 실제 Jira 상위를 따른다 — Jira 에서 상위를 바꾸거나 설명의 키 글자를 고쳐도 원본 본문은 실제 상위 키
-            # (칸 한 줄만 바꾸고 나머지 본문은 건드리지 않는다)
-            pk="${PARENT%%|*}"
-            if [[ "$pk" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]] && [ "$(epic_cell < "$RUNNER_TEMP/body.md")" != "$pk" ]; then
-              PK="$pk" perl -CSD -Mutf8 -0pi -e 's/^(###[ \t]*상위 에픽 키[ \t]*\r?\n).*?(?=^###[ \t]|^<!-- jira:|\z)/$1\n$ENV{PK}\n\n/ms' "$RUNNER_TEMP/body.md"
-              [ "$(epic_cell < "$RUNNER_TEMP/body.md")" = "$pk" ] && cellchanged=1
+            # (칸 한 줄만 바꾸고 나머지 본문은 건드리지 않는다). PARENT 에 요약이 오면 칸은 「[키 · 에픽 이름](링크)」 — 키가 같아도 글이 다르면(이름 바뀜 · 키만 적음) 맞춘다
+            # 요약이 없으면(빈 이름) 옛 동작 — 키만 비교해 키를 쓴다
+            pk="${PARENT%%|*}"; ps=""; [[ "$PARENT" == *"|"* ]] && ps="${PARENT#*|}"
+            if [[ "$pk" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]] && has_epic_cell < "$RUNNER_TEMP/body.md"; then
+              if [ -n "$ps" ]; then want=$(epic_link); else want="$pk"; fi
+              if [ "$(epic_cell < "$RUNNER_TEMP/body.md")" != "$pk" ] \
+                 || { [ -n "$ps" ] && [ "$(epic_cell_norm < "$RUNNER_TEMP/body.md")" != "$(norm_text "$want")" ]; }; then
+                set_epic_cell "$want" < "$RUNNER_TEMP/body.md" > "$RUNNER_TEMP/body-cell.md" && mv "$RUNNER_TEMP/body-cell.md" "$RUNNER_TEMP/body.md"
+                [ "$(epic_cell < "$RUNNER_TEMP/body.md")" = "$pk" ] && cellchanged=1
+              fi
             fi
           fi
 
@@ -689,22 +766,36 @@ jobs:
           NUMBER: ${{ steps.p.outputs.number }}
         run: |
           . "$RUNNER_TEMP/lib.sh"
-          state=$(gh issue view "$NUMBER" --json state --jq .state)
-          if [ "$STATUS" = done ] && [ "$state" = OPEN ]; then
-            gh issue close "$NUMBER" --reason completed >/dev/null; echo "닫음"
-          elif [ "$STATUS" != done ] && [ "$state" = CLOSED ]; then
+          # status — 옛 규칙 ⑤ 「범주」 · 새 규칙 ⑤ 「범주|상태 이름|해결」(ST_CAT · ST_NAME · ST_RES)
+          parse_status
+          reason=completed; api_reason=completed
+          if [ "$ST_CAT" = done ] && not_planned "$ST_RES"; then reason="not planned"; api_reason=not_planned; fi
+          gh issue view "$NUMBER" --json state,stateReason > "$RUNNER_TEMP/state.json"
+          state=$(jq -r .state "$RUNNER_TEMP/state.json"); sreason=$(jq -r '.stateReason // ""' "$RUNNER_TEMP/state.json")
+          if [ "$ST_CAT" = done ] && [ "$state" = OPEN ]; then
+            gh issue close "$NUMBER" --reason "$reason" >/dev/null; echo "닫음 ($reason)"
+          elif [ "$ST_CAT" != done ] && [ "$state" = CLOSED ]; then
             gh issue reopen "$NUMBER" >/dev/null; echo "다시 엶"
+          elif [ -n "$ST_NEW" ] && [ "$ST_CAT" = done ] && [ "${sreason,,}" != "$api_reason" ]; then
+            # 이미 닫혔는데 이유가 다르다(완료 범주 안에서 완료 ↔ 안 함 등) — 이유만 바꾼다
+            if jq -n --arg r "$api_reason" '{state: "closed", state_reason: $r}' | gh api -X PATCH "repos/$GH_REPO/issues/$NUMBER" --input - >/dev/null; then
+              echo "닫힘 이유: ${sreason:-없음} → $api_reason"
+            else
+              echo "::warning::닫힘 이유를 바꾸지 못했다 — 그대로 ${sreason:-없음}"
+            fi
           else
-            echo "상태 같음 ($STATUS · $state)"
+            echo "상태 같음 ($ST_CAT · $state)"
           fi
+          # 새 규칙이면 상태 라벨 「jira:<상태 이름>」 하나 — 옛 규칙(범주만)이면 라벨을 건드리지 않는다
+          [ -z "$ST_NAME" ] || status_label "$NUMBER" "$ST_NAME" "$ST_CAT" || true
           # 완료 범주면 본문 할 일을 모두 체크한다(다시 열 때는 그대로) — Jira 설명의 ☐ → ☒ 는 규칙 ⑤가 한다
-          if [ "$STATUS" = done ]; then
+          if [ "$ST_CAT" = done ]; then
             gh issue view "$NUMBER" --json body --jq '.body // ""' > "$RUNNER_TEMP/now.md"
             check_all < "$RUNNER_TEMP/now.md" > "$RUNNER_TEMP/checked.md"
             if cmp -s "$RUNNER_TEMP/now.md" "$RUNNER_TEMP/checked.md"; then echo "체크할 것 없음"
             else gh issue edit "$NUMBER" --body-file "$RUNNER_TEMP/checked.md" >/dev/null; echo "할 일 모두 체크"; fi
           fi
-          echo "- [$KEY] $STATUS → #$NUMBER" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [$KEY] $ST_CAT${ST_NAME:+ · $ST_NAME}${ST_RES:+ · 해결 $ST_RES} → #$NUMBER" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Add comment
         if: steps.p.outputs.go == '1' && steps.p.outputs.kind == 'comment'

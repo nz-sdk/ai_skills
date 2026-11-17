@@ -6,6 +6,9 @@ description: 새 기능 · 개선 요청
 title: "feat: "
 type: Feature
 body:
+  - type: markdown
+    attributes:
+      value: 담당(Assignees)은 **한 명**만 지정한다 — Jira 담당 칸은 한 명뿐이라 여럿이면 첫 번째 사람만 Jira 로 간다.
   - type: input
     id: screen
     attributes:
@@ -17,7 +20,7 @@ body:
     id: epic
     attributes:
       label: 상위 에픽 키
-      description: Jira 상위 항목(에픽) 키 — 화면 에픽이 없는 일은 공통 에픽 키
+      description: Jira 상위 항목(에픽) 키 — 화면 에픽이 없는 일은 공통 에픽 키. 키만 적으면 된다(동기화가 「키 · 에픽 이름」 링크로 맞출 수 있다)
       placeholder: TEST1-1
     validations:
       required: true

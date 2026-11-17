@@ -8,7 +8,7 @@
 #                kind = create(사본 등록) · link(원본에 짝 표시) · edit · transition · comment
 #                새 규칙은 kind 에 「|덧붙임」 을 싣는다 — edit|<바뀐 칸,…> · comment|<댓글 id>[|edit] (옛 규칙의 kind 는 옛 동작)
 #
-# 등록자 줄 — Jira 원본의 GitHub 사본 맨 위에만 「등록: 이름(Jira)」(사본 작성자가 늘 github-actions 라서). 사본을 고쳐 원본 쪽으로 보낼 때는 뗀다
+# 등록자 줄 — Jira 원본의 GitHub 사본 맨 위에, 보고자가 GitHub 계정이 없을 때만 「등록: 이름(Jira)」(사본 작성자가 늘 github-actions 라서). 사본을 고쳐 원본 쪽으로 보낼 때는 뗀다
 #   GitHub 원본의 Jira 사본에는 넣지 않는다 — Jira 보고자 칸에 등록한 사람이 들어간다
 # 레이블 — 동기화용 라벨(jira · github · gh-*)은 빼고 양쪽을 맞춘다. Jira 레이블은 띄어쓰기를 못 써 GitHub 라벨의 띄어쓰기는 _ 로 바꾼다
 # 닫을 때 — GitHub 닫힘 · Jira 완료 범주면 본문 할 일 「- [ ]」 → 「- [x]」(Jira 설명의 ☐ → ☒ 는 규칙이 한다). 다시 열 때는 그대로
@@ -488,11 +488,12 @@ jobs:
           login_of() { [ -z "$1" ] || A="$1" yq -r '.people // {} | to_entries | map(select(.value.jiraAccountId == strenv(A))) | .[0].key // ""' "$MAP"; }
           # 동기화가 쓰는 라벨 — 양쪽 레이블 맞추기에서 뺀다(jira:* = Jira 상태 라벨)
           is_sync_label() { case "$1" in jira|github|gh-*|jira:*) return 0 ;; esac; return 1; }
-          # 등록자 줄 — PERSON 「accountId|이름」 → 「등록: 이름(Jira)」(Jira 표시 이름) · 비면 빈 글자
-          # Jira 에 등록하는 사람은 GitHub 계정이 없다는 원칙이라 이름(Jira) 하나로 쓴다 — 사본 작성자는 늘 github-actions 라 이 줄로 누가 올렸는지 안다
+          # 등록자 줄 — PERSON 「accountId|이름」 의 보고자가 GitHub 계정이 없을 때(대조표 people 에 없음)만 「등록: 이름(Jira)」
+          # GitHub 계정이 있는 사람이 Jira 에 등록했으면 줄을 넣지 않는다 · PERSON 이 비면 빈 글자
           reg_of_person() {
-            local n; [[ "$PERSON" == *"|"* ]] || return 0
-            n="${PERSON#*|}"; [ -n "$n" ] || return 0
+            local a n; [[ "$PERSON" == *"|"* ]] || return 0
+            a="${PERSON%%|*}"; n="${PERSON#*|}"; [ -n "$n" ] || return 0
+            [ -z "$(login_of "$a")" ] || return 0
             printf '등록: %s(Jira)' "$n"
           }
           # 위키 · 마크다운 맨 위 등록자 줄을 뗀다(사본 쪽에만 있는 줄 — 원본으로 보내지 않는다)
@@ -650,8 +651,9 @@ jobs:
           if [ "$ROLE" = jira-original ]; then
             # GitHub 사본 — 등록 때와 같은 제목 · 본문 모양. 등록자 줄은 person(보고자)이 오면 그것, 없으면 지금 사본 맨 위 줄을 지킨다
             title=$(copy_title "$(gtype_of)")
-            REG=$(reg_of_person)
-            [ -n "$REG" ] || REG=$(jq -r '.body // ""' "$RUNNER_TEMP/now.json" | head -1 | tr -d '\r' | grep -E '^등록: ' || true)
+            # 보고자가 오면(새 규칙) 그 기준으로 다시 정한다 — GitHub 계정이 있는 사람이면 옛 줄도 없어진다. 안 오면(옛 규칙) 지금 첫 줄을 지킨다
+            if [[ "$PERSON" == *"|"* ]]; then REG=$(reg_of_person)
+            else REG=$(jq -r '.body // ""' "$RUNNER_TEMP/now.json" | head -1 | tr -d '\r' | grep -E '^등록: ' || true); fi
             copy_body > "$RUNNER_TEMP/body.md"
           else
             # GitHub 원본 — 사본 요약의 [GH #n] · 설명 맨 아래 출처 블록을 떼고, 원본 표시는 지킨다

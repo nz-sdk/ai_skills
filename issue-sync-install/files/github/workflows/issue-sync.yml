@@ -276,9 +276,19 @@ jobs:
               jq -r '.issue.body // ""' "$ev" > "$RUNNER_TEMP/body.md"
               perl -0pi -e 's/\n*<!-- jira:[A-Z][A-Z0-9]+-[0-9]+ -->\s*\z//' "$RUNNER_TEMP/body.md"
               if [ "$ROLE" = copy ]; then
+                # 지금 Jira 요약 = 사본 출처 줄 「Jira : [키 · 요약](링크)」 의 요약(N2 — 사본 제목의 앞말 task: 등이 Jira 로 새지 않게)
+                srcsum=$(K="$KEY" perl -CSD -Mutf8 -ne 'if (/^Jira : \[\Q$ENV{K}\E · (.*)\]\(https?:/) { my $s = $1; $s =~ s/\\([][])/$1/g; print $s; exit }' "$RUNNER_TEMP/body.md")
                 perl -0pi -e 's/\n*### 출처\n(?:(?!\n### ).)*\z//s' "$RUNNER_TEMP/body.md"
                 strip_reg < "$RUNNER_TEMP/body.md" > "$RUNNER_TEMP/body2.md"
                 summary="${title#\[JIRA $KEY\] }"
+                if ! jq -e '.changes.title' "$ev" >/dev/null; then
+                  # 제목은 그대로 — Jira 요약도 그대로 보낸다(출처 줄이 없으면 옛 동작)
+                  [ -z "$srcsum" ] || summary="$srcsum"
+                elif [ -n "$srcsum" ]; then
+                  # 제목을 바꿈 — 옛 사본 제목이 「앞말: 옛 요약」 이었으면 그 앞말(워크플로가 붙인 것)을 새 제목에서도 뗀다
+                  oldt=$(jq -r '.changes.title.from' "$ev"); oldt="${oldt#\[JIRA $KEY\] }"
+                  if [ "$oldt" != "$srcsum" ] && [[ "$oldt" == *": $srcsum" ]]; then pre="${oldt%": $srcsum"}: "; summary="${summary#"$pre"}"; fi
+                fi
                 desc=$(tojira < "$RUNNER_TEMP/body2.md")
               else
                 summary="[GH #$number] $title"
@@ -468,6 +478,11 @@ jobs:
           strip_reg() { perl -CSD -Mutf8 -0pe 's/\A\s*등록: [^\n]*\n+//'; }
           # 할 일 「- [ ]」 → 「- [x]」
           check_all() { perl -0pe 's/^([ \t]*(?:[-*+]|\d+[.)])[ \t]+)\[ \](?=[ \t]|$)/$1\[x\]/mg'; }
+          # Jira 위키 → GitHub 마크다운. Jira 는 한 줄 코드 블록을 {code:js}내용{code} 처럼 줄바꿈 없이 내보내는데
+          # pandoc 은 그러면 닫는 {code} 를 못 찾아 뒤 글을 모두 버린다(N5) — 여는 · 닫는 표시 앞뒤에 줄바꿈을 넣고 바꾼다
+          fromjira() { perl -0pe 's/(\{(?:code|noformat)(?::[^}\n]*)?\})(?!\n)/$1\n/g; s/(?<!\n)(\{(?:code|noformat)\})/\n$1/g' | pandoc -f jira -t gfm --wrap=none; }
+          # 변환 결과가 원문보다 크게 짧은지(공백 뺀 글자 수가 60% 밑) — 짧으면 본문을 덮어쓰지 않는다(원문이 200자 밑이면 검사하지 않음)
+          length_ok() { local a b; a=$(perl -CSD -0ne 's/\s//g; print length' "$1"); b=$(perl -CSD -0ne 's/\s//g; print length' "$2"); [ "$a" -lt 200 ] || [ $((b * 10)) -ge $((a * 6)) ]; }
           # GitHub 마크다운 → Jira 위키 (from-github 와 같은 변환)
           tojira() { pandoc -f gfm+hard_line_breaks-gfm_auto_identifiers -t jira --wrap=none | sed -E 's/\{anchor:[^}]*\}//g'; }
           # GitHub 본문 「상위 에픽 키」 칸의 키(대문자) — 칸이 없거나 키가 없으면 빈 글자
@@ -490,7 +505,7 @@ jobs:
           copy_body() {
             local lt pk ps pt; lt=$(printf '%s · %s' "$KEY" "$SUMMARY" | sed -E 's/([][])/\\\1/g')
             if [ -n "${REG:-}" ]; then printf '%s\n\n' "$REG"; fi
-            if [ -n "$BODY" ]; then printf '%s\n' "$BODY" | strip_reg | pandoc -f jira -t gfm --wrap=none; printf '\n'; fi
+            if [ -n "$BODY" ]; then printf '%s\n' "$BODY" | strip_reg | fromjira; printf '\n'; fi
             printf '### 출처\n\nJira : [%s](https://%s/browse/%s)\n\n' "$lt" "$site" "$KEY"
             pk="${PARENT%%|*}"; ps=""; [[ "$PARENT" == *"|"* ]] && ps="${PARENT#*|}"
             if [[ "$pk" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]]; then
@@ -571,7 +586,7 @@ jobs:
           else
             # GitHub 원본 — 사본 요약의 [GH #n] · 설명 맨 아래 출처 블록을 떼고, 원본 표시는 지킨다
             title=$(printf '%s' "$SUMMARY" | sed -E "s/^\[GH #${NUMBER}\] //")
-            jq -r '.body // ""' "$RUNNER_TEMP/now.json" > "$RUNNER_TEMP/now.md"
+            jq -j '.body // ""' "$RUNNER_TEMP/now.json" > "$RUNNER_TEMP/now.md"
             if [ -n "$NEW_RULE" ] && [ -n "$EXTRA" ] && [[ ",$EXTRA," != *",description,"* ]]; then
               # 새 규칙이 「설명은 안 바뀜」 이라고 알려 왔다 — 원본 본문은 그대로 두고 아래 「상위 에픽 키」 칸만 맞춘다
               # (Jira 설명을 변환해 덮어쓰면 담당 · 상위 · 제목만 바꿔도 원본 서식이 바뀐다)
@@ -582,9 +597,14 @@ jobs:
               [ -z "$NEW_RULE" ] || [ -n "$EXTRA" ] || echo "::notice::바뀐 칸 표시가 비었다 — Jira 설명으로 본문을 맞춘다(옛 동작)"
               printf '%s\n' "$BODY" | strip_reg | perl -0pe 's/\n*h3\. 출처\n(?:(?!\nh\d\. ).)*\z//s' > "$RUNNER_TEMP/desc.txt"
               {
-                if [ -s "$RUNNER_TEMP/desc.txt" ]; then pandoc -f jira -t gfm --wrap=none < "$RUNNER_TEMP/desc.txt"; fi
+                if [ -s "$RUNNER_TEMP/desc.txt" ]; then fromjira < "$RUNNER_TEMP/desc.txt"; fi
                 printf '\n<!-- jira:%s -->\n' "$KEY"
               } > "$RUNNER_TEMP/body.md"
+              # 변환이 글을 크게 잃었으면(닫히지 않은 매크로 등) 원본 본문을 덮어쓰지 않는다 — 제목 · 담당은 그대로 맞춘다
+              if [ -s "$RUNNER_TEMP/desc.txt" ] && ! length_ok "$RUNNER_TEMP/desc.txt" "$RUNNER_TEMP/body.md"; then
+                echo "::warning::Jira 설명 변환 결과가 원문보다 크게 짧다 — 원본 본문을 덮어쓰지 않는다"
+                cp "$RUNNER_TEMP/now.md" "$RUNNER_TEMP/body.md"
+              fi
             fi
             # 「상위 에픽 키」 칸은 실제 Jira 상위를 따른다 — Jira 에서 상위를 바꾸거나 설명의 키 글자를 고쳐도 원본 본문은 실제 상위 키
             # (칸 한 줄만 바꾸고 나머지 본문은 건드리지 않는다)
@@ -695,6 +715,7 @@ jobs:
           cid="${EXTRA%%|*}"; mode=""; [[ "$EXTRA" == *"|edit" ]] && mode=edit
           [[ -z "$cid" || "$cid" =~ ^[0-9]+$ ]] || { echo "::error::Jira 댓글 id 형식이 아니다: $EXTRA"; exit 1; }
           if [ "$mode" = edit ] && [ -z "$cid" ]; then echo "::error::댓글 수정에 Jira 댓글 id 가 없다"; exit 1; fi
+          . "$RUNNER_TEMP/lib.sh"
           # 멘션 [~accountid:…] → 대조표 @아이디(GitHub 계정 없는 사람은 「이름(Jira)」 글자)
           # 이름에 띄어쓰기가 있을 수 있어 줄 단위로 읽는다
           text="$BODY"
@@ -707,7 +728,7 @@ jobs:
           name=""; [[ "$PERSON" == *"|"* ]] && name="${PERSON#*|}"
           {
             printf '**%s** 님 Jira 댓글\n\n' "${name:-Jira 사용자}"
-            printf '%s\n' "$text" | pandoc -f jira -t gfm --wrap=none
+            printf '%s\n' "$text" | fromjira
             printf '\n<!-- sync:jira -->\n'
             [ -z "$cid" ] || printf '<!-- sync:jira:%s -->\n' "$cid"
           } > "$RUNNER_TEMP/c.md"

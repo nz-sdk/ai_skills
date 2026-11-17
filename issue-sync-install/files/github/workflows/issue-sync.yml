@@ -514,11 +514,11 @@ jobs:
           epic_cell_norm() { perl -CSD -Mutf8 -0ne 'if (/^###[ \t]*상위 에픽 키[ \t]*\r?\n(.*?)(?=^###[ \t]|^<!-- jira:|\z)/ms) { my $s = $1; $s =~ s/\\//g; $s =~ s/\s+/ /g; $s =~ s/^ | $//g; print $s }'; }
           norm_text() { perl -CSDA -Mutf8 -e 'my $s = shift; $s =~ s/\\//g; $s =~ s/\s+/ /g; $s =~ s/^ | $//g; print $s' "$1"; }
           set_epic_cell() { perl -CSDA -Mutf8 -0pe 'BEGIN { $v = shift @ARGV } s/^(###[ \t]*상위 에픽 키[ \t]*\r?\n).*?(?=^###[ \t]|^<!-- jira:|\z)/$1\n$v\n\n/ms' "$1"; }
-          # 상위 링크 「[키 · 에픽 이름](https://사이트/browse/키)」 — PARENT 「키|요약」 에서. 키가 없으면 빈 글자 · 이름이 없으면 「[키](링크)」
+          # 상위 링크 「[키 · 에픽 이름](https://사이트/browse/키)」 — PARENT 「키|요약」 에서. 키가 없으면 빈 글자 · 이름이 없으면 「[키](링크)」 · 이름 안 [ ] 는 ［ ］
           epic_link() {
             local pk ps pt; pk="${PARENT%%|*}"; ps=""; [[ "$PARENT" == *"|"* ]] && ps="${PARENT#*|}"
             [[ "$pk" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]] || return 0
-            pt=$(printf '%s%s' "$pk" "${ps:+ · $ps}" | sed -E 's/([][])/\\\1/g')
+            pt=$(printf '%s%s' "$pk" "${ps:+ · $ps}" | sed -e 's/\[/［/g; s/\]/］/g')   # Jira 위키 링크는 글자 안 [ ] 를 못 받는다 — 전각으로(제목 ft 와 같은 방식)
             printf '[%s](https://%s/browse/%s)' "$pt" "$site" "$pk"
           }
           # Jira 업무 유형 → GitHub Type (대조표에 스페이스가 없으면 기본 이름으로)

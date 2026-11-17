@@ -53,10 +53,10 @@ const forms = Object.fromEntries(['task', 'bug_report', 'feature_request', 'scre
 
 const ruleFiles = fs.readdirSync(rulesOut).filter(f => f.endsWith('.json')).sort();
 const rules = ruleFiles.map(f => { const j = JSON.parse(fs.readFileSync(path.join(rulesOut, f), 'utf8')); return { file: f, raw: fs.readFileSync(path.join(rulesOut, f), 'utf8'), rule: j.rules[0] }; });
-check(rules.length === 5, 'R0', '규칙 JSON 이 5개다', ruleFiles.join(' · '), `${rules.length}개 — ${ruleFiles.join(' · ')}`);
+check(rules.length === 6, 'R0', '규칙 JSON 이 6개다', ruleFiles.join(' · '), `${rules.length}개 — ${ruleFiles.join(' · ')}`);
 
 // ───────── 규칙 쪽 추출
-const BASE_NAMES = ['Github -> Jira Issue', 'Jira -> Github Issue', 'Jira 수정 -> Github Issue', 'Jira 댓글 → Github', 'Jira 상태 → Github'];
+const BASE_NAMES = ['Github -> Jira Issue', 'Jira -> Github Issue', 'Jira 수정 -> Github Issue', 'Jira 댓글 → Github', 'Jira 댓글 수정 → Github', 'Jira 상태 → Github'];
 const prefixes = uniq(rules.map(r => { const b = BASE_NAMES.find(n => r.rule.name.endsWith(n)); return b ? r.rule.name.slice(0, r.rule.name.length - b.length).trim() : null; }));
 const bodies = []; // 규칙 웹 요청 본문(customBody)
 const urls = [];
@@ -136,7 +136,7 @@ const screensAll = uniq(areaLists.screens);
   const flat = uniq(Object.values(all).flat());
   check(S && flat.length === 1, 'C3', '스페이스 키가 모든 곳에서 같다(워크플로 · Secret 이름 · 대조표 · 영역 · 규칙 JQL · 에픽 기본값)',
     `${S} · 프로젝트 id ${ariProj.join(',')}`, Object.entries(all).map(([k, v]) => `${k}=${v.join('/') || '없음'}`).join(' · '));
-  check(ariProj.length === 1, 'C3b', '규칙 5개의 범위(프로젝트)가 하나다', ariProj.join(','), `프로젝트 id ${ariProj.join(', ')}`);
+  check(ariProj.length === 1, 'C3b', '규칙 6개의 범위(프로젝트)가 하나다', ariProj.join(','), `프로젝트 id ${ariProj.join(', ')}`);
   info('C3c', '등록할 Secret 이름(저장소 Repository secrets)', secretRefs.sort().join(' · '));
   check(secretRefs.length === 2 && secretRefs.every(s => wf.includes('Secrets ' + secretRefs[0]) || true), 'C3d', '워크플로가 읽는 Secret 이 2개다(URL · TOKEN)', '', secretRefs.join(', '));
   const msgNames = [...wf.matchAll(/::error::Secrets (JIRA_[A-Z0-9]+_WEBHOOK_URL) · (JIRA_[A-Z0-9]+_WEBHOOK_TOKEN)/g)][0];
@@ -146,18 +146,18 @@ const screensAll = uniq(areaLists.screens);
 {
   const wfPrefix = (wf.match(/「(.+?) Github -> Jira Issue」/) || [])[1];
   const skillPrefixes = uniq([...skill.matchAll(/「(.+?) (?:Github|Jira) (?:-> |수정 -> )?(?:Jira Issue|Github Issue)」/g)].map(m => m[1]));
-  check(prefixes.length === 1 && prefixes[0], 'C4', '규칙 5개의 이름 접두사가 같고 5개 이름이 모두 있다', `접두사 ${prefixes[0]}`, `접두사: ${prefixes.map(p => p ?? '(이름 불일치)').join(' / ')}`);
+  check(prefixes.length === 1 && prefixes[0], 'C4', '규칙 6개의 이름 접두사가 같고 6개 이름이 모두 있다', `접두사 ${prefixes[0]}`, `접두사: ${prefixes.map(p => p ?? '(이름 불일치)').join(' / ')}`);
   check(!wfPrefix || wfPrefix === prefixes[0], 'C4b', '워크플로 머리 주석의 규칙 이름이 렌더한 규칙 이름과 같다', wfPrefix || '(주석 없음)', `워크플로=${wfPrefix} 규칙=${prefixes[0]}`);
   check(skillPrefixes.every(p => p === prefixes[0]), 'C4c', '스킬이 설명하는 규칙 이름이 렌더한 규칙 이름과 같다', skillPrefixes.join(',') || '(언급 없음)', `스킬=${skillPrefixes.join(',')} 규칙=${prefixes[0]}`);
 }
 // C5 웹 요청 대상
 {
   const targets = uniq(urls.map(u => (u.match(/repos\/([^/]+\/[^/]+)\/actions\/workflows\/([^/]+)\/dispatches/) || []).slice(1).join(' ')));
-  check(urls.length === 7 && targets.length === 1, 'C5', '웹 요청 7곳이 같은 저장소 · 같은 워크플로 파일을 가리킨다', targets[0] || '', `${urls.length}곳, 대상 ${targets.join(' | ')}`);
+  check(urls.length === 8 && targets.length === 1, 'C5', '웹 요청 8곳이 같은 저장소 · 같은 워크플로 파일을 가리킨다', targets[0] || '', `${urls.length}곳, 대상 ${targets.join(' | ')}`);
   const wfFile = (targets[0] || '').split(' ')[1];
   check(wfFile === 'issue-sync.yml' && fs.existsSync(T('.github/workflows/' + wfFile)), 'C5b', '가리키는 워크플로 파일이 저장소에 있다', wfFile, `${wfFile} 가 .github/workflows 에 없다`);
   const repos = uniq(targets.map(t => t.split(' ')[0]));
-  if (repoArg) check(repos.length === 1 && repos[0] === repoArg, 'C5c', `웹 요청 7곳의 저장소가 모두 --repo(${repoArg}) 와 같다`, repos[0], `웹 요청 저장소: ${repos.join(' | ')}`);
+  if (repoArg) check(repos.length === 1 && repos[0] === repoArg, 'C5c', `웹 요청 8곳의 저장소가 모두 --repo(${repoArg}) 와 같다`, repos[0], `웹 요청 저장소: ${repos.join(' | ')}`);
   else info('C5c', '웹 요청 저장소', repos.join(' | ') + ' — 설치 대상 저장소가 맞는지 눈으로 확인한다(--repo 로 검사 가능)');
 }
 // C6 입력 이름 · kind
@@ -165,10 +165,10 @@ const screensAll = uniq(areaLists.screens);
   const keys = uniq(bodies.flatMap(b => { const i = b.text.indexOf('"inputs"'); return i < 0 ? [] : [...b.text.slice(i).matchAll(/"([a-z_]+)"\s*:/g)].map(m => m[1]).filter(k => k !== 'inputs'); }));
   const unknown = keys.filter(k => !dispatchInputs.includes(k));
   check(dispatchInputs.length === 10, 'C6a', '워크플로 dispatch 입력이 10개다', dispatchInputs.join(', '), `${dispatchInputs.length}개: ${dispatchInputs.join(', ')}`);
-  check(bodies.length === 7 && unknown.length === 0, 'C6b', '규칙 본문의 입력 이름이 모두 워크플로 입력에 있다(422 방지)', `본문 ${bodies.length}곳 · 쓰는 이름 ${keys.join(', ')}`, `없는 입력: ${unknown.join(', ') || '-'} (본문 ${bodies.length}곳)`);
+  check(bodies.length === 8 && unknown.length === 0, 'C6b', '규칙 본문의 입력 이름이 모두 워크플로 입력에 있다(422 방지)', `본문 ${bodies.length}곳 · 쓰는 이름 ${keys.join(', ')}`, `없는 입력: ${unknown.join(', ') || '-'} (본문 ${bodies.length}곳)`);
   const noKK = bodies.filter(b => !/"kind"\s*:/.test(b.text) || !/"key"\s*:/.test(b.text));
   check(noKK.length === 0, 'C6c', '모든 본문에 kind · key 가 있다', '', noKK.map(b => b.file).join(', '));
-  const kinds = uniq(bodies.map(b => (b.text.match(/"kind"\s*:\s*"([a-z]+)"/) || [])[1]).filter(Boolean));
+  const kinds = uniq(bodies.map(b => (b.text.match(/"kind"\s*:\s*"([a-z]+)[|"]/) || [])[1]).filter(Boolean));   // 「종류|덧붙임」 도 종류만
   const unk = kinds.filter(k => !wfKinds.includes(k));
   check(wfKinds.length > 0 && unk.length === 0, 'C6d', '규칙이 보내는 kind 를 워크플로가 처리한다', `규칙 ${kinds.join(',')} ⊆ 워크플로 ${wfKinds.join(',')}`, `처리 못 하는 kind: ${unk.join(',')}`);
 }
@@ -218,11 +218,11 @@ const screensAll = uniq(areaLists.screens);
 // C12 가져오기 전 상태
 {
   const states = uniq(rules.map(r => r.rule.state));
-  if (states.length === 1 && states[0] === 'DISABLED') ok('C12a', '규칙 5개가 모두 꺼짐 상태다(가져온 뒤 사람이 켠다)', '');
-  else bad('C12a', '규칙 5개가 모두 꺼짐이어야 한다', states.join(','));
+  if (states.length === 1 && states[0] === 'DISABLED') ok('C12a', '규칙 6개가 모두 꺼짐 상태다(가져온 뒤 사람이 켠다)', '');
+  else bad('C12a', '규칙 6개가 모두 꺼짐이어야 한다', states.join(','));
   if (rules.some(r => /DUMMYDUMMY/.test(r.raw))) info('C12b', 'Slack 주소가 가짜다', '틀린 상위 에픽 키 알림이 가지 않는다 — 쓰려면 Jira 화면에서 규칙의 슬랙 동작 2곳에 직접 붙여 넣는다');
   const emptyAuth = rules.reduce((n, r) => n + (r.raw.match(/"name": "Authorization",\s*"value": ""/g) || []).length, 0);
-  info('C12c', 'Authorization 헤더(PAT) 칸', `${emptyAuth}곳이 비어 있다 — 렌더 결과에는 비밀값이 없다. Jira 화면에서 7곳에 직접 채운다`);
+  info('C12c', 'Authorization 헤더(PAT) 칸', `${emptyAuth}곳이 비어 있다 — 렌더 결과에는 비밀값이 없다. Jira 화면에서 8곳에 직접 채운다`);
 }
 // --deep: YAML 문법 · 대조표 스키마
 if (has('deep')) {

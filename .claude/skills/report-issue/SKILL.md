@@ -2,10 +2,10 @@
 name: report-issue
 description: AI스킬 이슈등록 — ai_skills 의 GitHub 이슈 ↔ Jira 업무 항목을 양방향으로 다룬다. 버그 요청 · 일반 작업 · 기능 요청을 Jira 또는 GitHub 한 곳에 등록하면 반대쪽 사본은 자동화가 만들고, 등록 뒤 제목 · 본문 · 댓글 · 상태 · 담당도 한쪽만 바꾸면 반대쪽이 따라온다. 「AI스킬 이슈등록」 「AI스킬 이슈 등록해줘」 「/AI스킬:이슈등록」 「report-issue」 「버그 등록해줘」 「이슈 올려줘」 「Jira(지라)에 … 등록해줘」, 「<키 | #번호> 제목 · 본문 · 댓글 · 상태 · 담당 · 상위 바꿔줘」 「<키> 작업 시작해줘」 「<키> 완료 보고해줘」 에 쓴다.
 license: AGPL-3.0-only
-compatibility: Claude Code — AskUserQuestion · Atlassian MCP 사용
+compatibility: Claude Code — AskUserQuestion · Atlassian MCP v2 사용
 argument-hint: "[무엇을 등록할지 한 줄] | <키 | #번호> 제목 · 본문 · 댓글 · 상태 · 담당 바꿔줘 | <키> 작업 시작 | <키> 완료 보고"
 metadata:
-  version: 0.0.0
+  version: 0.0.1
   copyright: Copyright (c) 2026 Newzen
   author:
     name: "yangyang12103@newzen.kr"
@@ -48,7 +48,7 @@ GitHub 이슈와 Jira 업무 항목은 **짝으로 양방향 동기화**된다(G
 
 1. **반대쪽은 만들지도 고치지도 않는다.** 사본 · 링크 · 수정 · 댓글 · 상태 · 담당의 반대쪽 반영은 자동화 몫이다.
    양쪽을 다 고치면 같은 변경이 두 번 오가고 순서가 엇갈려 값이 뒤집힐 수 있다. 반대쪽이 안 바뀌어도 대신 하지 않고 경고만 한다.
-   예외 하나 — GitHub 계정이 없는 사람을 담당으로 넣는 것(웹에서도 Jira 에서만 된다, 4-⑤).
+   예외 둘 — ① GitHub 계정이 없는 사람을 담당으로 넣는 것(웹에서도 Jira 에서만 된다, 4-⑤) ② 상위 에픽(Jira 에만 있는 칸 — 4-⑧ 보정 · 5-2 「상위」).
 2. **질문은 `AskUserQuestion` 으로, 한국어로** 묻는다. 선택지마다 「고르면 무엇이 바뀌는지」 한 줄.
    🔴 **어떤 선택지에도 「(권장)」 을 붙이지 않는다** — 대화로 추정한 것은 첫 번째에 둘 뿐 글자로 권하지 않는다.
    진행 안내 · 미리보기 · 보고 · 중간 한 줄(「60초 뒤 다시 찾는다」 등)까지 **모두 한국어**.
@@ -60,7 +60,9 @@ GitHub 이슈와 Jira 업무 항목은 **짝으로 양방향 동기화**된다(G
 7. **본문은 조립기 결과 그대로** — 쉬운 말로 바꾸거나 칸을 더하고 빼지 않는다(GitHub 웹 양식과 같은 모양).
 8. 한글이 든 파일(답변 JSON · 본문)은 **Write 도구**로 쓴다. heredoc · `python` 은 쓰지 않는다.
 9. 대조표에 **이메일은 쓰지 않는다.** 이름은 `jiraOnly` 키(GitHub 계정 없는 사람 — 영문 · 한글)에만, `people` 의 이름은 그때그때 Jira 에서 읽는다.
-10. 커밋 · push · PR 은 그때마다 묻는다. 커밋 규칙은 CLAUDE.md 「작성자 표기」(마지막 줄 `담당: <git config user.email>`, Claude 표기 금지).
+10. 커밋 · push · PR 은 그때마다 묻는다. 커밋 규칙은 ① 저장소에 커밋 규칙 문서(`CONTRIBUTING.md` · `CLAUDE.md` 등)가 있으면 그것을 따르고
+    ② 없으면 작성자는 그 PC 의 `git config user.name` · `user.email` 그대로 둔다 — 서명 줄을 지어 넣지 않고, 도구 · 모델 이름도 넣지 않는다
+    ③ 메시지 형식이 정해져 있지 않으면 묻는다.
 
 **앱 화면 주의**
 
@@ -77,7 +79,7 @@ GitHub 이슈와 Jira 업무 항목은 **짝으로 양방향 동기화**된다(G
 
 저장소 · Jira 사이트가 바뀌어도(예: DS-Bridge 에 같은 방식을 쓸 때) 스킬은 고치지 않는다.
 🔴 **양식 · 대조표 · 조립기는 늘 `origin/main` 에서** 꺼내 읽는다 — 작업 트리는 옛 브랜치일 수 있다.
-`git fetch origin` 뒤 `git show origin/main:<경로>` 를 스크래치에 쓴다(Git Bash 는 앞에 `MSYS_NO_PATHCONV=1`).
+`git fetch origin` 뒤 **Bash 도구에서** `MSYS_NO_PATHCONV=1 git show origin/main:<경로> > "<스크래치>/<파일>"` 로 쓴다(Windows Git Bash · macOS 같은 명령 — macOS 는 변수를 무시한다). PowerShell 의 `>` 는 UTF-16 으로 저장돼 쓰지 않는다.
 
 | 항목 | 읽는 곳 |
 |---|---|
@@ -110,6 +112,24 @@ GitHub 이슈와 Jira 업무 항목은 **짝으로 양방향 동기화**된다(G
 | Jira | 요약 `[GH #n]` · 레이블 `github` · `gh-<저장소 이름>-<번호>` · 맨 아래 출처 |
 | GitHub 원본 | 보이는 출처 없이 끝에 `<!-- jira:<키> -->` 만(짝 찾기용) |
 
+**Jira 도구 — Atlassian MCP v2 만 쓴다**(`https://mcp.atlassian.com/v2/mcp`). 모든 호출에 `cloudId` = 대조표 `jira.cloudId`.
+🔴 v1(`/v1/mcp` · 2027-03-01 제거)의 이름 · 인자 — `addCommentToJiraIssue` · `getTransitionsForJiraIssue` · `lookupJiraAccountId` 의 `searchString` · `issueTypeName` · `assignee_account_id` · `contentFormat: "adf"` — 는 쓰지 않는다.
+v2 는 모르는 인자를 **오류 없이 버리거나**(`assignee_account_id`), 모양이 다른 값을 **성공이라고 답하고 무시**한다(`editJiraIssue` 의 `fields.assignee` 에 계정 id 글자 — `createJiraIssue` 의 `assignee` 는 글자가 맞다) — 아래 모양 그대로 쓰고, 쓴 뒤에는 늘 다시 읽어 확인한다.
+`executeRead` 는 `name` 에 아래 이름, `inputs` 에 칸을 넣어 부른다(입력이 헷갈리면 `discover` 로 본다).
+
+| 하는 일 | 부르는 것 | 주의 |
+|---|---|---|
+| 내 계정 | `atlassianUserInfo` | 결과는 `accountId` 하나뿐 |
+| 여러 건 찾기 | `searchJiraIssuesUsingJql`(`jql` · `fields` · `maxResults` 100 까지) | 응답은 `issues.nodes[]`. `pageInfo.hasNextPage` 가 참이면 `pageInfo.endCursor` 를 `nextPageToken` 으로 넘겨 다음 쪽 |
+| 한 건 읽기 | `getJiraIssue` + 🔴 **`fields` 를 늘 준다** — `["summary","issuetype","status","project","reporter","assignee","labels","parent","<startDateField>"]`(설명이 필요하면 `"description"` 을 더한다 — `fields` 를 주면 그 칸만 온다) | 결과는 `issues.nodes[0]`. 기본 응답(compact)에는 `parent` · 커스텀 칸이 **없다**. 커스텀 칸은 `fields.customFields` 의 항목 중 **`id` 가 `<startDateField>` 인 것**의 `value` — 키는 사이트 언어의 표시 이름이라 이름으로 찾지 않는다. 에픽 여부는 `fields.issuetype.hierarchyLevel` |
+| 본문 읽고 고치기 | `getJiraIssue`(`responseContentFormat: "html"`, `fields` 에 `"description"`) → 응답의 `appliedContentFormat` 을 본다(markdown 으로 온 본문은 이 칸이 아예 없다 — 없으면 markdown) → **받은 형식 그대로** `editJiraIssue`(`contentFormat` = 그 형식) | 🔴 html 을 달라고 해도 멘션 · 이미지가 없는 본문은 markdown 으로 온다(실측) — markdown 을 html 로 되쓰면 기호가 글자로 남는다. 멘션 · 이미지가 든 본문은 html 로 오며, 그것을 markdown 으로 되쓰면 그 노드가 지워진다 |
+| 댓글 읽기 | `listJiraIssueComments`(`responseContentFormat: "html"`) | 멘션이 `data-user-id` 와 함께 온다. `getJiraIssue` 안의 댓글은 멘션 계정이 안 보인다 |
+| 등록 | `createJiraIssue` — 칸은 4-⑦ | |
+| 고치기 | `editJiraIssue` `fields: {…}` — 제목 `{"summary": …}` · 담당 `{"assignee": {"accountId": "<id>"}}` · 담당 해제 `{"assignee": null}` · 상위 `{"parent": {"key": "<에픽>"}}` | 최상위 `summary` · `assignee` 인자는 없다. 🔴 담당을 계정 id 글자(`{"assignee": "<id>"}`)로 주면 성공 응답인데 바뀌지 않는다 |
+| 댓글 | `addOrEditJiraIssueComment`(`issueIdOrKey` · `commentBody`) — 멘션이 있으면 `contentFormat: "html"` + mention 요소(4-⑦), 없으면 markdown | ADF 는 받지 않는다 |
+| 상태 | `executeRead` `listJiraIssueTransitions`(`issueIdOrKey`) → 도착 상태(`to.statusCategory.key` · `to.name`)가 원하는 것인 전환의 id 로 `transitionJiraIssue`(`transitionId`) | 전환 이름과 도착 상태는 다르다. 응답에 도착한 상태가 온다 |
+| 사람 — 담당 후보 · 이름 | `executeRead` `listJiraIssueAssignableUsers`(`project` = 스페이스 키, 이미 있는 건이면 `issueKey` · 이름으로 좁히면 `query`) | **담당이 될 수 있는 사람만** 나온다(`accountId` · `displayName`). `lookupJiraAccountId` 는 사이트 전체에서 찾아 담당이 안 되는 사람도 나오므로 담당 고르기에 쓰지 않는다 |
+
 ---
 
 ## 4. 등록
@@ -132,6 +152,7 @@ GitHub 이슈와 Jira 업무 항목은 **짝으로 양방향 동기화**된다(G
 
 | 확인 | 방법 | 안 되면 |
 |---|---|---|
+| Atlassian MCP 판 | 도구 목록에 v2 의 `discover` · `addOrEditJiraIssueComment` 가 있는지 | v1 만 있으면(`addCommentToJiraIssue` 는 있고 `discover` 는 없음) 「Jira」 를 빼고 「claude.ai 커넥터를 Atlassian MCP v2(`https://mcp.atlassian.com/v2/mcp`)로 다시 연결」을 알린다 |
 | Jira 계정 | `atlassianUserInfo` | 「Jira」 를 빼고 재로그인을 알린다 |
 | GitHub 계정 · 쓰기 권한 | `gh api user --jq .login` · `gh api repos/<저장소> --jq .permissions.push` | 「GitHub」 을 뺀다 |
 | 내 역할 | 대조표 `people` · `jiraOnly` 의 `roles` | 「알 수 없음」 |
@@ -153,6 +174,7 @@ GitHub 이슈와 Jira 업무 항목은 **짝으로 양방향 동기화**된다(G
 
 1. 칸 「화면」(한글 이름)을 화면 폴더에서 센다: `grep -rc "<화면명>" src/screens/<폴더>` 합계. **`screenScanExclude` 폴더는 세지 않는다.**
 2. 가장 많은 폴더가 **3회 이상 · 둘째의 2배 이상**이고 대조표 `areas.*.screens` 에 있으면 그 영역.
+   저장소에 `src/screens` 가 없거나 대조표 `screens` 가 모두 비어 있으면 세지 않고 「영역 밖」 — ⑤ 의 순서는 대조표에 적힌 순서.
 3. 아니면 **「영역 밖」** — 추정 영역을 기본값으로 내놓지 않는다. 후보 폴더가 있으면 「이 화면 폴더가 맞나요?」로 묻는다.
 
 ### ②-0 상위 에픽 — 화면 이름으로 찾는다
@@ -196,9 +218,17 @@ Jira   searchJiraIssuesUsingJql
        (상위가 있으면 먼저) project = <스페이스> AND parent = <에픽> AND statusCategory != Done ORDER BY created DESC   (최대 5건)
        project = <스페이스> AND hierarchyLevel = 0 AND statusCategory != Done AND text ~ "<화면>" AND created >= -30d ORDER BY created DESC   (최대 5건)
 GitHub gh issue list -R <저장소> --state open --search "<화면> in:title" --json number,title,url --limit 5
+       gh issue list -R <저장소> --state open --search "<다듬은 화면> in:title" --json number,title,url --limit 5   (<화면> 과 다를 때만 · 번호로 합친다)
 ```
 
 - `hierarchyLevel = 0` — 에픽 · 하위 작업은 같은 건 후보가 아니다.
+- 🔴 **후보 거르기** — 아래 둘은 후보에서 뺀다(같은 에픽 · 같은 화면 글자만으로는 같은 일이 아니다).
+  - 레이블 `gh-<다른 저장소 이름>-<n>` 이 붙은 Jira 건 — 다른 저장소의 사본이다(이 저장소는 `gh-<저장소 이름>-` 만).
+  - 제목이 새 제목과 **두 글자씩 겹치는 정도가 낮은 것** — 같은 에픽의 다른 일이다.
+    재는 법: 두 제목에서 양식 앞말(`bug:` 등) · 대괄호 묶음 전부(`[GH #n]` · `[JIRA <키>]` · `[동기화시험]` 같은 머리말) · 띄어쓰기 · 문장부호를 지우고,
+    두 글자씩 자른 묶음으로 **Dice 계수**(2 × 겹친 수 ÷ (양쪽 묶음 수의 합))를 낸다. **0.3 미만이면 뺀다.** 뺀 후보 수는 보고에 한 줄로 적는다.
+- Jira JQL 은 `fields: ["summary","status","issuetype","assignee","labels","created"]` 로 부른다(후보 설명 칸 · 거르기에 쓴다).
+- GitHub 에서만 나온 후보는 5-1 의 2 · 3 번(본문 짝 표시 · 제목 `[JIRA <키>]`)으로 Jira 짝을 찾아 묶는다 — 없으면 GitHub 번호만.
 
 같은 건이 있으면 **후보를 버튼으로** 고르게 한다 — 후보를 질문 글에만 늘어놓지 않는다(「기존 건 사용」 을 눌러도 어느 건인지 고를 수 없었다).
 
@@ -225,6 +255,9 @@ GitHub gh issue list -R <저장소> --state open --search "<화면> in:title" --
 
 - 🔴 어떤 선택지에도 「(권장)」을 붙이지 않는다.
 - 사람: 대조표 `people` · `jiraOnly` + **지정 안 함**.
+  - 이름 읽기: `listJiraIssueAssignableUsers`(`project` = ④ 의 스페이스)를 **한 번** 불러 대조표 `jiraAccountId` 와 같은 `accountId` 의 `displayName` 을 쓴다.
+    목록에 없는 사람은 **`query` = 그 `jiraAccountId` 로 한 번 더** 불러 본다(이 도구는 쪽 나눔이 없어 사람이 많으면 잘릴 수 있다) — 그래도 없으면 그 스페이스에서 담당이 될 수 없다:
+    선택지에서 빼고 「<GitHub 아이디> — Jira 담당 불가」 를 알린다. 목록을 못 받으면 GitHub 아이디(`jiraOnly` 는 키)로 보인다. 대조표에 없는 계정(봇 등)은 선택지에 넣지 않는다.
   - 글자: Jira 에서 읽은 **「이름(역할)」** — 역할이 여럿이면 「이름(역할 · 역할)」.
   - 설명 칸: GitHub 아이디 — 없으면 「Jira만」 · 저장소 담당이 안 되면 「GitHub 담당 불가」.
   - 순서: 화면 영역의 `designers` · `developers` 를 앞에 둔다. 순서만 바꾸고 기본값으로 고르지 않는다.
@@ -233,15 +266,15 @@ GitHub gh issue list -R <저장소> --state open --search "<화면> in:title" --
   - **넘으면 두 단계** — ⑤-1 「어느 쪽인가요?」 선택지 = 역할 묶음(대조표 `roles` 의 첫 역할: 개발자 · 프로덕트 디자이너 · 기획 · 설계 …, 설명 칸에 「<n>명 — 이름, 이름 …」) + **지정 안 함**.
     묶음이 4개를 넘으면 사람 수가 적은 묶음부터 합쳐 「그 밖(<역할> · <역할>)」 하나로.
     ⑤-2 고른 묶음의 사람만 버튼 — 4명을 넘으면 앞 3명 + 「다음 명단」 으로 이어서 묻는다.
-- 명단 밖 사람은 Other 에 적은 이름으로 `lookupJiraAccountId` 후보를 보인다. 지정 안 함이면 담당 없이(스페이스 기본 담당자가 들어갈 수 있다).
+- 명단 밖 사람은 Other 에 적은 이름으로 `executeRead` `listJiraIssueAssignableUsers`(`project` = 등록할 스페이스 · `query` = 그 이름) 후보를 보인다 — 담당으로 넣을 수 있는 사람만 나온다. 지정 안 함이면 담당 없이(스페이스 기본 담당자가 들어갈 수 있다).
 
 담당은 **등록하는 쪽에만** 넣는다(반대쪽은 자동화가 대조표로 맞춘다).
 
 | 등록할 곳 | 넣는 법 |
 |---|---|
-| Jira | `assignee_account_id` = 그 `jiraAccountId` |
+| Jira | `createJiraIssue` 의 `assignee` = 그 `jiraAccountId` |
 | GitHub | `people` 에서 GitHub 아이디를 찾아 ⑦ 의 `assignees`. 먼저 `gh api repos/<저장소>/assignees/<아이디>`(204 가능 / 404 불가) — 불가면 미리보기에 「GitHub Assignee: 없음 — 저장소 권한 없음」을 보이고 뺀다 |
-| GitHub + `jiraOnly` 담당 | GitHub 칸에는 넣을 수 없다 → **⑧ 에서 Jira 사본을 찾은 뒤 사본 담당자 칸에 직접** 넣는다(`editJiraIssue`). 미리보기 담당 줄은 「<이름(역할)> — GitHub 칸은 비고, Jira 사본 담당으로 넣음」 |
+| GitHub + `jiraOnly` 담당 | GitHub 칸에는 넣을 수 없다 → **⑧ 에서 Jira 사본을 찾은 뒤 사본 담당자 칸에 직접** 넣는다(`editJiraIssue` `fields: {"assignee": {"accountId": "<jiraAccountId>"}}`). 미리보기 담당 줄은 「<이름(역할)> — GitHub 칸은 비고, Jira 사본 담당으로 넣음」 |
 
 ### ⑥ 미리보기
 
@@ -325,28 +358,31 @@ GitHub gh issue list -R <저장소> --state open --search "<화면> in:title" --
 
 | 칸 | 값 |
 |---|---|
-| `projectKey` · `issueTypeName` | ④ |
+| `projectKey` · `issueType` | ④ |
 | `summary` · `description` | 제목 · 본문 |
-| `assignee_account_id` | ⑤(지정 안 함이면 뺀다) |
+| `assignee` | ⑤ 의 `jiraAccountId`(지정 안 함이면 뺀다) |
 | `parent` | ②-0 의 에픽 키(필수) — 예 `"TEST1-6"` |
-| `additional_fields` | `{"labels": [<양식 labels>], "<startDateField>": "<오늘>"}` — **`github` 은 넣지 않는다**(사본 표시) |
+| `labels` | `[<양식 labels>]` — **`github` 은 넣지 않는다**(사본 표시) |
+| `additional_fields` | `{"<startDateField>": "<오늘>"}` |
 
-실패하면 멈추고 오류를 그대로 보인다.
+실패하면 멈추고 오류(`repairHint` 포함)를 그대로 보인다.
+🔴 시간 초과 · 연결 끊김처럼 결과를 모르면 바로 다시 만들지 않는다 — `searchJiraIssuesUsingJql` `project = <스페이스> AND reporter = currentUser() AND created >= -5m ORDER BY created DESC` 에서 **같은 요약**이 있으면 그것을 쓴다.
 
 **설계 확인 필요 = 예(버그 양식)** — 영역 설계자를 **실제 멘션**으로(이름 글자만으로는 알림이 안 간다). 댓글은 **등록한 쪽에 하나만** — 반대쪽은 자동화가 옮긴다.
 
 | 등록한 곳 | 방법 | 반대쪽 모양 |
 |---|---|---|
-| Jira | `addCommentToJiraIssue` · `contentFormat: "adf"` · mention 노드(아래), `people` · `jiraOnly` 설계자 모두 · 여럿이면 노드를 이어 댓글 하나로 | GitHub 사본에 `@<GitHub 아이디>` · `jiraOnly` 는 `<키>(Jira)` |
+| Jira | `addOrEditJiraIssueComment` · `contentFormat: "html"` · `commentBody` 에 mention 요소(아래), `people` · `jiraOnly` 설계자 모두 · 여럿이면 요소를 이어 댓글 하나로 | GitHub 사본에 `@<GitHub 아이디>` · `jiraOnly` 는 `<키>(Jira)` |
 | GitHub | 댓글 하나 `설계 확인 요청: @<GitHub 아이디> …` — `people` 설계자 | Jira 사본에 실제 멘션. ⚠️ `jiraOnly` 설계자는 GitHub 에서 부를 수 없다 — 보고에 「<이름>은 Jira 에서 직접 확인 요청 필요」 |
 
-```json
-{"type":"doc","version":1,"content":[{"type":"paragraph","content":[
-  {"type":"text","text":"설계 확인 요청: "},
-  {"type":"mention","attrs":{"id":"<jiraAccountId>","text":"@<이름>"}}]}]}
+```html
+<p>설계 확인 요청: <span data-type="mention" data-user-id="<jiraAccountId>">@<이름></span> <span data-type="mention" data-user-id="<jiraAccountId>">@<이름></span></p>
 ```
 
-Jira 지켜보기(watcher)는 MCP 도구가 없어 하지 않는다.
+- `data-user-id` 는 대조표의 실제 `jiraAccountId` 만 — 지어내지 않는다. 글자 `@이름` 은 알림이 가지 않는다.
+- 사이트에서 HTML 형식이 꺼져 있으면 호출이 거부된다(markdown 으로 바꿔 보내지 않는다) — 멈추고 오류를 보인다.
+
+Jira 지켜보기(watcher)는 하지 않는다 — v2 `watchJiraIssue` 는 부른 사람 자신만 지켜보게 해 설계자를 넣을 수 없다.
 
 ### ⑧ 확인 · 보고 — 질문 없음
 
@@ -354,18 +390,22 @@ Jira 지켜보기(watcher)는 MCP 도구가 없어 하지 않는다.
 
 | 무엇 | 방법 |
 |---|---|
-| 등록한 쪽 | Jira `getJiraIssue`(요약 · 유형 · 보고자 · 담당 · 레이블 · 시작 날짜 · `parent`) / GitHub `gh issue view <m> --json title,author,assignees,labels,issueType,url` |
-| 반대쪽 (GitHub 에 올림) | Jira JQL `labels = gh-<저장소 이름>-<m>` → 1건. GitHub 원본 끝에 `<!-- jira:<키> -->` 가 들어갔는지 |
+| 등록한 쪽 | Jira `getJiraIssue` + 3 「Jira 도구」 의 `fields`(요약 · 유형 · 보고자 · 담당 · 레이블 · 시작 날짜 · `parent`) — 🔴 `fields` 를 빼면 `parent` · 시작 날짜가 안 와 「비어 있음」 으로 잘못 본다 / GitHub `gh issue view <m> --json title,author,assignees,labels,issueType,url` |
+| 반대쪽 (GitHub 에 올림) | ① GitHub 원본 끝의 `<!-- jira:<키> -->` 짝 표시에서 키를 얻어 `getJiraIssue <키>`(위 `fields`)로 읽는다 ② 짝 표시가 아직 없을 때만 Jira JQL `labels = gh-<저장소 이름>-<m>`. 🔴 JQL 검색 색인은 몇 분 늦어(2026-11-17 실측 약 8분) 방금 생긴 사본이 0건으로 나온다 — JQL 0건만으로 「사본 없음」 이라고 하지 않는다 |
 | 반대쪽 (Jira 에 올림) | 5-1 「짝 찾기」 → `#m` · 라벨 `jira` · 출처 링크 |
 
-- 등록 직후 **바로 한 번** 찾고(보통 10초 안), 없으면 60초 뒤 한 번 더. 두 번 다 없으면 **대신 만들지 않고** 「반대쪽 사본이 아직 없음 — 자동화 확인 필요」.
+- 등록 뒤 **30초 지나서 한 번** 찾고(동기화 실행이 끝나기까지 보통 20 ~ 60초), 없으면 60초 뒤 한 번 더. 두 번 다 없으면 **대신 만들지 않고** 「반대쪽 사본이 아직 없음 — 자동화 확인 필요」.
+- 🔴 **담당 대조** — 다시 읽은 담당이 ⑤ 에서 고른 사람(지정 안 함이면 비어 있음)과 같은지 본다. 다르면 「⚠️ 담당이 들어가지 않음 — <기대> ≠ <실제>」 를 보고에 올린다.
+  Jira 에 등록했으면 `editJiraIssue` `fields: {"assignee": {"accountId": …}}` 로 **한 번만** 넣고 다시 읽는다(등록하는 쪽 값이라 예외가 아니다). 그래도 다르면 경고만.
 - ⑤ 의 「GitHub + `jiraOnly` 담당」이면 사본을 찾은 직후 사본 담당을 넣고 다시 읽는다. 사본이 없으면 넣지 못한 것을 경고한다.
-- **GitHub 에 올렸으면** 사본을 찾은 직후 사본 `parent` 를 읽는다 — 자동화 「[AX_AI] Github -> Jira Issue」 가 양식 칸으로 넣는다.
+- **GitHub 에 올렸으면** 사본을 찾은 직후 사본 `parent` 를 읽는다 — 자동화 「GitHub → Jira」 규칙(`<앞말> Github -> Jira Issue`)이 양식 칸으로 넣는다.
   비었거나 ②-0 의 에픽과 다르면(자동화가 아직 상위를 넣지 않음 · 실패) `editJiraIssue` `fields: {"parent": {"key": "<에픽>"}}` 로 붙이고 다시 읽는다
-  (담당과 같은 예외 — 상위는 Jira 에만 있다). 「[AX_AI] Jira 수정 -> Github Issue」 는 요약 · 설명 · 담당 변경에만 돌아 이 수정은 GitHub 으로 가지 않는다.
+  (담당과 같은 예외 — 상위는 Jira 에만 있다).
+  🔴 붙이기 전에 **GitHub 원본 끝에 `<!-- jira:<키> -->` 짝 표시가 붙었는지** 먼저 본다 — 없으면 60초 뒤 다시 보고, 그래도 없으면 붙이지 않고 「상위를 붙이지 못함」 으로 보고한다.
+  「Jira 수정」 규칙(`<앞말> Jira 수정 -> Github Issue`)은 요약 · 설명 · 담당 · **상위** 변경에 돌아 이 수정도 GitHub 으로 간다 — 짝 표시 전에 보내면 짝을 못 찾거나 짝 표시 실행과 겹쳐 변경이 사라질 수 있다.
   사본이 없으면 「상위를 붙이지 못함 — Jira 에서 <에픽> 아래로 옮겨 주세요」.
 - **GitHub 에 올렸으면 사본 유형**이 대조표 `issueTypes.<Type>` 과 같은지 본다. 다르면 「⚠️ Jira 사본 유형 <실제> ≠ <기대>」 — 자동으로 바꾸지 않고 Jira 에서 바꾸도록 알린다.
-- 「설계 확인」 댓글이 반대쪽에 옮겨졌는지도 본다(없으면 경고만).
+- 「설계 확인」 댓글이 반대쪽에 옮겨졌는지도 본다(없으면 경고만) — Jira 쪽은 `listJiraIssueComments`(`responseContentFormat: "html"`)로 멘션 계정까지 본다.
 - 보고 모양: `✅ <등록한 쪽 번호> (<유형> · 담당 <이름> · 상위 <에픽 | ⚠️ 비어 있음>) → 사본 ✅ <반대쪽 번호> (<유형>) / ⚠️ 없음` + 각 링크 + 어긋난 값. 상위는 다시 읽은 Jira `parent` 값으로.
 
 ---
@@ -391,12 +431,12 @@ Jira 지켜보기(watcher)는 MCP 도구가 없어 하지 않는다.
 
 | 바꿀 것 | Jira 키일 때 | `#번호` 일 때 | 반대쪽에 기대하는 값 |
 |---|---|---|---|
-| 제목 | `editJiraIssue` `summary` — 사본이면 앞 `[GH #n] ` 를 지킨다 | `gh issue edit -R <저장소> <n> --title` — 사본이면 앞 `[JIRA <키>] ` 를 지킨다 | 반대쪽 제목 · 사본 출처 줄의 제목도 새 것 |
-| 본문 | 지금 설명을 읽어 말한 곳만 고쳐 `editJiraIssue` `description`(markdown) — 사본이면 맨 아래 「출처」를 지킨다 | 지금 본문을 읽어 고친 파일로 `--body-file` — 사본이면 「출처」, 모두 끝 `<!-- jira:<키> -->` 를 지킨다. **`### 상위 에픽 키` 칸이 바뀌면 아래 「상위」 줄대로** 처리한다(검사 → Jira 상위도 함께) | 고친 줄만 넘어가고 출처 · 표시는 안 넘어간다 |
-| 댓글 | `addCommentToJiraIssue`(멘션은 adf mention 노드) | `gh issue comment --body-file`(멘션 `@<GitHub 아이디>`, `people` 만) | 「<이름> 님 … 댓글」 + 멘션은 대조표로(Jira → GitHub `@아이디` · `<키>(Jira)` / GitHub → Jira 실제 멘션) |
-| 상태 | `getTransitionsForJiraIssue` → `transitionJiraIssue` | 「완료 · 닫아」 `gh issue close --reason completed` · 「할 일 · 다시 열어」 `gh issue reopen`. 「진행 중 · 검토 중」은 GitHub 에 없는 상태 — **Jira 키로 할까요?** 묻는다 | Jira 완료 ↔ GitHub 닫힘, 그 밖 ↔ 열림 |
-| 담당 | `editJiraIssue` `assignee`(지정 안 함 `null`) | `gh issue edit --add-assignee` · `--remove-assignee`(`people` 의 GitHub 아이디) | 아래 표 |
-| 상위 | ②-0 「에픽 키 검사」 → 맞으면 `editJiraIssue` `parent: {"key": "<에픽>"}`. 짝이 **GitHub 원본**(Jira 가 사본)이면 GitHub 본문 「상위 에픽 키」 칸도 새 키로 고친다 — 상위를 비우지는 않는다(필수 · 요청이 오면 알리고 옮길 에픽을 묻는다) | 「상위 바꿔줘」 든 본문 「상위 에픽 키」 칸 수정이든 ②-0 「에픽 키 검사」 → 맞으면 ① GitHub 본문 칸을 새 키로 고치고 ② 5-1 로 찾은 **Jira 짝의 상위도** 같은 키로 바꾼다. 틀리면 **본문도 고치지 않는다** | GitHub 본문 「상위 에픽 키」 = Jira 상위. 자동화도 한쪽 변경을 반대쪽으로 옮기지만 늦을 수 있어 스킬이 양쪽을 바로 맞춘다 |
+| 제목 | `editJiraIssue` `fields: {"summary": …}` — 사본이면 앞 `[GH #n] ` 를 지킨다 | `gh issue edit -R <저장소> <n> --title` — 사본이면 앞 `[JIRA <키>] ` 를 지킨다 | 반대쪽 제목 · 사본 출처 줄의 제목도 새 것 |
+| 본문 | 지금 설명을 3 「본문 읽고 고치기」 대로 읽어 말한 곳만 고쳐 **받은 형식 그대로** `editJiraIssue` `fields: {"description": …}` · `contentFormat` — 고치지 않은 곳은 받은 그대로 두고, 사본이면 맨 아래 「출처」를 지킨다 | 지금 본문을 읽어 고친 파일로 `--body-file` — 사본이면 「출처」, 모두 끝 `<!-- jira:<키> -->` 를 지킨다. **`### 상위 에픽 키` 칸이 바뀌면 아래 「상위」 줄대로** 처리한다(검사 → Jira 상위도 함께) | 고친 줄만 넘어가고 출처 · 표시는 안 넘어간다 |
+| 댓글 | `addOrEditJiraIssueComment`(멘션이 있으면 `contentFormat: "html"` + mention 요소 — 4-⑦, 없으면 markdown) | `gh issue comment --body-file`(멘션 `@<GitHub 아이디>`, `people` 만) | 「<이름> 님 … 댓글」 + 멘션은 대조표로(Jira → GitHub `@아이디` · `<키>(Jira)` / GitHub → Jira 실제 멘션) |
+| 상태 | `executeRead` `listJiraIssueTransitions` → 사용자가 상태 **이름**을 말했으면 `to.name` 이 같은 전환, 「완료 · 할 일」처럼 범주로 말했으면 `to.statusCategory.key`(`done` · `new` · `indeterminate`)가 같은 전환 — 1개면 그것, 여럿이면 `to.name` 을 선택지로 묻는다 → 그 id 로 `transitionJiraIssue` `transitionId` | 「완료 · 닫아」 `gh issue close --reason completed` · 「할 일 · 다시 열어」 `gh issue reopen`. 「진행 중 · 검토 중」은 GitHub 에 없는 상태 — **Jira 키로 할까요?** 묻는다 | Jira 완료 ↔ GitHub 닫힘, 그 밖 ↔ 열림 |
+| 담당 | `editJiraIssue` `fields: {"assignee": {"accountId": "<id>"}}`(지정 안 함 `{"assignee": null}`) — 바꾼 뒤 다시 읽어 값이 바뀌었는지 본다(5-5) | `gh issue edit --add-assignee` · `--remove-assignee`(`people` 의 GitHub 아이디) | 아래 표 |
+| 상위 | ②-0 「에픽 키 검사」 → 맞으면 `editJiraIssue` `fields: {"parent": {"key": "<에픽>"}}`. 짝이 **GitHub 원본**(Jira 가 사본)이면 GitHub 본문 「상위 에픽 키」 칸도 새 키로 고친다 — 상위를 비우지는 않는다(필수 · 요청이 오면 알리고 옮길 에픽을 묻는다) | 「상위 바꿔줘」 든 본문 「상위 에픽 키」 칸 수정이든 ②-0 「에픽 키 검사」 → 맞으면 ① GitHub 본문 칸을 새 키로 고치고 ② 5-1 로 찾은 **Jira 짝의 상위도** 같은 키로 바꾼다. 틀리면 **본문도 고치지 않는다** | GitHub 본문 「상위 에픽 키」 = Jira 상위. 자동화도 한쪽 변경을 반대쪽으로 옮기지만 늦을 수 있어 스킬이 양쪽을 바로 맞춘다 |
 
 - 문구는 사용자가 준 그대로, 없으면 묻는다. 담당자 이름만 오면 대조표 · Jira 에서 찾고, 없거나 둘 이상이면 4-⑤ 처럼 묻는다.
 - 이미 그 값이면 바꾸지 않고 「이미 <값>」으로 보고한다.
@@ -422,6 +462,8 @@ Jira 지켜보기(watcher)는 MCP 도구가 없어 하지 않는다.
    - 🔴 `--no-track` 을 빼지 않는다 — 빼면 브랜치가 `origin/main` 을 따라가 `git push` 가 main 을 겨눈다. 처음 push 는 `git push -u origin <브랜치>`.
    - worktree 폴더는 묻는다: `<저장소 상위>/wt/<키>` / 세션 스크래치(임시).
 3. 「Jira 를 진행 중으로 바꿀까요?」 → 진행 중 전환. **Jira 만** — GitHub 은 열림 그대로(닫혀 있었다면 자동화가 다시 연다).
+   전환은 상태 **이름이 아니라 범주**로 고른다 — `listJiraIssueTransitions` 에서 `to.statusCategory.key == "indeterminate"` 인 전환.
+   사용자가 상태 이름을 말했고 그 이름과 `to.name` 이 같은 전환이 있으면 그것, 아니면 1개면 그것, 여럿이면 도착 상태 이름(`to.name`)을 선택지로 묻는다, 없으면 「진행 중 범주로 가는 전환이 없음」 을 알리고 바꾸지 않는다. 이미 그 범주면 바꾸지 않는다.
 4. 5-5 로 확인해 보고한다.
 
 ### 5-4. 「<키> 완료 보고해줘」
@@ -454,7 +496,7 @@ Jira 지켜보기(watcher)는 MCP 도구가 없어 하지 않는다.
 | ②-0 상위 에픽은 필수 · 「상위 없음」 없음 | 웹 양식 「상위 에픽 키」 도 필수 칸이다 — 웹 양식 · 스킬(GitHub · Jira) 어느 길로 등록해도 같은 기준이다. 화면과 무관한 일은 공통 에픽 |
 | ②-0 에픽은 이름 전체로 · 적힌 값 + 다듬은 값 · 1건이어도 미리보기에서 확인 | Jira 는 한글 낱말을 쪼개지 않는다 · 같은 이름의 에픽이 둘 이상 있을 수 있다 · 앞부분이 겹치는 이름이 있다 · 지어내지 않는다 |
 | ②-0 일반 작업은 「대상」 칸으로 | `task.yml` 에는 「화면」 칸이 없다 — 건너뛰면 일반 작업은 상위를 못 찾는다 |
-| 자동화 규칙은 상위를 필수로 두지 않음 | 상위가 없다고 동기화를 멈추면 반대쪽 사본이 아예 안 생긴다. 필수는 입구(양식 · 스킬)에서 받고, 빠진 건은 `project = TEST1 AND hierarchyLevel = 0 AND parent is EMPTY` 로 찾는다 |
+| 자동화 규칙은 상위를 필수로 두지 않음 | 상위가 없다고 동기화를 멈추면 반대쪽 사본이 아예 안 생긴다. 필수는 입구(양식 · 스킬)에서 받고, 빠진 건은 `project = <스페이스> AND hierarchyLevel = 0 AND parent is EMPTY` 로 찾는다 |
 | 에픽 · 하위 작업은 만들지 않음 | 에픽은 동기화 대상이 아니다 |
 | 사람이 적은 에픽 키는 모두 검사 · 상위를 바꾸면 GitHub 본문 칸과 Jira 상위를 함께 | 자동화도 틀린 키면 Jira 사본을 만들지 않고(수정이면 상위를 바꾸지 않고) 슬랙으로 알리지만, 그때는 이미 GitHub 이슈가 올라간 뒤다. 스킬은 Jira 를 읽을 수 있어 쓰기 전에 막고, 오타를 고칠 때도 본문 키와 실제 상위가 어긋나지 않게 양쪽을 바로 맞춘다 |
 | 문구는 묻는다 · 칸은 지어내지 않는다 | 사용자가 하지 않은 말이 이슈 · 댓글에 남는다 |
@@ -465,6 +507,15 @@ Jira 지켜보기(watcher)는 MCP 도구가 없어 하지 않는다.
 | 「(권장)」 표시 없음 · ③ 은 역할로 미리 고르지 않음 | 권장 표시가 사용자 판단을 한쪽으로 끈다. 추정은 순서로만 드러낸다 |
 | ⑤ GitHub 지정 가능 여부를 미리 봄 | 저장소 권한 없는 아이디는 담당이 될 수 없다 — 미리 빼야 등록이 그 때문에 실패하거나 조용히 빠지지 않는다 |
 | ⑥ 카드 · 두 단계 질문 | 한 줄 요약은 읽기 어렵고, 카드와 질문을 한 응답에 두면 카드가 안 보인다 |
-| ⑦ 멘션은 실제 멘션 노드 | 이름 글자만 적으면 알림이 가지 않는다 |
+| ⑦ 멘션은 실제 멘션 요소(HTML `data-type="mention"`) | 이름 글자만 적으면 알림이 가지 않는다. v2 댓글은 markdown · html 만 받는다(ADF 없음) |
+| Atlassian MCP v2 만 · v1 이면 Jira 를 뺀다 | v1(`/v1/mcp`)은 지원 중단이고 2027-03-01 제거된다. v2 는 도구 이름(`addOrEditJiraIssueComment` · `listJiraIssueTransitions` · `listJiraIssueAssignableUsers`)과 인자(`issueType` · `assignee` · `labels` · `query`)가 달라 v1 문구로는 실패한다(2026-11-16 v2 단독 실측) |
+| 담당은 `{"accountId": …}` 모양 · 쓴 뒤 다시 읽어 대조 | v2 는 `assignee_account_id` 를 오류 없이 버리고, `{"assignee": "<id>"}` 는 성공이라고 답하고 바꾸지 않는다(2026-11-16 실측) — 오류가 없어 다시 읽어야만 보인다 |
+| 사람은 `listJiraIssueAssignableUsers` | 담당이 될 수 있는 사람만 나온다 — 사이트 전체 검색(`lookupJiraAccountId`)은 담당이 안 되는 사람도 내 놓는다 |
+| `getJiraIssue` 는 늘 `fields` 를 준다 | v2 기본 응답에는 `parent` · 커스텀 칸이 없다 — 빼면 상위가 있는 건도 「비어 있음」 으로 보고 ⑧ 에서 다시 쓴다 |
+| 본문 수정은 받은 형식 그대로 쓴다 | v2 는 멘션 · 이미지가 든 본문만 HTML 로 주고(`appliedContentFormat`), 나머지는 HTML 을 달라고 해도 markdown 으로 준다(2026-11-16 실측). 멘션 · 이미지 본문을 markdown 으로 다시 쓰면 그 노드가 지워지고, markdown 본문을 HTML 로 다시 쓰면 기호가 글자로 남는다 |
+| ⑧ 사본은 짝 표시의 키로 찾는다(JQL 은 다음) | Jira JQL 색인이 몇 분 늦어 방금 생긴 사본을 못 본다 — 레이블 JQL 로만 찾으면 「사본 없음」 으로 잘못 보고한다(2026-11-17 실측) |
+| ⑧ 상위 보정은 짝 표시 뒤에 | 「수정」 규칙은 상위 변경에도 돈다 — 짝 표시 전에 보내면 짝을 못 찾거나 짝 표시 실행과 겹친다 |
+| 5-3 진행 중은 범주로 | 스페이스마다 상태 이름이 다르다 — 이름을 가정하지 않는다 |
+| ②-1 다른 저장소 사본 · 다른 일 빼기 · 다듬은 값도 검색 | 같은 에픽의 무관한 업무 · 다른 저장소 사본이 후보로 나왔고, 띄어쓰기 차이로 같은 일을 못 찾았다(2026-11-12 실측) |
 | 시작 날짜는 `node` 로 | Windows Git Bash 의 `TZ=Asia/Seoul date` 는 UTC 를 낸다 |
 | 한 곳에만 등록 · 원본 제목에 번호표 없음 · Claude 표시 없음 | 팀 합의 |

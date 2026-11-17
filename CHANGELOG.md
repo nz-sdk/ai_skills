@@ -24,6 +24,7 @@
 
 ### 버그 수정
 
+* **issue-sync-install:** Jira 의 한 줄 코드 블록이 GitHub 본문을 잘라 덮어쓰던 문제 · GitHub 사본 본문만 고쳐도 Jira 원본 요약에 앞말(task: 등)이 붙던 문제 · 상위 칸을 맞출 때 생기던 끝 빈 줄 ([#37](https://github.com/nz-sdk/ai_skills/pull/37))
 * **report-issue:** Atlassian MCP v2 도구 이름 · 인자로 바꾼다 — v2 만 붙으면 등록 · 댓글 · 사람 찾기가 실패하고 담당이 조용히 비던 문제. 담당은 `{"accountId": …}` 로 쓰고 다시 읽어 대조, 사본은 짝 표시로 먼저 찾고, 진행 중 전환은 범주로 고른다 ([#32](https://github.com/nz-sdk/ai_skills/pull/32))
 * **dev-pc-setup:** Atlassian 커넥터 안내를 MCP v2(사용자 지정 커넥터 「Atlassian MCP」 · `https://mcp.atlassian.com/v2/mcp`)로 바꾸고, 옛 v1 커넥터만 붙어 있으면 다시 연결 · 삭제하라고 알린다 — v1 은 2027-03-01 제거 ([#20](https://github.com/nz-sdk/ai_skills/pull/20))
 * **dev-pc-setup:** 폐기된 사람별 Jira 이슈 토큰(`ISSUE_TOKEN_<아이디>`)과 TEST1 안내를 지운다(bridge-web #116 이후 쓰지 않음). 점검 스크립트가 저장소마다 origin/main 포함 여부(`up to date`)를 본다 ([#16](https://github.com/nz-sdk/ai_skills/pull/16))

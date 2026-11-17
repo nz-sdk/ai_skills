@@ -48,6 +48,7 @@ spaces:
       Feature: 기능
     default: 작업
     startDateField: customfield_10015   # Jira 「시작 날짜」 — 등록 날짜를 넣는다
+    notPlannedResolutions: []   # 이 해결(resolution) 이름으로 완료되면 GitHub 을 「계획 안 함」 으로 닫는다 — 비면 모두 completed
 
 # 영역 — 화면 폴더(src/screens/<폴더>) 묶음 · 스페이스 · 담당자 후보(선택지 앞에 놓는 순서 — 기본값 아님)
 areas:

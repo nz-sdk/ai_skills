@@ -52,7 +52,8 @@ function loadValues(file) {
     for (const c of [...(a.designers || []), ...(a.developers || [])]) if (!names.has(c)) errs.push(`AREAS: 후보 ${JSON.stringify(c)} 가 PEOPLE · JIRA_ONLY 에 없다`);
   }
   if (v.AUTHOR != null && (typeof v.AUTHOR !== 'string' || /[\r\n"]/.test(v.AUTHOR))) errs.push('AUTHOR: 한 줄 글자(따옴표 없음) 또는 빈 글자 — 스킬 머리말 작성자 ID');
-  const known = new Set(['SPACE', 'PREFIX', 'REPO', 'PRODUCT_NAME', 'CLOUD_ID', 'SITE', 'ISSUE_TYPES', 'DEFAULT_TYPE', 'START_DATE_FIELD', 'PEOPLE', 'JIRA_ONLY', 'AREAS', 'SCREEN_SCAN_EXCLUDE', 'AUTHOR']);
+  const known = new Set(['SPACE', 'PREFIX', 'REPO', 'PRODUCT_NAME', 'CLOUD_ID', 'SITE', 'ISSUE_TYPES', 'DEFAULT_TYPE', 'START_DATE_FIELD', 'PEOPLE', 'JIRA_ONLY', 'AREAS', 'SCREEN_SCAN_EXCLUDE', 'AUTHOR', 'STATUSES', 'TRANSITION_DONE', 'TRANSITION_REOPEN']);
+  if (v.STATUSES && Object.values(v.STATUSES).some(c => !['new', 'indeterminate', 'done'].includes(c))) errs.push('STATUSES: 값은 new · indeterminate · done 중 하나');
   for (const k of Object.keys(v)) if (!known.has(k) && !k.startsWith('_')) errs.push(`${k}: 모르는 이름이다(오타 확인)`);
   if (errs.length) fail('값 파일 오류:\n  - ' + errs.join('\n  - '));
   return v;
@@ -95,6 +96,14 @@ function mapYaml(v) {
   L.push(`    default: ${v.DEFAULT_TYPE}`);
   if (v.START_DATE_FIELD) L.push(`    startDateField: ${v.START_DATE_FIELD}   # Jira 「시작 날짜」 — 등록 날짜를 넣는다`);
   L.push(`    notPlannedResolutions: ${list(v.NOT_PLANNED_RESOLUTIONS || [])}   # 이 해결(resolution) 이름으로 완료되면 GitHub 을 「계획 안 함」 으로 닫는다 — 비면 모두 completed`);
+  // 상태 스위치 — STATUSES = { 상태 이름: new|indeterminate|done } (설치 때 listJiraStatuses 로 읽는다)
+  if (v.STATUSES && Object.keys(v.STATUSES).length) {
+    L.push('    # Jira 상태 → 범주. GitHub 라벨 jira:<상태> 를 붙이면 Jira 도 그 상태로 — done 이면 GitHub 을 닫고, 그 밖이면 연다');
+    L.push('    statuses:');
+    for (const [k, c] of Object.entries(v.STATUSES)) L.push(`      ${q(k)}: ${c}`);
+  }
+  if (v.TRANSITION_DONE) L.push(`    closeStatus: ${q(v.TRANSITION_DONE)}   # GitHub 닫기 → Jira 이 상태 · 라벨 jira:<이 상태>`);
+  if (v.TRANSITION_REOPEN) L.push(`    reopenStatus: ${q(v.TRANSITION_REOPEN)}   # GitHub 다시 열기 → Jira 이 상태 · 라벨 jira:<이 상태>`);
   L.push('');
   L.push('# 영역 — 화면 폴더(src/screens/<폴더>) 묶음 · 스페이스 · 담당자 후보(선택지 앞에 놓는 순서 — 기본값 아님)');
   L.push('areas:');

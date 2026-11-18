@@ -155,6 +155,21 @@
             },
             "uniqueItems": true,
             "description": "Jira 해결(resolution) 이름 — 완료 범주로 바뀔 때 해결이 이 목록에 있으면 GitHub 이슈를 「계획 안 함(not planned)」 으로 닫는다. 비거나 없으면 모두 completed"
+          },
+          "statuses": {
+            "type": "object",
+            "description": "Jira 상태 이름 → 범주(new · indeterminate · done). GitHub 라벨 jira:<상태> 를 붙이면 Jira 도 그 상태로 바꾸고, done 이면 GitHub 이슈를 닫고 그 밖이면 연다. 표에 없는 이름의 라벨은 열림 · 닫힘을 건드리지 않고 Jira 에만 보낸다",
+            "additionalProperties": { "enum": ["new", "indeterminate", "done"] }
+          },
+          "closeStatus": {
+            "type": "string",
+            "minLength": 1,
+            "description": "GitHub 에서 닫으면 Jira 를 이 상태로 · 라벨 jira:<이 상태>. 없으면 규칙 ①의 기본값(라벨은 안 바꿈)"
+          },
+          "reopenStatus": {
+            "type": "string",
+            "minLength": 1,
+            "description": "GitHub 에서 다시 열면 Jira 를 이 상태로 · 라벨 jira:<이 상태>. 없으면 규칙 ①의 기본값(라벨은 안 바꿈)"
           }
         }
       }

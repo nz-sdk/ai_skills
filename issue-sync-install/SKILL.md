@@ -97,6 +97,7 @@ metadata:
 | `DEFAULT_TYPE` | 사용자가 고른 기본 유형(보통 작업과 같은 이름) — 선택지로 묻는다 | — |
 | `START_DATE_FIELD` | `getJiraIssueTypeMetaWithFields(cloudId, projectIdOrKey=<SPACE>, issueTypeId=<작업 id>, **requiredFieldsOnly=false**, maxResults=100)` → `fields[]` 중 `name` 이 「시작 날짜」 또는 「Start date」 인 것의 `fieldId`. 🔴 **`requiredFieldsOnly=false` 를 빼면 필수 필드만 와서 시작 날짜가 나오지 않는다**(기본값이 true) — 빠뜨리고 「없다」고 판정하지 않는다 | **없으면 빈 글자**로 두고 사용자에게 알린다(렌더가 그 줄을 뺀다). 둘 이상이면 묻는다 |
 | `TRANSITION_DONE` · `TRANSITION_REOPEN` | 그 스페이스의 일반 업무 1건(`searchJiraIssuesUsingJql("project = <SPACE> AND hierarchyLevel = 0 ORDER BY created ASC", maxResults=1)`)에 `getTransitionsForJiraIssue` → `to.statusCategory.key == "done"` 인 전환의 `to.name` = DONE, `== "new"` 인 전환의 `to.name` = REOPEN | **업무가 없거나 해당 전환이 1개가 아니면 사용자에게 상태 이름을 묻는다.** 이름을 지어내지 않는다. 시험용 업무를 만들려면 5절 승인 |
+| `STATUSES` | `listJiraStatuses(mode="project", projectKey=<SPACE>)` → `statuses[]` 의 `name` → `category`(new · indeterminate · done) 표. 업무 유형마다 상태가 다르면(`workTypes[].statusIds`) 사용자에게 보이고 모두 넣을지 묻는다 | 응답이 없으면 묻는다 — 상태 스위치(GitHub 라벨 `jira:<상태>` → Jira 상태)가 이 표로 열림 · 닫힘을 정한다 |
 | `OWNER_ACCOUNT_ID` | `atlassianUserInfo` 결과의 **`account_id`** 칸 — 그리고 사용자에게 결과의 `name` 을 보이며 「이 계정이 규칙을 가져오는 본인입니까」 확인. `email` 등 다른 칸은 파일에 쓰지 않는다 | 확인 못 받으면 쓰지 않는다 |
 | `ACTOR_ACCOUNT_ID` | 사용자가 알려 준 **기존 규칙 내보내기 파일**에서 한 칸만: `node -e "const j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));console.log(j.rules[0].actor.value)" "<파일 경로>"` — **파일 전체를 출력하지 않는다**(Slack 주소가 들어 있다) | 파일이 없으면 사용자에게 「같은 사이트의 규칙을 하나 내보내 경로를 알려 달라」고 요청 |
 | `PEOPLE[].accountId` | `lookupJiraAccountId(cloudId, searchString=<이름 또는 이메일>)` → 결과 `data.users.users[]` 의 `accountId` · `displayName`. `displayName` 을 사용자에게 보이고 **본인이 맞다는 확인**을 받은 뒤 `accountId` 를 쓴다 | `data.users.total` 이 1이 아니면 묻는다. 결과의 `html`(이메일 포함)과 이메일은 파일에 쓰지 않는다 |
@@ -144,7 +145,7 @@ metadata:
 ### 단계 4. GitHub 파일 → PR → 머지
 **A**
 1. 상품 저장소의 `CONTRIBUTING.md` · `CLAUDE.md` 를 읽어 **브랜치 · 커밋 · PR 규칙**을 확인한다. 없으면 사용자에게 묻는다(짐작 금지). 작업 브랜치는 기본 브랜치(1-4 에서 확인한 값)의 최신에서 만든다 — **만들기 전에 5절 승인**.
-2. 2절 값 + 1-4 답으로 **`install-values.json`** 을 쓴다 — 형식은 `<키트>/files/tools/install-values.example.json`. `PREFIX` · `SPACE` 는 `rules-values.json` 과 같아야 한다(다르면 멈춘다). `AUTHOR`(스킬 머리말의 작성자 ID)는 `git -C <상품 저장소> config user.email` 결과를 사용자에게 보이고 **확인받은 뒤** 넣는다 — 값이 없거나 확인을 못 받으면 비워 둔다(스킬 머리말에 `<담당자 ID>` 가 남는다). `ISSUE_TYPES` · `DEFAULT_TYPE` · `START_DATE_FIELD` 는 2절 결과.
+2. 2절 값 + 1-4 답으로 **`install-values.json`** 을 쓴다 — 형식은 `<키트>/files/tools/install-values.example.json`. `PREFIX` · `SPACE` 는 `rules-values.json` 과 같아야 한다(다르면 멈춘다). `AUTHOR`(스킬 머리말의 작성자 ID)는 `git -C <상품 저장소> config user.email` 결과를 사용자에게 보이고 **확인받은 뒤** 넣는다 — 값이 없거나 확인을 못 받으면 비워 둔다(스킬 머리말에 `<담당자 ID>` 가 남는다). `ISSUE_TYPES` · `DEFAULT_TYPE` · `START_DATE_FIELD` · `STATUSES` · `TRANSITION_DONE` · `TRANSITION_REOPEN` 은 2절 결과(대조표 `statuses` · `closeStatus` · `reopenStatus` 가 된다).
 3. 미리보기: `node <키트>/files/tools/install-files.mjs --values <작업폴더>/install-values.json --target <상품 저장소> --dry` — 쓸 파일 목록과 `⚠ 이미 있음` 을 사용자에게 보인다. **이미 있는 파일이 있으면 멈추고** 덮어쓸지 사용자가 정한다(`--force` 는 사용자 승인 뒤에만).
 4. 실행: 같은 명령에서 `--dry` 를 뺀다. 성공 조건: `파일 11개 작성`. 아니면 오류 원문 보고(R4).
 5. **`ci.yml` 단계 추가**(스크립트가 하지 않는다): 원문은 `<키트>/files/github/ci-check-map.snippet.yml`. 상품 `ci.yml` 을 읽고 `actions/checkout` · `setup-node`(및 의존성 설치) **뒤**에 넣을 위치를 정해 **diff 로 사용자에게 보이고 확인**받는다. 그 단계들이 없으면 짐작하지 말고 묻는다.
@@ -157,7 +158,7 @@ metadata:
 11. CI: `gh pr checks <번호> -R <REPO>` 를 8~10초 간격으로 최대 30회 조회한다. 성공 전에는 머지를 제안하지 않는다.
 
 **B** — 머지: 「CI 가 통과했습니다. `<PR 주소>` 를 머지해도 될까요?」(승인 게이트). 승인이 없으면 하지 않는다.
-**C** — 머지 뒤: `gh api repos/<REPO>/contents/.github/workflows --jq '.[].name'` 에 `issue-sync.yml` 이 있다 · `gh api repos/<REPO>/hooks --jq 'length'` 가 `0` (0 이 아니면 `gh api repos/<REPO>/hooks --jq '.[] | {id, active, events}'` 를 보이고 멈춘다 — 사본이 2건 생길 수 있다).
+**C** — 머지 뒤: 상태 라벨을 만든다 — `STATUSES` 의 이름마다 `gh label create "jira:<이름>" -R <REPO> --description 'Jira 상태' --color <new DFE1E6 · indeterminate 0065FF · done 36B37E>`(이미 있으면 건너뛴다). 사람이 이 라벨을 붙여 Jira 상태를 바꾼다. 🔴 사용자에게 알린다: **Jira 흐름도가 받지 않는 전환(예: 검토를 꼭 거치게 한 흐름도에서 바로 완료)은 Jira 가 거절하고 GitHub 라벨과 어긋난 채 남는다 — 흐름도 · 대조표 `statuses` 를 맞추는 것은 관리자 몫**(흐름도를 바꾸면 대조표도 고친다). 그다음 `gh api repos/<REPO>/contents/.github/workflows --jq '.[].name'` 에 `issue-sync.yml` 이 있다 · `gh api repos/<REPO>/hooks --jq 'length'` 가 `0` (0 이 아니면 `gh api repos/<REPO>/hooks --jq '.[] | {id, active, events}'` 를 보이고 멈춘다 — 사본이 2건 생길 수 있다).
 **D** — 위 두 확인이 통과했을 때.
 
 ### 단계 5. Jira 규칙 켜기

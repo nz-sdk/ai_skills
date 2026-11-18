@@ -49,6 +49,14 @@ spaces:
     default: 작업
     startDateField: customfield_10015   # Jira 「시작 날짜」 — 등록 날짜를 넣는다
     notPlannedResolutions: []   # 이 해결(resolution) 이름으로 완료되면 GitHub 을 「계획 안 함」 으로 닫는다 — 비면 모두 completed
+    # Jira 상태 → 범주. GitHub 라벨 jira:<상태> 를 붙이면 Jira 도 그 상태로 — done 이면 GitHub 을 닫고, 그 밖이면 연다
+    statuses:
+      할 일: new
+      진행 중: indeterminate
+      검토 중: indeterminate
+      완료: done
+    closeStatus: 완료     # GitHub 닫기 → Jira 이 상태 · 라벨 jira:완료
+    reopenStatus: 할 일   # GitHub 다시 열기 → Jira 이 상태 · 라벨 jira:할 일
 
 # 영역 — 화면 폴더(src/screens/<폴더>) 묶음 · 스페이스 · 담당자 후보(선택지 앞에 놓는 순서 — 기본값 아님)
 areas:

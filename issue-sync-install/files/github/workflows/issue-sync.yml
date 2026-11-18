@@ -20,7 +20,11 @@
 #   (칸이 없으면 출처의 상위 줄). GitHub → Jira 는 칸에서 키만 읽는다 — 키만 써도, 링크여도 된다. 글만 바뀌고 키가 같으면 상위 변경이 아니다
 # Jira 상태 — 새 규칙 ⑤가 status 에 「범주|상태 이름|해결」 을 실으면 GitHub 라벨 「jira:<상태 이름>」 하나를 붙인다(옛 jira:* 는 뗀다).
 #   해결이 대조표 spaces.<스페이스>.notPlannedResolutions 에 있으면 닫힘 이유 not planned. 옛 규칙(범주만)이면 열림 · 닫힘만
-#   jira:* 는 동기화용 라벨 — Jira 레이블로 보내지 않고, GitHub 에서 사람이 붙이거나 떼도 Jira 로 가지 않는다
+#   jira:* 는 동기화용 라벨 — Jira 레이블로 보내지 않는다
+# 상태 스위치 — GitHub 에서 사람이 jira:<상태> 를 붙이면 다른 jira:* 를 떼고(나중에 단 것만 남김) Jira 를 그 상태로 바꾼다.
+#   대조표 spaces.<스페이스>.statuses 의 범주가 done 이면 GitHub 을 닫고(규칙 ① close — ☒) 그 밖이면 연다(규칙 ① reopen).
+#   GitHub 닫기 · 다시 열기 버튼은 closeStatus · reopenStatus 로 보내고 라벨도 jira:<그 상태> 로 맞춘다.
+#   jira:* 를 떼는 것은 보내지 않는다. 건너뛰기를 막지 않는다 — Jira 흐름도가 받지 않는 전환은 관리자 몫(규칙 감사 로그에 실패)
 # 담당 — Jira 담당은 한 명이다. GitHub 담당이 여럿이면 첫 번째만 보내고 실행 요약 · notice 에 알린다
 #
 # 짝 찾기 (라벨 · 입력값에 기대지 않고 GitHub 안의 표시로 찾는다)
@@ -172,7 +176,9 @@ jobs:
             issues:reopened)   kind=reopen ;;
             issues:assigned|issues:unassigned) kind=assign ;;
             issues:labeled|issues:unlabeled)
-              if is_sync_label "$(jq -r '.label.name // ""' "$ev")"; then echo "동기화용 라벨 — 건너뛴다"; else kind=label; fi ;;
+              ln=$(jq -r '.label.name // ""' "$ev")
+              if [ "$action" = labeled ] && [[ "$ln" == jira:?* ]]; then kind=status   # 상태 스위치
+              elif is_sync_label "$ln"; then echo "동기화용 라벨 — 건너뛴다"; else kind=label; fi ;;
             issue_comment:created)
               if jq -e '(.comment.body // "" | contains("<!-- sync:jira -->")) or .comment.user.type == "Bot"' "$ev" >/dev/null; then
                 echo "옮겨 온 댓글 · 봇 댓글 — 건너뛴다"
@@ -215,6 +221,57 @@ jobs:
           sparse-checkout: .github/github-jira-map.yml
           sparse-checkout-cone-mode: false
 
+      # 상태 스위치 · 닫기 · 다시 열기 — jira:* 라벨을 하나로 맞추고, 라벨이면 GitHub 열림 · 닫힘을 범주에 맞춘 뒤
+      #   규칙 ①에 보낼 종류(close · reopen)와 상태 이름을 정한다. GH_TOKEN 이 github.token 이면 여기서 바꾼 라벨 · 닫힘은 워크플로를 깨우지 않는다
+      - name: Status switch
+        id: s
+        if: contains(fromJSON('["status","close","reopen"]'), steps.d.outputs.kind)
+        env:
+          KIND: ${{ steps.d.outputs.kind }}
+          KEY: ${{ steps.d.outputs.key }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: |
+          S="${KEY%%-*}"
+          cat_of() { N="$1" S="$S" yq -r '.spaces[strenv(S)].statuses[strenv(N)] // ""' "$MAP"; }
+          # 이슈의 jira:* 를 「jira:<이름>」 하나로 — 없으면 만든다(범주 색). 이름이 비면 아무것도 안 한다
+          one_label() {
+            local want="jira:$1" color l have=""
+            [ -n "$1" ] || return 0
+            case "$(cat_of "$1")" in new) color=DFE1E6 ;; indeterminate) color=0065FF ;; done) color=36B37E ;; *) color=EDEDED ;; esac
+            gh api "repos/$GH_REPO/issues/$NUMBER/labels?per_page=100" --jq '.[].name' > "$RUNNER_TEMP/have.txt"
+            while IFS= read -r l; do
+              case "$l" in jira:*) ;; *) continue ;; esac
+              if [ "$l" = "$want" ]; then have=1; continue; fi
+              gh api -X DELETE "repos/$GH_REPO/issues/$NUMBER/labels/$(jq -rn --arg s "$l" '$s | @uri')" >/dev/null && echo "라벨 -$l" || echo "::warning::라벨 $l 를 떼지 못했다"
+            done < "$RUNNER_TEMP/have.txt"
+            [ -z "$have" ] || return 0
+            gh label create "$want" --color "$color" --description 'Jira 상태' >/dev/null 2>&1 || true
+            jq -n --arg l "$want" '{labels: [$l]}' | gh api -X POST "repos/$GH_REPO/issues/$NUMBER/labels" --input - >/dev/null && echo "라벨 +$want" || echo "::warning::라벨 $want 를 붙이지 못했다"
+          }
+          send="$KIND"; want=""; closed=""
+          case "$KIND" in
+            status)
+              want=$(jq -r '.label.name' "$GITHUB_EVENT_PATH"); want="${want#jira:}"
+              one_label "$want"
+              c=$(cat_of "$want"); state=$(gh issue view "$NUMBER" --json state --jq .state)
+              case "$c" in
+                done)
+                  send=close
+                  if [ "$state" = OPEN ]; then gh issue close "$NUMBER" --reason completed >/dev/null; closed=1; echo "닫음 — jira:$want 는 완료 범주"; fi ;;
+                new|indeterminate)
+                  send=reopen
+                  if [ "$state" = CLOSED ]; then gh issue reopen "$NUMBER" >/dev/null; echo "다시 엶 — jira:$want 는 ${c} 범주"; fi ;;
+                *)
+                  send=reopen
+                  echo "::notice::「$want」 는 대조표 spaces.$S.statuses 에 없다 — 열림 · 닫힘은 그대로 두고 Jira 에만 보낸다" ;;
+              esac ;;
+            close)  want=$(S="$S" yq -r '.spaces[strenv(S)].closeStatus // ""' "$MAP");  one_label "$want" ;;
+            reopen) want=$(S="$S" yq -r '.spaces[strenv(S)].reopenStatus // ""' "$MAP"); one_label "$want" ;;
+          esac
+          { echo "send=$send"; echo "status=$want"; echo "closed=$closed"; } >> "$GITHUB_OUTPUT"
+          echo "보낼 종류 $send · 상태 ${want:-(규칙 기본값)}"
+          echo "- #$NUMBER $KIND → $send ${want:+jira:$want}" >> "$GITHUB_STEP_SUMMARY"
+
       # 러너의 apt pandoc 은 이미지마다 판이 달라 판을 고정한다
       - name: Install pandoc
         if: contains(fromJSON('["create","edit","comment"]'), steps.d.outputs.kind)
@@ -228,7 +285,8 @@ jobs:
       - name: Build payload
         if: steps.d.outputs.kind != ''
         env:
-          KIND: ${{ steps.d.outputs.kind }}
+          KIND: ${{ steps.s.outputs.send || steps.d.outputs.kind }}
+          STATUS: ${{ steps.s.outputs.status }}
           KEY: ${{ steps.d.outputs.key }}
           ROLE: ${{ steps.d.outputs.role }}
         run: |
@@ -356,16 +414,18 @@ jobs:
                 --arg summary "$summary" --arg description "$desc" \
                 --arg assignee "$assignee" --arg comment "$comment" --arg op "$op" --arg label "$label" \
                 --arg ek "$epicKey" --arg er "$epicRaw" --argjson ec "$epicChanged" \
-                --arg actor "$(jq -r '.sender.login // ""' "$ev")" \
+                --arg actor "$(jq -r '.sender.login // ""' "$ev")" --arg status "${STATUS:-}" \
             '{key: $key, kind: $kind, role: $role, summary: $summary, description: $description, assignee: $assignee, comment: $comment,
               op: $op, label: $label,
-              epicKey: (if $ek == "" then null else $ek end), epicRaw: $er, epicChanged: $ec, actor: $actor}' \
+              epicKey: (if $ek == "" then null else $ek end), epicRaw: $er, epicChanged: $ec, actor: $actor}
+             + (if $status == "" then {} else {status: $status} end)' \
             > "$RUNNER_TEMP/payload.json"
-          jq '{key, kind, role, summary, assignee, op, label, epicKey, epicChanged}' "$RUNNER_TEMP/payload.json"
+          # status — close · reopen 의 Jira 도착 상태(규칙 ① {{webhookData.status|기본}}). 없으면 키를 빼 규칙 기본값을 쓴다
+          jq '{key, kind, role, summary, assignee, op, label, status, epicKey, epicChanged}' "$RUNNER_TEMP/payload.json"
 
       # 닫으면 본문 할 일을 모두 체크한다 — Jira 설명의 ☐ → ☒ 는 규칙 ①의 close 가 한다. 다시 열 때는 바꾸지 않는다
       - name: Check boxes on close
-        if: steps.d.outputs.kind == 'close'
+        if: steps.d.outputs.kind == 'close' || steps.s.outputs.closed == '1'
         continue-on-error: true   # 체크에 실패해도 Jira 로 닫힘은 보낸다
         env:
           NUMBER: ${{ github.event.issue.number }}
@@ -383,7 +443,7 @@ jobs:
       - name: Send to Jira automation
         if: steps.d.outputs.kind != ''
         env:
-          KIND: ${{ steps.d.outputs.kind }}
+          KIND: ${{ steps.s.outputs.send || steps.d.outputs.kind }}
         run: |
           [ -n "$URL" ] && [ -n "$TOKEN" ] || { echo "::error::Secrets JIRA_<<SPACE>>_WEBHOOK_URL · JIRA_<<SPACE>>_WEBHOOK_TOKEN 이 없다"; exit 1; }
           # 실패 원인(Missing token · Invalid token 등)이 응답 본문에 온다

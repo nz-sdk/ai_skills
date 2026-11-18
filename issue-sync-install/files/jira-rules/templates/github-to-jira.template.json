@@ -464,7 +464,7 @@
                         "sendNotifications": true,
                         "destinationStatus": {
                           "type": "NAME",
-                          "value": "<<TRANSITION_DONE>>"
+                          "value": "{{webhookData.status|<<TRANSITION_DONE>>}}"
                         },
                         "transitionMatch": ""
                       },
@@ -585,7 +585,7 @@
                         "sendNotifications": true,
                         "destinationStatus": {
                           "type": "NAME",
-                          "value": "<<TRANSITION_REOPEN>>"
+                          "value": "{{webhookData.status|<<TRANSITION_REOPEN>>}}"
                         },
                         "transitionMatch": ""
                       },

@@ -10,6 +10,9 @@
   "ISSUE_TYPES": { "Bug": "버그", "Task": "작업", "Feature": "기능" },
   "DEFAULT_TYPE": "작업",
   "START_DATE_FIELD": "customfield_10015",
+  "STATUSES": { "할 일": "new", "진행 중": "indeterminate", "완료": "done" },
+  "TRANSITION_DONE": "완료",
+  "TRANSITION_REOPEN": "할 일",
   "PEOPLE": [
     { "github": "octocat", "accountId": "000000000000000000000000", "roles": ["developer"] }
   ],

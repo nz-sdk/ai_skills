@@ -21,10 +21,6 @@
 # Jira 상태 — 새 규칙 ⑤가 status 에 「범주|상태 이름|해결」 을 실으면 GitHub 라벨 「jira:<상태 이름>」 하나를 붙인다(옛 jira:* 는 뗀다).
 #   해결이 대조표 spaces.<스페이스>.notPlannedResolutions 에 있으면 닫힘 이유 not planned. 옛 규칙(범주만)이면 열림 · 닫힘만
 #   jira:* 는 동기화용 라벨 — Jira 레이블로 보내지 않는다
-# 댓글 수정 GitHub → Jira — GitHub 댓글을 Jira 에 옮길 때 머리 줄에 「원문」 링크(…#issuecomment-<번호>)를 단다 → 규칙 ① 이 댓글을 단 뒤
-#   kind=cmap 으로 「Jira 댓글 번호=GitHub 댓글 번호;」 를 돌려보내고 → GitHub 댓글 끝에 <!-- sync:jcid:<Jira 번호> --> →
-#   그 댓글을 고치면(issue_comment edited) kind=comment_edit + jcid 로 규칙 ① 의 「댓글 편집」 이 그 Jira 댓글을 고친다.
-#   이 기능 전에 단 댓글 · 짝 표시가 붙기 전 수정 · Jira 에서 옮겨 온 댓글(sync:jira)은 보내지 않는다
 # 상태 스위치 — GitHub 에서 사람이 jira:<상태> 를 붙이면 다른 jira:* 를 떼고(나중에 단 것만 남김) Jira 를 그 상태로 바꾼다.
 #   대조표 spaces.<스페이스>.statuses 의 범주가 done 이면 GitHub 을 닫고(규칙 ① close — ☒) 그 밖이면 연다(규칙 ① reopen).
 #   GitHub 닫기 · 다시 열기 버튼은 closeStatus · reopenStatus 로 보내고 라벨도 jira:<그 상태> 로 맞춘다.
@@ -68,7 +64,7 @@ on:
   issues:
     types: [opened, edited, closed, reopened, assigned, unassigned, labeled, unlabeled]
   issue_comment:
-    types: [created, edited]
+    types: [created]
   workflow_dispatch:
     inputs:
       kind:
@@ -189,19 +185,6 @@ jobs:
               else
                 kind=comment
               fi ;;
-            issue_comment:edited)
-              # 댓글 수정 — 짝 Jira 댓글 번호는 규칙 ① 이 댓글을 단 뒤 cmap 으로 GitHub 댓글 끝에 단 <!-- sync:jcid:<번호> -->
-              #   Jira 에서 옮겨 온 댓글(sync:jira)은 Jira 가 원본이라 보내지 않는다 · 표시만 바뀐 수정도 보내지 않는다
-              strip_jcid() { perl -0pe 's/\n*<!-- sync:jcid:\d+ -->\s*//g; s/\s+\z//'; }
-              if jq -e '(.comment.body // "" | contains("<!-- sync:jira")) or .comment.user.type == "Bot"' "$ev" >/dev/null; then
-                echo "옮겨 온 댓글 · 봇 댓글 — 건너뛴다"
-              elif [ "$(jq -r '.comment.body // ""' "$ev" | strip_jcid)" = "$(jq -r '.changes.body.from // ""' "$ev" | strip_jcid)" ]; then
-                echo "글은 그대로(짝 표시만 바뀜) — 건너뛴다"
-              else
-                jcid=$(jq -r '.comment.body // ""' "$ev" | grep -oE '<!-- sync:jcid:[0-9]+ -->' | tail -1 | grep -oE '[0-9]+' || true)
-                if [ -n "$jcid" ]; then kind=comment_edit; echo "jcid=$jcid" >> "$GITHUB_OUTPUT"
-                else echo "짝 Jira 댓글 표시 없음(이 기능 전에 단 댓글이거나 아직 짝 맞추기 전) — 건너뛴다"; fi
-              fi ;;
           esac
 
           # 사본은 제목 [JIRA 키] + 라벨 jira 둘 다 — 사람이 제목에 [JIRA 키] 를 쓴 원본(GCJ-C8)을 사본으로 보지 않는다
@@ -291,7 +274,7 @@ jobs:
 
       # 러너의 apt pandoc 은 이미지마다 판이 달라 판을 고정한다
       - name: Install pandoc
-        if: contains(fromJSON('["create","edit","comment","comment_edit"]'), steps.d.outputs.kind)
+        if: contains(fromJSON('["create","edit","comment"]'), steps.d.outputs.kind)
         run: |
           deb="$RUNNER_TEMP/pandoc.deb"
           curl -sSL --max-time 60 -o "$deb" \
@@ -304,7 +287,6 @@ jobs:
         env:
           KIND: ${{ steps.s.outputs.send || steps.d.outputs.kind }}
           STATUS: ${{ steps.s.outputs.status }}
-          JCID: ${{ steps.d.outputs.jcid }}
           KEY: ${{ steps.d.outputs.key }}
           ROLE: ${{ steps.d.outputs.role }}
         run: |
@@ -410,13 +392,10 @@ jobs:
               assignee=$(acct "$first")
               [ -z "$first" ] || [ -n "$assignee" ] || echo "::notice::담당 $first 는 대조표에 없다 — Jira 담당을 비운다"
               one_assignee_note "$first" ;;
-            comment|comment_edit)
-              # 머리 줄에 GitHub 댓글 링크(…#issuecomment-<id>) — 규칙 ① 이 이것으로 Jira 댓글 ↔ GitHub 댓글 짝을 찾는다(cmap)
-              #   짝 표시 <!-- sync:jcid:… --> 는 Jira 로 보내지 않는다
+            comment)
               who=$(jq -r '.comment.user.login' "$ev")
-              gurl=$(jq -r '.comment.html_url' "$ev")
-              text=$(jq -r '.comment.body // ""' "$ev" | perl -0pe 's/\n*<!-- sync:jcid:\d+ -->\s*//g' | tojira | mention)
-              comment=$(printf '*%s 님 GitHub 댓글* · [원문|%s]\n\n%s' "$who" "$gurl" "$text") ;;
+              text=$(jq -r '.comment.body // ""' "$ev" | tojira | mention)
+              comment=$(printf '*%s 님 GitHub 댓글*\n\n%s' "$who" "$text") ;;
           esac
 
           # 상위 에픽 — 원본 본문의 「상위 에픽 키」 칸이 바뀐 수정만 epicChanged=true. 규칙 ①이 조회해 있으면 상위를 바꾸고, 없으면 슬랙
@@ -436,16 +415,13 @@ jobs:
                 --arg assignee "$assignee" --arg comment "$comment" --arg op "$op" --arg label "$label" \
                 --arg ek "$epicKey" --arg er "$epicRaw" --argjson ec "$epicChanged" \
                 --arg actor "$(jq -r '.sender.login // ""' "$ev")" --arg status "${STATUS:-}" \
-                --arg number "$number" --arg jcid "${JCID:-}" \
             '{key: $key, kind: $kind, role: $role, summary: $summary, description: $description, assignee: $assignee, comment: $comment,
-              op: $op, label: $label, number: $number,
+              op: $op, label: $label,
               epicKey: (if $ek == "" then null else $ek end), epicRaw: $er, epicChanged: $ec, actor: $actor}
-             + (if $status == "" then {} else {status: $status} end)
-             + (if $jcid == "" then {} else {jcid: $jcid} end)' \
+             + (if $status == "" then {} else {status: $status} end)' \
             > "$RUNNER_TEMP/payload.json"
           # status — close · reopen 의 Jira 도착 상태(규칙 ① {{webhookData.status|기본}}). 없으면 키를 빼 규칙 기본값을 쓴다
-          # number — 규칙 ① 이 cmap 으로 돌려보낼 GitHub 이슈 번호 · jcid — comment_edit 가 고칠 Jira 댓글 번호
-          jq '{key, kind, role, summary, assignee, op, label, status, number, jcid, epicKey, epicChanged}' "$RUNNER_TEMP/payload.json"
+          jq '{key, kind, role, summary, assignee, op, label, status, epicKey, epicChanged}' "$RUNNER_TEMP/payload.json"
 
       # 닫으면 본문 할 일을 모두 체크한다 — Jira 설명의 ☐ → ☒ 는 규칙 ①의 close 가 한다. 다시 열 때는 바꾸지 않는다
       - name: Check boxes on close
@@ -523,8 +499,7 @@ jobs:
           #   comment|<댓글 id>  · comment|<댓글 id>|edit(댓글 수정)
           KIND="${KIND_IN%%|*}"; EXTRA=""
           [[ "$KIND_IN" == *"|"* ]] && EXTRA="${KIND_IN#*|}"
-          #   cmap — 규칙 ① 이 GitHub 댓글을 Jira 에 단 뒤 보내는 「Jira 댓글 번호=GitHub 댓글 번호;…」 (body) → GitHub 댓글에 짝 표시
-          case "$KIND" in create|link|edit|transition|comment|cmap) ;; *) echo "::error::kind 가 아니다: $KIND_IN"; exit 1 ;; esac
+          case "$KIND" in create|link|edit|transition|comment) ;; *) echo "::error::kind 가 아니다: $KIND_IN"; exit 1 ;; esac
           [[ "$EXTRA" =~ ^[A-Za-z0-9,|_-]*$ ]] || { echo "::error::kind 덧붙임 형식이 아니다: $KIND_IN"; exit 1; }
           { echo "KIND=$KIND"; echo "EXTRA=$EXTRA"; echo "NEW_RULE=$([[ "$KIND_IN" == *"|"* ]] && echo 1)"; } >> "$GITHUB_ENV"
 
@@ -973,28 +948,3 @@ jobs:
           gh issue comment "$NUMBER" --body-file "$RUNNER_TEMP/c.md" >/dev/null
           echo "댓글 → #$NUMBER (${name:-Jira 사용자})"
           echo "- [$KEY] 댓글 → #$NUMBER · ${name:-Jira 사용자}" >> "$GITHUB_STEP_SUMMARY"
-
-      # 댓글 짝 맞추기 — 규칙 ① 이 GitHub 댓글을 Jira 에 단 뒤 그 업무 댓글 전체를 「Jira 댓글 번호=GitHub 댓글 번호;」 로 보낸다
-      #   (Jira 댓글 머리 줄의 「원문」 링크 …#issuecomment-<번호> 에서 읽은 것). 짝 표시가 없는 GitHub 댓글 끝에
-      #   <!-- sync:jcid:<Jira 댓글 번호> --> 를 단다 → 그 댓글을 GitHub 에서 고치면 from-github 가 이 번호로 Jira 댓글을 고친다(comment_edit)
-      #   GITHUB_TOKEN 으로 고친 것은 워크플로를 깨우지 않는다 · 이 이슈의 댓글이 아닌 번호는 건너뛴다
-      - name: Comment pairs
-        if: steps.p.outputs.go == '1' && steps.p.outputs.kind == 'cmap'
-        env:
-          NUMBER: ${{ steps.p.outputs.number }}
-        run: |
-          printf '%s' "$BODY" | grep -oE '[0-9]+=[0-9]+' > "$RUNNER_TEMP/pairs.txt" || true
-          [ -s "$RUNNER_TEMP/pairs.txt" ] || { echo "짝 없음(받은 값에 GitHub 댓글 번호가 없다)"; exit 0; }
-          gh api "repos/$GH_REPO/issues/$NUMBER/comments?per_page=100" --paginate | jq -s 'add // []' > "$RUNNER_TEMP/comments.json"
-          done_=0
-          while IFS='=' read -r jid gid; do
-            if ! jq -e --arg i "$gid" 'any(.[]; (.id | tostring) == $i)' "$RUNNER_TEMP/comments.json" >/dev/null; then
-              echo "GitHub 댓글 $gid 는 #$NUMBER 에 없다 — 건너뛴다"; continue
-            fi
-            body=$(jq -r --arg i "$gid" 'map(select((.id | tostring) == $i)) | .[0].body // ""' "$RUNNER_TEMP/comments.json")
-            if printf '%s' "$body" | grep -qE '<!-- sync:jcid:[0-9]+ -->'; then echo "댓글 $gid 짝 표시 있음"; continue; fi
-            jq -n --arg b "$body" --arg j "$jid" '{body: ($b + "\n\n<!-- sync:jcid:" + $j + " -->")}' \
-              | gh api -X PATCH "repos/$GH_REPO/issues/comments/$gid" --input - >/dev/null
-            echo "댓글 $gid ↔ Jira 댓글 $jid 짝 표시"; done_=$((done_ + 1))
-          done < "$RUNNER_TEMP/pairs.txt"
-          echo "- [$KEY] 댓글 짝 표시 $done_ 건 → #$NUMBER" >> "$GITHUB_STEP_SUMMARY"

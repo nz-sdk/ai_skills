@@ -1,0 +1,114 @@
+// Companion test of the `authorizer` fragment — emitted with it and RENAMED WITH IT (step 9): this class becomes
+// <your authorizer>Test and every ExampleAuthorizer below becomes your class name.
+//
+// It pins the scope policy the fragment's header documents, as a table. A policy edit that opens an action then shows
+// up as a failing row, instead of as a quiet change in who can deploy, approve or run config.set.
+//
+// GENERATOR: if step 8 relaxed the policy for a local demo (Decision.allow() for some actions), change THOSE rows of
+// callers() to match — do not delete the test. Leave the DEBUG and the unauthenticated rows alone unless the user
+// explicitly opened them too.
+package {{PKG}};
+
+import org.htcom.protean.mcp.ModuleActionAuthorizer.Decision;
+import org.htcom.protean.mcp.ModuleActionAuthorizer.ModuleAction;
+import org.junit.jupiter.api.Test;
+import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.stereotype.Component;
+
+import java.security.Principal;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+
+class ExampleAuthorizerTest {
+
+    private final ExampleAuthorizer authorizer = new ExampleAuthorizer();
+
+    /** One caller shape and the actions it must be allowed. Every other action must be denied. */
+    private record Caller(String label, Principal principal, Set<ModuleAction> allowed) {
+    }
+
+    private static final Set<ModuleAction> WRITE_ACTIONS = EnumSet.of(
+            ModuleAction.READ, ModuleAction.DEPLOY, ModuleAction.UPDATE, ModuleAction.DELETE, ModuleAction.APPROVE);
+
+    private static List<Caller> callers() {
+        TestingAuthenticationToken unauthenticated = token("SCOPE_mcp.admin", "SCOPE_mcp.write");
+        unauthenticated.setAuthenticated(false);
+        return List.of(
+                new Caller("no principal (stdio transport)", null, EnumSet.noneOf(ModuleAction.class)),
+                new Caller("token not authenticated", unauthenticated, EnumSet.noneOf(ModuleAction.class)),
+                new Caller("non-mcp authorities only", token("SCOPE_openid", "ROLE_ADMIN"),
+                        EnumSet.noneOf(ModuleAction.class)),
+                new Caller("mcp.read", token("SCOPE_mcp.read"), EnumSet.of(ModuleAction.READ)),
+                new Caller("mcp.write (implies read)", token("SCOPE_mcp.write"), WRITE_ACTIONS),
+                new Caller("mcp.admin alone", token("SCOPE_mcp.admin"), EnumSet.of(ModuleAction.CUSTOM)),
+                new Caller("mcp.read + mcp.admin", token("SCOPE_mcp.read", "SCOPE_mcp.admin"),
+                        EnumSet.of(ModuleAction.READ, ModuleAction.CUSTOM)),
+                new Caller("all three scopes", token("SCOPE_mcp.read", "SCOPE_mcp.write", "SCOPE_mcp.admin"),
+                        union(WRITE_ACTIONS, ModuleAction.CUSTOM)));
+    }
+
+    @Test
+    void everyActionIsDecidedAsTheScopeTableSays() {
+        for (Caller caller : callers()) {
+            // values(), not a hand-written list: a constant added by a future protean release is checked too.
+            for (ModuleAction action : ModuleAction.values()) {
+                Decision decision = authorizer.authorize(caller.principal(), action, "orders");
+                assertEquals(caller.allowed().contains(action), decision.allowed(),
+                        caller.label() + " / " + action + " -> " + decision);
+            }
+        }
+    }
+
+    @Test
+    void debugIsRefusedEvenWithEveryScope() {
+        Decision decision = authorizer.authorize(
+                token("SCOPE_mcp.read", "SCOPE_mcp.write", "SCOPE_mcp.admin"), ModuleAction.DEBUG, "orders");
+        assertFalse(decision.allowed(), "debug.* attaches a live debugger: " + decision);
+    }
+
+    @Test
+    void theModuleIdDoesNotChangeTheDecision() {
+        // The CUSTOM built-ins and the module-less resources pass moduleId == null.
+        for (Caller caller : callers()) {
+            for (ModuleAction action : ModuleAction.values()) {
+                assertEquals(authorizer.authorize(caller.principal(), action, "orders").allowed(),
+                        authorizer.authorize(caller.principal(), action, null).allowed(),
+                        caller.label() + " / " + action);
+            }
+        }
+    }
+
+    @Test
+    void aDenialSaysWhy() {
+        for (Caller caller : callers()) {
+            for (ModuleAction action : ModuleAction.values()) {
+                Decision decision = authorizer.authorize(caller.principal(), action, "orders");
+                if (!decision.allowed()) {
+                    assertFalse(decision.reason() == null || decision.reason().isBlank(),
+                            caller.label() + " / " + action + " was denied without a reason");
+                }
+            }
+        }
+    }
+
+    @Test
+    void itIsABeanSoItReplacesThePermissiveDefault() {
+        // protean's own authorizer is @ConditionalOnMissingBean — without @Component this policy never runs.
+        assertNotNull(ExampleAuthorizer.class.getAnnotation(Component.class));
+    }
+
+    private static TestingAuthenticationToken token(String... authorities) {
+        return new TestingAuthenticationToken("caller", null, authorities);
+    }
+
+    private static Set<ModuleAction> union(Set<ModuleAction> base, ModuleAction extra) {
+        EnumSet<ModuleAction> all = EnumSet.copyOf(base);
+        all.add(extra);
+        return all;
+    }
+}

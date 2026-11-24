@@ -1,0 +1,104 @@
+// Companion test of the `custom_mcp_tool` fragment — emitted with it and RENAMED WITH IT (step 9): this class becomes
+// <your tool class>Test and every ExampleTool below becomes your class name.
+//
+// Two kinds of test. The CONTRACT ones hold for any tool: a name that does not shadow a built-in, an input schema that
+// names what call() reads, bad input answered as a tool error rather than an exception, structured output that
+// carries every key its output schema requires, and an action() chosen on purpose. The BEHAVIOUR one is the
+// example's echo.
+//
+// GENERATOR: if you generated a different call(), rewrite echoesTheTextInUpperCase() for it and adjust the input in
+// the contract tests; keep the contract tests. If the tool was generated READ-only (data_access selected and the tool
+// reads the database), flip actionIsChosenOnPurpose() to READ and also assert annotations().readOnlyHint().
+package {{PKG}};
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.htcom.protean.mcp.McpCallContext;
+import org.htcom.protean.mcp.McpToolResult;
+import org.htcom.protean.mcp.ModuleActionAuthorizer.ModuleAction;
+import org.junit.jupiter.api.Test;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ExampleToolTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final ExampleTool tool = new ExampleTool(mapper);
+
+    @Test
+    void itIsABeanSoTheDispatcherListsIt() {
+        assertNotNull(ExampleTool.class.getAnnotation(Component.class));
+    }
+
+    @Test
+    void itsNameIsItsOwn() {
+        String name = tool.name();
+        assertTrue(name != null && name.matches("[A-Za-z0-9_.-]{1,128}"), "MCP tool name: " + name);
+        // McpDispatcher keeps tools in a map keyed by name, last write wins: a protean.* name would REPLACE a built-in.
+        assertFalse(name.startsWith("protean."), name + " would replace a built-in tool");
+        assertFalse(tool.description() == null || tool.description().isBlank(), "description");
+    }
+
+    @Test
+    void theInputSchemaNamesWhatCallReads() {
+        ObjectNode schema = tool.inputSchema();
+        assertEquals("object", schema.path("type").asText());
+        for (String required : strings(schema.path("required"))) {
+            assertTrue(schema.path("properties").has(required), "required '" + required + "' is not a property");
+        }
+        assertTrue(strings(schema.path("required")).contains("text"));
+    }
+
+    @Test
+    void echoesTheTextInUpperCase() {
+        McpToolResult result = tool.call(mapper.createObjectNode().put("text", "orders"), McpCallContext.anonymous());
+        assertFalse(result.isError(), result.text());
+        assertEquals("ORDERS", result.structured().path("echoed").asText());
+    }
+
+    @Test
+    void structuredOutputCarriesEveryKeyItsSchemaRequires() {
+        ObjectNode outputSchema = tool.outputSchema();
+        assertNotNull(outputSchema, "declare an outputSchema when call() returns structured content");
+        McpToolResult result = tool.call(mapper.createObjectNode().put("text", "orders"), McpCallContext.anonymous());
+        for (String required : strings(outputSchema.path("required"))) {
+            assertTrue(result.structured().has(required), "structured output is missing '" + required + "'");
+        }
+    }
+
+    @Test
+    void badInputIsAToolErrorNotAnException() {
+        List<JsonNode> bad = new ArrayList<>();
+        bad.add(null);
+        bad.add(mapper.createObjectNode());
+        bad.add(mapper.createObjectNode().put("text", ""));
+        bad.add(mapper.createObjectNode().putNull("text"));
+        for (JsonNode arguments : bad) {
+            McpToolResult result = assertDoesNotThrow(() -> tool.call(arguments, McpCallContext.anonymous()),
+                    "arguments " + arguments);
+            assertTrue(result.isError(), "arguments " + arguments + " should be a tool error");
+        }
+    }
+
+    @Test
+    void actionIsChosenOnPurpose() {
+        // CUSTOM = the SPI default, which the `authorizer` policy puts behind mcp.admin. A read-only tool returns READ.
+        assertEquals(ModuleAction.CUSTOM, tool.action());
+    }
+
+    private static List<String> strings(JsonNode array) {
+        List<String> out = new ArrayList<>();
+        array.forEach(n -> out.add(n.asText()));
+        return out;
+    }
+}

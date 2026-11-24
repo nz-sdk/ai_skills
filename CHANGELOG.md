@@ -11,6 +11,7 @@
 
 ### 기능
 
+* **issue-sync-install:** 자체 러너(컨테이너 포함)에서도 돈다 — 저장소 변수 `ISSUE_SYNC_RUNS_ON`(러너 라벨 JSON, 비면 `ubuntu-latest`)로 러너를 고르고, pandoc · yq 를 sudo 없이 판 고정 + sha256 확인으로 도구 캐시에 받는다 · 빠진 도구는 「Runner check」 가 먼저 알린다 · `LANG` · `LC_ALL` = `C.UTF-8` ([#54](https://github.com/nz-sdk/ai_skills/pull/54))
 * **issue-sync-install:** Jira 작업 목록(체크박스)이 GitHub 에 보통 목록 · 취소선으로 오던 것을 본문 「할 일」 칸 안에서 `- [ ]` · `- [x]` 로 되살린다. 시험 스위치 변수 `SYNC_ADF_TASKLIST=1` 이면 GitHub → Jira 설명의 체크박스 묶음을 `{adf}` 작업 목록으로 보낸다(기본 꺼짐) ([#46](https://github.com/nz-sdk/ai_skills/pull/46))
 * **issue-sync-install:** 상위 에픽 칸을 「[키 · 에픽 이름](링크)」 하나로(사본 출처의 상위 줄과 겹치지 않게), Jira 상태를 GitHub 라벨 `jira:<상태>` 로 · 정한 해결이면 「계획 안 함」 으로 닫기(대조표 `notPlannedResolutions`), 담당은 한 명 안내(실행 요약 · 양식 · 스킬). 옛 규칙 본문이면 옛 동작 ([#38](https://github.com/nz-sdk/ai_skills/pull/38))
 * **issue-sync-install:** 동기화 1단계 — 같은 이슈에 몰린 변경을 취소 없이 차례로(`queue: max`), Jira 설명이 바뀐 때만 GitHub 원본 본문을 고침, 한 줄 줄바꿈 유지, Jira 화면의 담당 지정 · 전환도 반영, 사본 맨 위 등록자 줄, 레이블 양방향, 상위 변경을 Jira 설명 칸에도, 닫을 때 할 일 체크, Jira 댓글 수정 → GitHub. 규칙 6개(새 「댓글 수정」) · 입력 10개 그대로(옛 규칙 호환) ([#33](https://github.com/nz-sdk/ai_skills/pull/33))

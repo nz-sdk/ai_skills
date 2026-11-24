@@ -983,7 +983,7 @@ npm run preview            # ⚠️ prod 프리뷰 — 셸(external)일 때 vend
 - 배포 형태: **셸(host) / 앱(self-contained)** — external 정책 결정(§1-0)
 - 아키텍처(셸): importmap external(VENDOR_EXTERNAL 게이트) · **external 목록은 손으로 적지 않고 `src/**` 스캔으로 생성(§10-0)** · **vendor named-shim(동적 Object.keys)+code splitting** · **서브패스 패키지도 splitting 으로 한 번에** · `esmExternalRequirePlugin` · **minify:false(비압축)** · prod CSP · **preview 렌더 검증 필수**
 - 통신: `@desktop/sdk` — **`client.request` = HTTP fetch(`POST {API_BASE}{topic}`, `API_BASE='/api'` 상대경로)**.
-  `serverStream`/`channel` 미구현. SharedWorker 는 [향후](§11-5)
+  `serverStream`/`channel` 미구현. SharedWorker 는 [향후](#11-5-향후-sharedworker)
 - API 호환: `version.json` + `useNewVersion` · `vite:preloadError` 1회 새로고침 · 개발 빌드 Deprecation 경고 ·
   (조건부) openapi-typescript 생성 타입 + CI 타입 동기화 · oasdiff(고정 버전 + sha256) — 정책은 `reference/api-compatibility.md`
 

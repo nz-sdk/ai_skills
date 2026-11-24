@@ -43,8 +43,13 @@
 
 ### 문서
 
+* **create-frontend:** 「향후 SharedWorker」 절로 가는 깨진 링크를 고친다 ([#64](https://github.com/nz-sdk/ai_skills/pull/64))
 * **nz_amoeba_make:** 생성 README 에 MCP 클라이언트 연결 절 ([#6](https://github.com/nz-sdk/ai_skills/pull/6))
 * 공용 문서 `reference/api-compatibility.md` — FE · BE API 호환 정책(create-frontend · nz_amoeba_make 가 가리킨다) ([#10](https://github.com/nz-sdk/ai_skills/pull/10))
+
+### 빌드 · 설정
+
+* CI 가 모든 PR 에서 스킬(머리말 · README 스킬 목록 · 상대 링크 · 문법 · CHANGELOG 줄 · 번역본)과 설치 키트(자체 시험 · 운영본 ↔ 키트 사본 — 지금은 경고 · verify-install)를 검사한다 ([#64](https://github.com/nz-sdk/ai_skills/pull/64))
 
 ## [1.0.0](https://github.com/nz-sdk/ai_skills/releases/tag/v1.0.0) (2026-09-14) — 최초 등록
 

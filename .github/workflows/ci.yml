@@ -1,29 +1,99 @@
-# CI — GitHub ↔ Jira 대조표 검사
+# CI — 스킬 검사 · GitHub ↔ Jira 대조표 검사
 #
-#   pull_request → main · push → main : 대조표(github-jira-map.yml)가 스키마에 맞는지 본다.
-#   대조표 · 스키마 · 이 파일이 바뀔 때만 돈다(스킬 파일만 고친 PR 에는 돌지 않는다).
-#   검사 단계 원문: issue-sync-install/files/github/ci-check-map.snippet.yml
+#   pull_request → main · push → main 마다 세 잡이 돈다(main 보호의 필수 검사다 — 경로로 거르지 않는다).
+#   check-skills : 스킬 머리말 · README 스킬 목록 · 상대 링크 · 문법(.mjs · .json · .yml · .ps1),
+#                  PR 이면 CHANGELOG 줄 · 번역본 함께 고침까지. 검사 목록은 .github/scripts/check-skills.mjs 머리 주석.
+#                  CHANGELOG 줄이 필요 없는 PR 은 no-changelog 라벨을 단다.
+#   check-kit    : 설치 키트 자체 시험 · 운영본 ↔ 키트 사본 일치(지금은 경고) · verify-install.mjs. 검사 목록은 .github/scripts/check-kit.mjs.
+#   check-map    : 대조표(github-jira-map.yml)가 스키마에 맞는지 본다.
+#                  검사 단계 원문: issue-sync-install/files/github/ci-check-map.snippet.yml
 
 name: CI
 
 on:
   pull_request:
     branches: [main]
-    paths:
-      - .github/github-jira-map.yml
-      - .github/github-jira-map.schema.json
-      - .github/workflows/ci.yml
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches: [main]
-    paths:
-      - .github/github-jira-map.yml
-      - .github/github-jira-map.schema.json
-      - .github/workflows/ci.yml
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
+  check-skills:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # PR 검사가 기준 커밋과의 차이를 본다
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install yaml
+        run: npm install --no-save --silent --prefix "$RUNNER_TEMP/deps" yaml@2.6.1
+
+      - name: Check skills
+        env:
+          YAML_DIR: ${{ runner.temp }}/deps
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          NO_CHANGELOG: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') && '1' || '' }}
+        run: node .github/scripts/check-skills.mjs
+
+      # PowerShell 스크립트(dev-pc-setup/scripts/check.ps1 등)는 파싱만 한다 — 실행하지 않는다.
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          $files = git ls-files '*.ps1'
+          $bad = 0
+          foreach ($f in $files) {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errs) | Out-Null
+            foreach ($e in $errs) { Write-Output "::error file=$f,line=$($e.Extent.StartLineNumber)::$($e.Message)"; $bad++ }
+          }
+          Write-Output "PowerShell $($files.Count)개 — 오류 $($bad)건"
+          if ($bad) { exit 1 }
+
+  check-kit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install yaml
+        run: npm install --no-save --silent --prefix "$RUNNER_TEMP/deps" yaml@2.6.1
+
+      # 설치 키트의 자체 시험 — 예시 값으로 파일 설치 · Jira 규칙 렌더가 끝까지 도는지 본다.
+      - name: Self-test issue-sync-install kit
+        run: |
+          node issue-sync-install/files/tools/install-files.mjs --selftest
+          node issue-sync-install/files/jira-rules/render-rules.mjs --selftest
+
+      # 이 저장소 값으로 키트를 설치해 운영본과 비교한다 — 갈라지면 한쪽만 고친 것이다.
+      # 지금은 경고다: report-issue 사본이 이미 갈라져 있다(#55). 맞춘 뒤 continue-on-error 를 지운다.
+      - name: Compare live files with kit copies
+        continue-on-error: true
+        env:
+          YAML_DIR: ${{ runner.temp }}/deps
+        run: node .github/scripts/check-kit.mjs copies
+
+      # 운영 값으로 Jira 규칙을 렌더하고 워크플로 · 양식 · 대조표 · 스킬과의 맞물림을 본다.
+      - name: Verify install (verify-install.mjs)
+        env:
+          YAML_DIR: ${{ runner.temp }}/deps
+        run: node .github/scripts/check-kit.mjs verify
+
   check-map:
     runs-on: ubuntu-latest
     timeout-minutes: 5

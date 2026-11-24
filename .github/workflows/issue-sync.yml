@@ -50,6 +50,11 @@
 # Secrets: JIRA_TEST1_WEBHOOK_URL · JIRA_TEST1_WEBHOOK_TOKEN(TEST1 규칙 「[AX_AI] Github -> Jira Issue」 수신 웹후크) · SYNC_BOT_TOKEN(선택)
 #   옛 JIRA_WEBHOOK_URL · JIRA_WEBHOOK_TOKEN 은 쓰지 않는다
 # Variables: SYNC_BOT_LOGIN(선택 — 전용 계정 아이디) · SYNC_ADF_TASKLIST(선택 — 1 이면 위 {adf} 작업 목록 시험)
+#   · ISSUE_SYNC_RUNS_ON(선택 — 러너 라벨 JSON. 비면 "ubuntu-latest" · 자체 러너 예 ["self-hosted","linux"])
+#
+# 러너 — GitHub 호스트 러너 · 자체 러너(컨테이너 포함) 어디서나 돈다. sudo 를 쓰지 않는다.
+#   러너에 있어야 하는 것: bash · curl · tar · jq · gh (Runner check 단계가 먼저 본다)
+#   pandoc · yq 는 판을 고정해 sha256 을 확인한 뒤 도구 캐시(RUNNER_TOOL_CACHE)에 받는다 — 자체 러너는 두 번째 실행부터 다시 받지 않는다
 #
 # ★ workflow_dispatch 입력은 지금 10개다 — 늘리지 않고 person · parent 처럼 「a|b」로 묶거나 kind 에 「|덧붙임」 으로 싣는다
 #   (옛 규칙이 켜진 채로 머지돼도 깨지지 않게 — 옛 kind 값은 옛 동작).
@@ -104,7 +109,11 @@ permissions:
 
 env:
   PANDOC_VERSION: 3.1.11.1
+  YQ_VERSION: v4.44.3
   MAP: .github/github-jira-map.yml
+  # 컨테이너 러너는 로캘이 비어(POSIX) 한글 처리(sed · 글자 수)가 바이트 단위가 된다
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
 
 jobs:
   # ===================================================================
@@ -115,7 +124,7 @@ jobs:
       github.event_name != 'workflow_dispatch'
       && !github.event.issue.pull_request
       && (vars.SYNC_BOT_LOGIN == '' || github.event.sender.login != vars.SYNC_BOT_LOGIN)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.ISSUE_SYNC_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 5
     concurrency:
       group: issue-sync-gh-${{ github.event.issue.number }}
@@ -133,6 +142,13 @@ jobs:
       SYNC_ADF_TASKLIST: ${{ vars.SYNC_ADF_TASKLIST }}   # 1 이면 설명의 체크박스 묶음을 {adf} 작업 목록으로(시험)
 
     steps:
+      # 자체 러너에서 빠진 도구를 「command not found」 대신 한 줄로 알린다
+      - name: Runner check
+        run: |
+          miss=""
+          for c in curl tar jq gh; do command -v "$c" >/dev/null || miss="$miss $c"; done
+          [ -z "$miss" ] || { echo "::error::러너에 없는 도구:$miss — 러너 이미지에 넣는다"; exit 1; }
+
       - name: Decide kind · pair
         id: d
         run: |
@@ -221,6 +237,51 @@ jobs:
           sparse-checkout: .github/github-jira-map.yml
           sparse-checkout-cone-mode: false
 
+      # pandoc · yq — 판을 고정하고 sha256 을 확인한다(이미지마다 판이 다르거나 없다). sudo 를 쓰지 않는다
+      - name: Install tools
+        if: steps.d.outputs.kind != ''
+        env:
+          NEED_PANDOC: ${{ contains(fromJSON('["create","edit","comment"]'), steps.d.outputs.kind) }}
+        run: |
+          case "$(uname -m)" in
+            x86_64|amd64)  arch=amd64
+                           pandoc_sha=07635f6953201ee261bf90e821b8fe36c045e5a6fbae2ae6b1c2127715432942
+                           yq_sha=a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7 ;;
+            aarch64|arm64) arch=arm64
+                           pandoc_sha=3eae92420d3eee830ec121267bbf2e7f3a6c066aa58d599a9b769f50c4967c67
+                           yq_sha=0e7e1524f68d91b3ff9b089872d185940ab0fa020a5a9052046ef10547023156 ;;
+            *) echo "::error::지원하지 않는 CPU $(uname -m)"; exit 1 ;;
+          esac
+          # ★ 판을 올리면 위 sha256 도 같이 바꾼다(pandoc 은 공식 체크섬 파일이 없어 받은 파일로 잰다 · yq 는 릴리스 checksums 와 같다)
+          [ "$PANDOC_VERSION" = 3.1.11.1 ] && [ "$YQ_VERSION" = v4.44.3 ] || { echo "::error::도구 판이 바뀌었다 — sha256 도 바꾼다"; exit 1; }
+          sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d" " -f1; }
+          get() {   # get <url> <파일> <sha256>
+            curl -sSfL --retry 2 --max-time 120 -o "$2.part" "$1"
+            [ "$(sha "$2.part")" = "$3" ] || { rm -f "$2.part"; echo "::error::sha256 불일치 — $1"; exit 1; }
+            mv "$2.part" "$2"
+          }
+          root="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/issue-sync"
+          ydir="$root/yq-$YQ_VERSION-$arch"
+          if [ ! -x "$ydir/yq" ]; then
+            mkdir -p "$ydir"
+            get "https://github.com/mikefarah/yq/releases/download/$YQ_VERSION/yq_linux_$arch" "$ydir/yq" "$yq_sha"
+            chmod +x "$ydir/yq"
+          fi
+          echo "$ydir" >> "$GITHUB_PATH"
+          "$ydir/yq" --version
+          if [ "$NEED_PANDOC" = true ]; then
+            pdir="$root/pandoc-$PANDOC_VERSION-$arch"
+            if [ ! -x "$pdir/bin/pandoc" ]; then
+              tgz="$RUNNER_TEMP/pandoc.tar.gz"
+              get "https://github.com/jgm/pandoc/releases/download/$PANDOC_VERSION/pandoc-$PANDOC_VERSION-linux-$arch.tar.gz" "$tgz" "$pandoc_sha"
+              rm -rf "$pdir.part" && mkdir -p "$pdir.part"
+              tar -xzf "$tgz" -C "$pdir.part" --strip-components 1
+              rm -rf "$pdir" && mv "$pdir.part" "$pdir"
+            fi
+            echo "$pdir/bin" >> "$GITHUB_PATH"
+            "$pdir/bin/pandoc" --version | head -1
+          fi
+
       # 상태 스위치 · 닫기 · 다시 열기 — jira:* 라벨을 하나로 맞추고, 라벨이면 GitHub 열림 · 닫힘을 범주에 맞춘 뒤
       #   규칙 ①에 보낼 종류(close · reopen)와 상태 이름을 정한다. GH_TOKEN 이 github.token 이면 여기서 바꾼 라벨 · 닫힘은 워크플로를 깨우지 않는다
       - name: Status switch
@@ -271,16 +332,6 @@ jobs:
           { echo "send=$send"; echo "status=$want"; echo "closed=$closed"; } >> "$GITHUB_OUTPUT"
           echo "보낼 종류 $send · 상태 ${want:-(규칙 기본값)}"
           echo "- #$NUMBER $KIND → $send ${want:+jira:$want}" >> "$GITHUB_STEP_SUMMARY"
-
-      # 러너의 apt pandoc 은 이미지마다 판이 달라 판을 고정한다
-      - name: Install pandoc
-        if: contains(fromJSON('["create","edit","comment"]'), steps.d.outputs.kind)
-        run: |
-          deb="$RUNNER_TEMP/pandoc.deb"
-          curl -sSL --max-time 60 -o "$deb" \
-            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
-          sudo dpkg -i "$deb" >/dev/null
-          pandoc --version | head -1
 
       - name: Build payload
         if: steps.d.outputs.kind != ''
@@ -460,7 +511,7 @@ jobs:
   # ===================================================================
   from-jira:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.ISSUE_SYNC_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 5
     # 같은 키가 연달아 오면 차례로 — 두 번째 create 가 첫 번째 이슈를 보고 건너뛴다
     concurrency:
@@ -489,6 +540,13 @@ jobs:
       SYNC_ADF_TASKLIST: ${{ vars.SYNC_ADF_TASKLIST }}   # 1 이면 위 설명의 체크박스 묶음을 {adf} 작업 목록으로(시험)
 
     steps:
+      # 자체 러너에서 빠진 도구를 「command not found」 대신 한 줄로 알린다
+      - name: Runner check
+        run: |
+          miss=""
+          for c in curl tar jq gh; do command -v "$c" >/dev/null || miss="$miss $c"; done
+          [ -z "$miss" ] || { echo "::error::러너에 없는 도구:$miss — 러너 이미지에 넣는다"; exit 1; }
+
       - name: Check input · find pair
         id: p
         run: |
@@ -541,14 +599,50 @@ jobs:
           sparse-checkout: .github/github-jira-map.yml
           sparse-checkout-cone-mode: false
 
-      - name: Install pandoc
-        if: steps.p.outputs.go == '1' && contains(fromJSON('["create","edit","comment"]'), steps.p.outputs.kind)
+      # pandoc · yq — 판을 고정하고 sha256 을 확인한다(이미지마다 판이 다르거나 없다). sudo 를 쓰지 않는다
+      - name: Install tools
+        if: steps.p.outputs.go == '1'
+        env:
+          NEED_PANDOC: ${{ contains(fromJSON('["create","edit","comment"]'), steps.p.outputs.kind) }}
         run: |
-          deb="$RUNNER_TEMP/pandoc.deb"
-          curl -sSL --max-time 60 -o "$deb" \
-            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
-          sudo dpkg -i "$deb" >/dev/null
-          pandoc --version | head -1
+          case "$(uname -m)" in
+            x86_64|amd64)  arch=amd64
+                           pandoc_sha=07635f6953201ee261bf90e821b8fe36c045e5a6fbae2ae6b1c2127715432942
+                           yq_sha=a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7 ;;
+            aarch64|arm64) arch=arm64
+                           pandoc_sha=3eae92420d3eee830ec121267bbf2e7f3a6c066aa58d599a9b769f50c4967c67
+                           yq_sha=0e7e1524f68d91b3ff9b089872d185940ab0fa020a5a9052046ef10547023156 ;;
+            *) echo "::error::지원하지 않는 CPU $(uname -m)"; exit 1 ;;
+          esac
+          # ★ 판을 올리면 위 sha256 도 같이 바꾼다(pandoc 은 공식 체크섬 파일이 없어 받은 파일로 잰다 · yq 는 릴리스 checksums 와 같다)
+          [ "$PANDOC_VERSION" = 3.1.11.1 ] && [ "$YQ_VERSION" = v4.44.3 ] || { echo "::error::도구 판이 바뀌었다 — sha256 도 바꾼다"; exit 1; }
+          sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d" " -f1; }
+          get() {   # get <url> <파일> <sha256>
+            curl -sSfL --retry 2 --max-time 120 -o "$2.part" "$1"
+            [ "$(sha "$2.part")" = "$3" ] || { rm -f "$2.part"; echo "::error::sha256 불일치 — $1"; exit 1; }
+            mv "$2.part" "$2"
+          }
+          root="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/issue-sync"
+          ydir="$root/yq-$YQ_VERSION-$arch"
+          if [ ! -x "$ydir/yq" ]; then
+            mkdir -p "$ydir"
+            get "https://github.com/mikefarah/yq/releases/download/$YQ_VERSION/yq_linux_$arch" "$ydir/yq" "$yq_sha"
+            chmod +x "$ydir/yq"
+          fi
+          echo "$ydir" >> "$GITHUB_PATH"
+          "$ydir/yq" --version
+          if [ "$NEED_PANDOC" = true ]; then
+            pdir="$root/pandoc-$PANDOC_VERSION-$arch"
+            if [ ! -x "$pdir/bin/pandoc" ]; then
+              tgz="$RUNNER_TEMP/pandoc.tar.gz"
+              get "https://github.com/jgm/pandoc/releases/download/$PANDOC_VERSION/pandoc-$PANDOC_VERSION-linux-$arch.tar.gz" "$tgz" "$pandoc_sha"
+              rm -rf "$pdir.part" && mkdir -p "$pdir.part"
+              tar -xzf "$tgz" -C "$pdir.part" --strip-components 1
+              rm -rf "$pdir" && mv "$pdir.part" "$pdir"
+            fi
+            echo "$pdir/bin" >> "$GITHUB_PATH"
+            "$pdir/bin/pandoc" --version | head -1
+          fi
 
       # 사본 제목 · 본문 모양은 create 와 edit 이 같아야 한다 — 한곳에 둔다
       - name: Prepare helpers

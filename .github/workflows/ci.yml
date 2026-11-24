@@ -58,7 +58,7 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errs) | Out-Null
             foreach ($e in $errs) { Write-Output "::error file=$f,line=$($e.Extent.StartLineNumber)::$($e.Message)"; $bad++ }
           }
-          Write-Output "PowerShell $($files.Count)개 — 오류 $bad건"
+          Write-Output "PowerShell $($files.Count)개 — 오류 $($bad)건"
           if ($bad) { exit 1 }
 
   check-kit:

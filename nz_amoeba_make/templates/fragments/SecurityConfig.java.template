@@ -105,12 +105,16 @@ public class SecurityConfig {
         }
         if (audiences.isBlank() || audiences.contains("${")) {
             throw new IllegalStateException("""
-                    No audience is configured, so this Resource Server would accept ANY token the issuer signed                     — including one obtained for a different resource entirely. /platform/mcp is a remote code                     execution surface, so this app refuses to start.
+                    No audience is configured, so this Resource Server would accept ANY token the issuer signed \
+                    — including one obtained for a different resource entirely. /platform/mcp is a remote code \
+                    execution surface, so this app refuses to start.
 
                     application.yml binds the audience to the resource identifier:
                       spring.security.oauth2.resourceserver.jwt.audiences: ${protean.mcp.authorization.resource:}
 
-                    So this is blank because protean.mcp.authorization.resource is blank. Set it — and set the                     Authorization Server's audience claim to the SAME string. A mismatch is not silent: every                     request 401s with 'invalid_token'. Check what this app advertises with:
+                    So this is blank because protean.mcp.authorization.resource is blank. Set it — and set the \
+                    Authorization Server's audience claim to the SAME string. A mismatch is not silent: every \
+                    request 401s with 'invalid_token'. Check what this app advertises with:
                       curl -s http://<this-host>:<port>/.well-known/oauth-protected-resource | jq -r .resource
 
                     Resolved value was: '""" + audiences + "'");

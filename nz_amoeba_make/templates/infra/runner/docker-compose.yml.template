@@ -30,7 +30,11 @@ services:
   #   Same trap the app's own Dockerfile solves with mkdir+chown. Here the image cannot be modified, so an init
   #   container does it.
   init:
-    image: myoung34/github-runner:latest
+    # ★ PINNED, here and on the runner service below — the tag is the Actions runner version. `:latest` would
+    #   change the runner on every re-pull, which is exactly what DISABLE_AUTO_UPDATE further down exists to
+    #   prevent. The price of a pin: GitHub stops sending jobs to a runner more than ~30 days behind the newest
+    #   release, so raise both tags together before that (docs/ci-cd.md, "Raising the runner version").
+    image: myoung34/github-runner:2.338.2
     user: root
     entrypoint: ["sh", "-c", "chown -R 1001:121 /runner-data /runner-work"]
     volumes:
@@ -41,7 +45,7 @@ services:
     depends_on:
       init:
         condition: service_completed_successfully
-    image: myoung34/github-runner:latest
+    image: myoung34/github-runner:2.338.2
     container_name: gh-runner-{{NAME_KEBAB}}
     restart: unless-stopped
 

@@ -33,8 +33,6 @@ fills from the option/vendor specs.
   DB up → server run) generated as `setup.sh` (chmod +x). Placeholders `{{IS_SNAPSHOT}}`, `{{HAS_DB_DOCKER}}`,
   `{{ISOLATION}}`, and the sidecar trio `{{WORKER_RUNTIME}}` / `{{SIDECAR_JAR}}` / `{{SIDECAR_IMAGE}}` /
   `{{SIDECAR_SHARED_API}}` (empty when unset).
-- `isolation-worker.yml.template` / `isolation-container.yml.template` — `protean:` blocks merged when the
-  isolation mode is `worker` / `container`.
 - `db/` — per-vendor database templates (selected via `db-vendors.yaml`):
   - `docker-compose.{mysql,postgres}.yml.template` + `init.{mysql,postgres}.sql.template` — docker connection mode.
     The `init.*` data schema is for a **data-access** DataSource only — a DataSource that just backs the jdbc

@@ -44,7 +44,9 @@ services:
     container_name: {{NAME_KEBAB}}-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-pw}
+      # No fixed root password: the image generates one and prints it once to the container log
+      # ("GENERATED ROOT PASSWORD"). Nothing here uses root — the healthcheck below uses the app account.
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
       # ★ NOT configurable. The schema name is hardcoded in application.yml's JDBC URL. Change it here and the
       #   app connects to a schema that does not exist.
       MYSQL_DATABASE: {{DB}}
@@ -62,9 +64,10 @@ services:
     command: ["--default-time-zone=+00:00"]
 
     ports:
-      # Host side only. The app connects over the container network to mysql:3306 and is unaffected.
-      # If the host already runs MySQL on 3306, step aside with MYSQL_HOST_PORT=13306.
-      - "${MYSQL_HOST_PORT:-3306}:3306"
+      # Host side only, and LOOPBACK only — without the 127.0.0.1 prefix Docker binds 0.0.0.0 and the sidecar is
+      # reachable from the whole network. The app connects over the container network to mysql:3306 and is
+      # unaffected. If the host already runs MySQL on 3306, step aside with MYSQL_HOST_PORT=13306.
+      - "127.0.0.1:${MYSQL_HOST_PORT:-3306}:3306"
 
     volumes:
       - {{NAME_KEBAB}}-mysql-data:/var/lib/mysql
@@ -79,12 +82,20 @@ services:
       #   Dropping :ro starts, but litters the host's ./init with empty files. The numeric prefix is the
       #   execution order (alphabetical):
       #   - ./sql/items.sql:/docker-entrypoint-initdb.d/01-items.sql:ro
+      #
+      # [OPTIONAL auto-provision] GENERATOR: when protean.worker.db.auto-provision=true, UNCOMMENT the line below
+      #   (and emit init/00-provision-admin.sql). Without it the admin account application.yml names is never
+      #   created in this sidecar, and the first scope provisioning fails on the database login. Otherwise
+      #   delete this paragraph. It is a single-file bind, so the rule above holds — but a workspace bind does
+      #   not resolve on the containerised self-hosted runner (see .github/runner/docker-compose.yml).
+      # - ./init/00-provision-admin.sql:/docker-entrypoint-initdb.d/00-provision-admin.sql:ro
 
     healthcheck:
       # mysqladmin ping over TCP (-h 127.0.0.1), not the socket — and that matters: the temporary server during
       # the initdb phase starts with networking DISABLED, so this check keeps failing until the init scripts
       # finish and the REAL server comes up. That is exactly the condition service_healthy above wants.
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      # As the APP account, not root: root has a generated password nobody here knows.
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" --silent"]
       interval: 10s
       timeout: 5s
       retries: 12

@@ -13,8 +13,13 @@ plugins {
 }
 
 repositories {
-    mavenLocal()   // resolves the locally-published SNAPSHOT
+    // Central FIRST. Listed first, mavenLocal would shadow a released version with whatever copy of the same
+    // coordinate happens to sit in ~/.m2 — and Gradle trusts a local hit without checking it is complete.
     mavenCentral() // resolves a released version + everything else
+    // mavenLocal is here for ONE thing: a locally-published protean SNAPSHOT, which Central never hosts.
+    mavenLocal {
+        content { includeGroup '{{COORD_GROUP}}' }
+    }
 }
 
 java {

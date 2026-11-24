@@ -1,9 +1,17 @@
 # Docker
 
+<!-- ★ GENERATOR: this document is written for a SECURED app with a server database. Prune it with the same
+     two markers docker-compose.app.yml.template uses:
+       [OPTIONAL secured MCP] — without MCP OAuth, delete the OAUTH_ISSUER_URI row and the
+                                "OAUTH_ISSUER_URI is not this app's address" section and its troubleshooting rows.
+       [OPTIONAL server DB]   — for h2 or no data access delete the DB_* rows; for a typed "other" vendor keep
+                                only DB_USER and DB_PASSWORD.
+     Then make the Quick start comment below name only the values that are left. -->
+
 ## Quick start
 
 ```bash
-cp .env.example .env          # fill in OAUTH_ISSUER_URI, DB_HOST, DB_USER, DB_PASSWORD
+cp .env.example .env          # fill in the values marked required in the table below
 docker compose up -d --build
 docker compose ps             # wait for STATUS to read (healthy)
 docker compose logs -f
@@ -74,7 +82,7 @@ Dockerfile does `mkdir -p /var/lib/protean/modules && chown` before declaring th
 | `SERVER_PORT` | `server.port` + the port inside `protean.mcp.authorization.resource` | `{{PORT}}` | No |
 | `SERVER_HOST` | the host inside `protean.mcp.authorization.resource` (advertised, **not** a bind address) | `localhost` | No |
 | `DB_HOST` | `spring.datasource.url` host | none | **Yes** |
-| `DB_PORT` | `spring.datasource.url` port | `3306` | No |
+| `DB_PORT` | `spring.datasource.url` port | `{{DB_PORT_DEFAULT}}` | No |
 | `DB_USER` | `spring.datasource.username` | none | **Yes** |
 | `DB_PASSWORD` | `spring.datasource.password` | none | **Yes** |
 | `DB_QUERY_URL` / `_USER` / `_PASSWORD` | `amoeba.db-query.datasource.*` — the query tools' own account `[db_query_tools ONLY]` | empty → the `DB_*` account | No (recommended) |

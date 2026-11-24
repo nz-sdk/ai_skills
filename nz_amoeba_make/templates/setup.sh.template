@@ -25,6 +25,12 @@ COORD="{{COORD}}"
 VERSION="{{VERSION}}"
 IS_SNAPSHOT="{{IS_SNAPSHOT}}"       # true | false — SNAPSHOT resolves from mavenLocal
 HAS_DB_DOCKER="{{HAS_DB_DOCKER}}"   # true | false — sample manages a DB via docker compose
+# The compose file that holds ONLY the database for this host-run path: docker-compose.yml when the project
+# has no deployment infra, docker-compose.db.yml when docker-compose.yml is the APP's file (infra >= container).
+# Never the app's file — that would start the app container on SERVER_PORT and `./gradlew run` below would then
+# die with a BindException, with no database up at all.
+DB_COMPOSE_FILE="{{DB_COMPOSE_FILE}}"
+DB_PORT_DEFAULT="{{DB_PORT_DEFAULT}}" # the vendor's port (db-vendors.yaml default_port); empty when no server DB
 HAS_DB_EXTERNAL="{{HAS_DB_EXTERNAL}}" # true | false — data access against an ALREADY-RUNNING server (existing/other)
 DB_NAME="{{DB}}"                    # the schema hardcoded in application.yml's JDBC URL (empty when no data access)
 ISOLATION="{{ISOLATION}}"          # in-process | worker | container
@@ -33,6 +39,7 @@ SIDECAR_JAR="{{SIDECAR_JAR}}"                # protean.worker.sidecar.jar   (emp
 SIDECAR_IMAGE="{{SIDECAR_IMAGE}}"            # protean.worker.sidecar.image (empty when unset)
 SIDECAR_SHARED_API="{{SIDECAR_SHARED_API}}"  # protean.worker.sidecar.shared-api (empty when unset)
 OAUTH="{{OAUTH}}"                    # true | false — protean.mcp.authorization.resource is set
+SECRET_ENVS="{{SECRET_ENVS}}"        # env names application.yml reads with NO fallback for a secret key (may be empty)
 SERVER_HOST="${SERVER_HOST:-localhost}"  # ADVERTISED hostname (not a bind address — that would be server.address)
 SERVER_PORT="${SERVER_PORT:-{{PORT}}}"   # see the header: this name is what carries through to server.port
 export SERVER_HOST SERVER_PORT       # the app reads both from the environment; no command-line argument needed
@@ -97,7 +104,7 @@ fi
 # comment names this check, so do not delete one without the other.
 if [ "${HAS_DB_EXTERNAL}" = "true" ]; then
   db_host="${DB_HOST:-localhost}"
-  db_port="${DB_PORT:-3306}"
+  db_port="${DB_PORT:-${DB_PORT_DEFAULT:-3306}}"
 
   if [ -z "${DB_PASSWORD:-}" ]; then
     err "DB_PASSWORD is not set, and application.yml has no fallback for it on an existing-server deployment (the
@@ -179,6 +186,14 @@ if [ "${OAUTH}" = "true" ]; then
   echo "  MCP resource:     ${RESOURCE_URL}"
 fi
 
+# Secret keys written as ${NAME} with no fallback (protean-options.yaml `secret: true`). Same trap as DB_PASSWORD:
+# the binder leaves an unresolved ${NAME} in place as a literal string, so the app would start and then present
+# that literal as the credential. Fail here instead.
+for name in ${SECRET_ENVS}; do
+  [ -n "${!name:-}" ] || err "${name} is not set. application.yml reads it with no fallback (a secret that lives in no committed file). Set it: export ${name}=<value>"
+  echo "  ${name}: set"
+done
+
 # HTTP port free — this is the real bind port (server.port derives from SERVER_PORT), so the check is meaningful.
 #
 # ★ A CHECK THAT CANNOT RUN MUST SAY SO. This used to read `if have ss && ss -ltn | grep -q ...` followed by an
@@ -215,8 +230,12 @@ if [ "${CHECK_ONLY}" = "true" ]; then
 fi
 
 if [ "${HAS_DB_DOCKER}" = "true" ]; then
-  log "Starting the database (docker compose up -d --wait)"
-  docker compose up -d --wait
+  [ -n "${DB_COMPOSE_FILE}" ] && [ -f "${DB_COMPOSE_FILE}" ] \
+    || err "database compose file '${DB_COMPOSE_FILE}' not found — it is the file that holds only the database for this host-run path."
+  log "Starting the database (docker compose -f ${DB_COMPOSE_FILE} up -d --wait)"
+  # This is the HOST-RUN path. The container path (docker-compose.yml + docker-compose.local-db.yml) publishes
+  # the same host port, so run one or the other, not both.
+  docker compose -f "${DB_COMPOSE_FILE}" up -d --wait
 fi
 
 log "Starting the server on port ${SERVER_PORT} (./gradlew run) — Ctrl-C to stop"

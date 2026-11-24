@@ -118,6 +118,10 @@ Drive from `reference/db-vendors.yaml`:
 2. **Connection**:
    - server-backed (mysql/postgresql): **existing** (user *types* host/port/db/user/password → datasource only,
      no compose) or **docker** (generate `docker-compose.yml` + `init/01-schema.sql` from the vendor templates).
+     For **mysql + existing**, also ask whether the server accepts TLS (default yes) and take the URL from
+     `url_existing` or `url_existing_no_tls` accordingly — the docker URL turns TLS off and must not be pointed
+     at a remote server. Say what `sslMode=REQUIRED` does not do: it encrypts but does not verify the server's
+     certificate, so with a CA available the operator should move to `VERIFY_CA` / `VERIFY_IDENTITY`.
    - `h2` (embedded): ask `mem` or `file` — no server, no docker; write `src/main/resources/schema.sql`.
    - other: user *types* driver Maven coordinate, driver-class-name, JDBC URL, user/password — datasource + driver
      dep only, no compose.
@@ -276,6 +280,14 @@ Non-booleans (int/long/duration/string): a "check which to set" multi-select, th
 (typed) — checking only means "I want to override this default", then you collect the value. Enums: a selection
 of the allowed values (default preselected in wording).
 
+**★ A key marked `secret: true` in the yaml is NEVER collected or written as a literal.** Today that is
+`protean.worker.db.admin-password`, `protean.bridge.secret` and `protean.worker.admin-auth.secret`. Ask only
+whether to set it; the value itself goes in an environment variable named by the key's `env:` field, and
+`application.yml` carries the placeholder (step 9). Typing it here would put a credential into `application.yml`
+and into `ConfigMatchesSelectionTest.java` — two committed files. For the two shared secrets, recommend leaving
+them unset: blank + enabled means protean generates one per JVM and injects it into the workers.
+(`protean.gate.signature.keys` is the opposite case — trusted PUBLIC keys, meant to be committed and reviewed.)
+
 ### 8. Validation + dependency resolution
 After all selections (steps 3–6), run a **validation pass** over the full resolved set before writing anything.
 Check, and fix or stop on each:
@@ -363,7 +375,11 @@ Korean prose around a verbatim list of keys, values and paths.
 
 ### 9. Generate
 Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (=`{{PKG}}` with `.`→`/`),
-`{{PORT}}` (the port typed in step 1), `{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`.
+`{{PORT}}` (the port typed in step 1), `{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`. Under
+`worker.db.auto-provision` with a docker DB also `{{ADMIN_USER}}` / `{{ADMIN_PW}}` (=
+`protean.worker.db.admin-username` and the generated throwaway admin password) — the init SQL quotes them, so a
+token left unfilled creates an account literally named `{{ADMIN_USER}}` without any error.
+`{{COORD_GROUP}}` is the group half of `{{COORD}}` (`org.htcom`); `build.gradle` uses it to limit `mavenLocal`.
 
 **★ `{{COORD}}` IS `group:artifact` — WITHOUT THE VERSION.** Step 2 asks the user for a *coordinate* that
 includes it (`org.htcom:protean:0.0.2`), so the two are not the same string and you must split before
@@ -376,7 +392,13 @@ substituting: `{{COORD}}` = `org.htcom:protean`, `{{VERSION}}` = `0.0.2`. Templa
 the templates branch on and an unset one silently reads as "false": `{{NAME_KEBAB}}`, `{{IS_SNAPSHOT}}`,
 `{{HAS_DB_DOCKER}}`, `{{HAS_DB_EXTERNAL}}` (data access whose connection mode is `existing` or `other` — this is
 what arms `setup.sh`'s external-DB preflight), `{{ISOLATION}}`, `{{WORKER_RUNTIME}}`, `{{SIDECAR_*}}`,
-`{{OAUTH}}`, `{{REPO_URL}}`.
+`{{OAUTH}}`, `{{REPO_URL}}`, and three that keep the generated infra in step with the selection:
+- `{{DB_VENDOR}}` — `mysql` | `postgresql` | `h2` | `other` | `none` (the step 4 vendor; `none` = no data access).
+  `ci.yml` and `deploy.yml` branch on it at run time.
+- `{{DB_PORT_DEFAULT}}` — the vendor's `default_port` from `db-vendors.yaml` (`3306` / `5432`); empty for `h2`,
+  `other` and `none`. It is the `DB_PORT` fallback everywhere, so a PostgreSQL project is never handed 3306.
+- `{{DB_COMPOSE_FILE}}` — the compose file that holds ONLY the database for the host-run path of `setup.sh`:
+  `docker-compose.yml` at step 6 `none`, `docker-compose.db.yml` at `container` or above; empty without a docker DB.
 
 Engine:
 - **`application.yml`** — start from `templates/application.yml.template` (minimal base) and **inject every set
@@ -460,10 +482,14 @@ Engine:
   DataSource's PURPOSE: a **data-access** DataSource gets `init/01-schema.sql` (the `items` table); a DataSource
   that only backs the **jdbc module-store** does NOT (Protean creates its own store tables) — omit the items init.
   H2 data-access: `schema.sql`. existing/other: none.
-  ⚠ **Only when step 6 chose `none`.** At `container` or above, `docker-compose.yml` is the APP's file, so the
-  database is written as `docker-compose.local-db.yml` from
-  `templates/infra/docker-compose.local-db.<vendor>.yml.template` instead. That overlay carries no `init/`
-  mount (see its comment on why a directory bind breaks the entrypoint) — put seed SQL in a single-file mount.
+  ⚠ **That file NAME is only for step 6 `none`.** At `container` or above, `docker-compose.yml` is the APP's
+  file, so write the same `templates/db/*` compose (and its `init/`) as **`docker-compose.db.yml`** — it is what
+  `setup.sh` starts for the host-run path (`{{DB_COMPOSE_FILE}}`). The overlay cannot play that part: it patches
+  the `app` service, the base file's `:?` guards fire when the two are read together, and its account comes from
+  `.env` rather than from the docker fallback in `application.yml`. For the CONTAINER path also write
+  `docker-compose.local-db.yml` from `templates/infra/docker-compose.local-db.<vendor>.yml.template`. That overlay
+  carries no `init/` mount (see its comment on why a directory bind breaks the entrypoint) — put seed SQL in a
+  single-file mount. Both publish the same host port: say in the README that one or the other runs, not both.
 - **deployment infra (step 6)** — copy from `templates/infra/` per the chosen level, mapping filenames:
   `Dockerfile.template` → `Dockerfile`, `dockerignore.template` → `.dockerignore`,
   `gitattributes.template` → `.gitattributes`, `env.example.template` → `.env.example`,
@@ -472,7 +498,17 @@ Engine:
   `runner/env.example.template` → `.github/runner/.env.example`, `docs/*.md.template` → `docs/*.md`.
   Substitute `{{NAME}}`, `{{NAME_KEBAB}}` (= `{{NAME}}` with `_`→`-`; it names containers, volumes and the
   compose project), `{{PKG}}`, `{{PORT}}`, `{{DB}}`, and at the `full` level `{{REPO_URL}}`.
-  Four things to get right:
+  Things to get right:
+  - **★ THE INFRA FOLLOWS THE SELECTION — fill `{{OAUTH}}` / `{{DB_VENDOR}}` / `{{DB_PORT_DEFAULT}}` in every
+    infra file, and prune two markers.** `ci.yml`, `deploy.yml` and the Dockerfile `HEALTHCHECK` branch on the
+    filled values at run time (readiness, the discovery smokes, the database container, which `.env` keys are
+    required), so do not hand-edit those. Compose cannot branch, so there you prune:
+    `[OPTIONAL secured MCP]` — without MCP OAuth delete the `OAUTH_ISSUER_URI` block;
+    `[OPTIONAL server DB]` — keep the `DB_*` block for mysql / postgresql, keep only `DB_USER` / `DB_PASSWORD` for
+    a typed `other` vendor, delete it for `h2` or no data access. The markers sit in
+    `docker-compose.app.yml.template`, `env.example.template`, `docs/docker.md.template` and
+    `docs/secrets.md.template`. A `:?` guard left on a value the app never reads makes the operator invent one;
+    an unfilled `{{OAUTH}}` makes CI wait for a discovery document that is never published.
   - **Drop every `[db_query_tools ONLY]` block when that capability is not selected** — `env.example.template`,
     `docker-compose.app.yml.template` and `docs/docker.md.template` carry one each, like the README's.
   - **★ PRUNE EVERY `[OPTIONAL local-db]` BLOCK WHEN NO OVERLAY IS EMITTED.** `docker-compose.local-db.yml` is
@@ -495,6 +531,10 @@ Engine:
     false`, so never touch those.)
   - **`{{...}}` is not always a placeholder.** `ci.yml` contains `{{.State.Health.Status}}`, which is docker
     inspect's Go template. Skill placeholders are `{{UPPER_SNAKE_CASE}}` only — copy anything else verbatim.
+  - **★ FINISH BY SEARCHING FOR WHAT YOU DID NOT FILL.** After the last file is written, grep the generated tree
+    for `\{\{[A-Z][A-Z0-9_]*\}\}` and treat every hit as a generation error — fill it or stop, never hand over a
+    tree that still has one. (The Go template above starts with a dot, so it does not match.) An unfilled token
+    is rarely loud: it becomes a database account, a compose project name or a shell value of that literal text.
   - **Do not "simplify" the load-bearing parts.** Each is a comment explaining a failure that is otherwise
     silent: no `java -jar`, `jmods` removed in the build stage, no `services:`/`--network host` in CI,
     `overwrite: true` on the artifact uploads, the deploy-host label plus `$RUNNER_NAME` self-check, the smoke
@@ -504,9 +544,16 @@ Engine:
     `docs/secrets.md`, including `DEPLOY_RUNNER_NAME`.
 - **provisioning admin (D5)** — when `worker.db.auto-provision=true` AND the DB is docker-managed, generate
   `init/00-provision-admin.sql` creating the `worker.db.admin-username`/`admin-password` account with
-  CREATE DATABASE/USER + GRANT (MySQL) or CREATE SCHEMA/ROLE (Postgres), so provisioning works at deploy. For an
-  existing server, instead print the exact GRANT the admin account needs. Never leave admin creds that don't
-  exist on the target DB.
+  CREATE DATABASE/USER + GRANT (MySQL) or CREATE SCHEMA/ROLE (Postgres), so provisioning works at deploy. The
+  password is a `secret: true` key: write `${WORKER_DB_ADMIN_PASSWORD:{{ADMIN_PW}}}` for this docker path (a
+  generated throwaway that must match the init SQL) and `${WORKER_DB_ADMIN_PASSWORD}` with no fallback for an
+  existing server. At
+  step 6 `container` or above the sidecar overlay has no `init/` mount: uncomment its
+  `[OPTIONAL auto-provision]` single-file mount line, or the account is never created there. For an
+  existing server, instead print the statements under `provision_admin` in `db-vendors.yaml` verbatim — do not
+  compose a GRANT yourself — together with its warning: on MySQL this account can reach every schema on the
+  instance, so it belongs on an instance used for provisioning only. Never leave admin creds that don't exist
+  on the target DB.
 - **scope seed + deploy guidance (auto-provision)** — set `protean.worker.db.scopes` in `application.yml` to at
   least one seed scope (e.g. `[default]`) so modules have an ACTIVE scope to bind to. In the README's deploy
   section, show that every module deploy MUST pass a **`scope`** (deploy-arg / `module.yaml` `scope:`) naming a
@@ -519,10 +566,17 @@ Engine:
   is what provisions JDK 21 on a machine that does not have one. Omit it and `setup.sh`'s JDK 21 preflight fails
   on exactly the fresh-clone case the resolver exists for.
 - **README.md** (from template — list the selected capabilities), **`.gitignore`**, **`Application.java`**.
+- **`docs/api-compatibility.md`** (when `interface_spec_validator` is selected) — copy the repo-level
+  [reference/api-compatibility.md](../reference/api-compatibility.md) into the project as that file, as the policy
+  document itself asks, and point the README's "Changing a deployed module" section at it. Leave its "정할 것"
+  blanks for the team unless the user gives the values. The path resolves when the whole skills repository is
+  installed (the README's method); if only this skill's folder was copied and the file is absent, say so and
+  skip the copy rather than writing one from memory.
 - **setup.sh** (always — the FINAL artifact) — from `templates/setup.sh.template`, `chmod +x`. A Linux/Ubuntu
   install-and-run script for this exact configuration: preflight (JDK 21 via javac, gradlew, protean jar in
   mavenLocal when SNAPSHOT, Docker daemon + compose when a docker DB, sidecar artifact when
-  `worker.runtime=sidecar`, free port) → `docker compose up -d --wait` (if docker DB) → `./gradlew run`. Fill
+  `worker.runtime=sidecar`, free port) → `docker compose -f {{DB_COMPOSE_FILE}} up -d --wait` (if docker DB) →
+  `./gradlew run`. Fill `{{DB_COMPOSE_FILE}}` and `{{DB_PORT_DEFAULT}}` (above),
   `{{IS_SNAPSHOT}}` (version ends with `-SNAPSHOT`) and `{{HAS_DB_DOCKER}}` (data access OR jdbc-store DataSource
   selected AND connection = docker), **`{{HAS_DB_EXTERNAL}}`** (the same but connection = `existing`/`other` —
   arms the external-DB preflight: `DB_PASSWORD` present, `DB_HOST` not silently falling back to `localhost`, a
@@ -534,10 +588,16 @@ Engine:
   then checks the artifact required for this track and skips the bootJar build under `runtime=sidecar`). Also fill
   `{{OAUTH}}` (`true` when `mcp.authorization.resource` is set) — that gates the issuer preflight block, which
   fails `--check` on an unset `OAUTH_ISSUER_URI` instead of letting the app die with a stack trace, and prints the
-  advertised `RESOURCE_URL` built from `SERVER_HOST`/`SERVER_PORT`. Supports `./setup.sh --check`.
+  advertised `RESOURCE_URL` built from `SERVER_HOST`/`SERVER_PORT`. Fill `{{SECRET_ENVS}}` with the
+  space-separated `env:` names of the `secret: true` keys written WITHOUT a fallback (empty when there are
+  none) — the preflight fails on an unset one, because the binder would otherwise pass the literal `${...}`
+  string on as the secret. Supports `./setup.sh --check`.
 - **self-check test** (always) — `src/test/java/{{PKG_PATH}}/ConfigMatchesSelectionTest.java` from
   `templates/fragments/ConfigMatchesSelectionTest.java.template`. Fill its `<<assertions>>` with one
-  `assertEquals(<value>, cfg.get("<protean.key>"))` per selected `protean.*` key, `<<fragment-checks>>` with a
+  `assertEquals(<value>, cfg.get("<protean.key>"))` per selected `protean.*` key (for a `secret: true` key the
+  expected value is the PLACEHOLDER string exactly as written in `application.yml`, e.g.
+  `"${WORKER_DB_ADMIN_PASSWORD}"` — the test reads the raw yaml, so this pins the indirection and never holds
+  the secret), `<<fragment-checks>>` with a
   `Class.forName` check per selected fragment, and `<<module-classpath-checks>>` with one `Class.forName` per
   selected `module_classpath` entry (the representative FQCN each entry documents). That last block is the only
   automated guard on module-facing deps — without it a missing jar surfaces at the FIRST DEPLOY as a module
@@ -550,7 +610,7 @@ Korean; print every command byte-for-byte** — a translated or "tidied" command
 - **`./setup.sh`** — preflight-checks the environment and prerequisites, brings up the DB (if any), and runs the
   server. `./setup.sh --check` runs the checks only. (This is the final generated artifact.)
 - (mavenLocal path) `cd <protean repo> && ./gradlew publishToMavenLocal`.
-- (DB docker) `docker compose up -d`.
+- (DB docker) `docker compose up -d` — at step 6 `container` or above, `docker compose -f docker-compose.db.yml up -d`.
 - `./gradlew run` (JDK 21).
 - (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
 - Hit a deployed module endpoint; `curl localhost:{{PORT}}/platform/modules` for state.

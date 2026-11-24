@@ -36,8 +36,6 @@
   서버 실행)를 `setup.sh` 로 생성하고 `chmod +x` 합니다. 플레이스홀더는 `{{IS_SNAPSHOT}}`,
   `{{HAS_DB_DOCKER}}`, `{{ISOLATION}}`, 그리고 sidecar 3종 `{{WORKER_RUNTIME}}` / `{{SIDECAR_JAR}}` /
   `{{SIDECAR_IMAGE}}` / `{{SIDECAR_SHARED_API}}`(미설정 시 공백).
-- `isolation-worker.yml.template` / `isolation-container.yml.template` — 격리 모드가 `worker` / `container` 일 때
-  병합되는 `protean:` 블록.
 - `db/` — 벤더별 데이터베이스 템플릿 (`db-vendors.yaml` 로 선택):
   - `docker-compose.{mysql,postgres}.yml.template` + `init.{mysql,postgres}.sql.template` — docker 연결 방식.
     `init.*` 데이터 스키마는 **데이터 접근용** DataSource 에만 해당합니다 — jdbc module-store 만 받치는

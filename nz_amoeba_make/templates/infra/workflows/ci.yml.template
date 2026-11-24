@@ -209,7 +209,7 @@ jobs:
           # we wait by hand.
           for i in $(seq 1 60); do
             # ★ GENERATOR: `{{.State.Health.Status}}` is docker inspect's Go template, NOT a skill placeholder.
-            #   Copy it through verbatim. Skill placeholders are {{UPPER_SNAKE_CASE}} only.
+            #   Copy it through verbatim. Skill placeholders are upper-snake-case names in double braces only.
             s=$(docker inspect -f '{{.State.Health.Status}}' "$DB_CT" 2>/dev/null || echo starting)
             if [ "$s" = "healthy" ]; then echo "database healthy after $((i*2))s"; break; fi
             if [ "$i" = "60" ]; then

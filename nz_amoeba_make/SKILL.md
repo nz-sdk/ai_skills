@@ -375,7 +375,11 @@ Korean prose around a verbatim list of keys, values and paths.
 
 ### 9. Generate
 Substitute `{{NAME}}`, `{{PKG}}` (the package typed in step 1), `{{PKG_PATH}}` (=`{{PKG}}` with `.`→`/`),
-`{{PORT}}` (the port typed in step 1), `{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`.
+`{{PORT}}` (the port typed in step 1), `{{COORD}}`, `{{VERSION}}`, and DB tokens `{{DB}}`/`{{PW}}`. Under
+`worker.db.auto-provision` with a docker DB also `{{ADMIN_USER}}` / `{{ADMIN_PW}}` (=
+`protean.worker.db.admin-username` and the generated throwaway admin password) — the init SQL quotes them, so a
+token left unfilled creates an account literally named `{{ADMIN_USER}}` without any error.
+`{{COORD_GROUP}}` is the group half of `{{COORD}}` (`org.htcom`); `build.gradle` uses it to limit `mavenLocal`.
 
 **★ `{{COORD}}` IS `group:artifact` — WITHOUT THE VERSION.** Step 2 asks the user for a *coordinate* that
 includes it (`org.htcom:protean:0.0.2`), so the two are not the same string and you must split before
@@ -527,6 +531,10 @@ Engine:
     false`, so never touch those.)
   - **`{{...}}` is not always a placeholder.** `ci.yml` contains `{{.State.Health.Status}}`, which is docker
     inspect's Go template. Skill placeholders are `{{UPPER_SNAKE_CASE}}` only — copy anything else verbatim.
+  - **★ FINISH BY SEARCHING FOR WHAT YOU DID NOT FILL.** After the last file is written, grep the generated tree
+    for `\{\{[A-Z][A-Z0-9_]*\}\}` and treat every hit as a generation error — fill it or stop, never hand over a
+    tree that still has one. (The Go template above starts with a dot, so it does not match.) An unfilled token
+    is rarely loud: it becomes a database account, a compose project name or a shell value of that literal text.
   - **Do not "simplify" the load-bearing parts.** Each is a comment explaining a failure that is otherwise
     silent: no `java -jar`, `jmods` removed in the build stage, no `services:`/`--network host` in CI,
     `overwrite: true` on the artifact uploads, the deploy-host label plus `$RUNNER_NAME` self-check, the smoke
@@ -558,6 +566,12 @@ Engine:
   is what provisions JDK 21 on a machine that does not have one. Omit it and `setup.sh`'s JDK 21 preflight fails
   on exactly the fresh-clone case the resolver exists for.
 - **README.md** (from template — list the selected capabilities), **`.gitignore`**, **`Application.java`**.
+- **`docs/api-compatibility.md`** (when `interface_spec_validator` is selected) — copy the repo-level
+  [reference/api-compatibility.md](../reference/api-compatibility.md) into the project as that file, as the policy
+  document itself asks, and point the README's "Changing a deployed module" section at it. Leave its "정할 것"
+  blanks for the team unless the user gives the values. The path resolves when the whole skills repository is
+  installed (the README's method); if only this skill's folder was copied and the file is absent, say so and
+  skip the copy rather than writing one from memory.
 - **setup.sh** (always — the FINAL artifact) — from `templates/setup.sh.template`, `chmod +x`. A Linux/Ubuntu
   install-and-run script for this exact configuration: preflight (JDK 21 via javac, gradlew, protean jar in
   mavenLocal when SNAPSHOT, Docker daemon + compose when a docker DB, sidecar artifact when

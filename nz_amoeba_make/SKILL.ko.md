@@ -382,7 +382,10 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 
 `{{NAME}}`, `{{PKG}}`(step 1 에서 입력받은 패키지), `{{PKG_PATH}}`(=`{{PKG}}` 의 `.`→`/`),
 `{{PORT}}`(step 1 에서 입력받은 포트), `{{COORD}}`, `{{VERSION}}`, 그리고 DB 토큰 `{{DB}}`/`{{PW}}` 를
-치환한다.
+치환한다. `worker.db.auto-provision` 이고 docker DB 면 `{{ADMIN_USER}}` / `{{ADMIN_PW}}`(=
+`protean.worker.db.admin-username` 과 생성한 일회용 admin 비밀번호)도 치환한다 — init SQL 이 이 토큰을 따옴표로
+감싸므로, 채우지 않으면 에러 없이 이름이 글자 그대로 `{{ADMIN_USER}}` 인 계정이 만들어진다.
+`{{COORD_GROUP}}` 은 `{{COORD}}` 의 group 부분(`org.htcom`)이고 `build.gradle` 이 `mavenLocal` 을 좁히는 데 쓴다.
 
 **★ `{{COORD}}` 는 버전을 뺀 `group:artifact` 다.** step 2 는 버전이 포함된 *좌표*(`org.htcom:protean:0.0.2`)를
 물으므로 둘은 같은 문자열이 아니고, 치환 전에 쪼개야 한다 — `{{COORD}}` = `org.htcom:protean`,
@@ -536,6 +539,10 @@ infra 가 선택을 따르게 하는 셋:
     이므로 절대 건드리지 않는다.)
   - **`{{...}}` 가 항상 플레이스홀더는 아니다.** `ci.yml` 에는 `{{.State.Health.Status}}` 가 있고 이것은
     docker inspect 의 Go 템플릿이다. 스킬 플레이스홀더는 `{{UPPER_SNAKE_CASE}}` 뿐이며, 그 밖의 것은 그대로 둔다.
+  - **★ 채우지 않은 것을 찾는 것으로 끝낸다.** 마지막 파일을 쓴 뒤 생성된 트리에서
+    `\{\{[A-Z][A-Z0-9_]*\}\}` 를 검색하고, 걸린 것은 모두 생성 오류로 본다 — 채우거나 멈춘다. 하나라도 남은
+    트리를 넘기지 않는다. (위의 Go 템플릿은 점으로 시작해 걸리지 않는다.) 안 채운 토큰은 대개 조용하다:
+    그 글자 그대로의 DB 계정, compose 프로젝트 이름, 셸 값이 된다.
   - **load-bearing 한 부분을 "정리"하지 말 것.** 각각이 조용히 나는 실패를 설명하는 주석이다: `java -jar` 금지,
     build 스테이지에서의 `jmods` 제거, CI 의 `services:`/`--network host` 금지, 아티팩트 업로드의
     `overwrite: true`, deploy-host 라벨 + `$RUNNER_NAME` 자기검증, 스모크가 `localhost` 가 아니라
@@ -566,6 +573,11 @@ infra 가 선택을 따르게 하는 셋:
   그것이 JDK 21 없는 머신에 JDK 21 을 프로비저닝한다. 빠지면 `setup.sh` 의 JDK 21 사전점검이, 하필 그
   resolver 가 존재하는 이유인 fresh-clone 상황에서 실패한다.
 - **`README.md`**(템플릿에서 — 선택된 capability 를 나열), **`.gitignore`**, **`Application.java`**.
+- **`docs/api-compatibility.md`**(`interface_spec_validator` 를 골랐을 때) — repo 공용
+  [reference/api-compatibility.md](../reference/api-compatibility.md) 를 프로젝트에 그 이름으로 복사한다(정책
+  문서가 스스로 그렇게 요구한다). README 의 "Changing a deployed module" 절이 그 파일을 가리키게 한다. 사용자가
+  값을 주지 않으면 「정할 것」 빈칸은 팀 몫으로 남긴다. 이 경로는 skills 저장소 전체를 설치했을 때(README 의
+  방법) 풀린다. 이 스킬 폴더만 복사해 파일이 없으면, 기억으로 써내지 말고 그렇다고 알린 뒤 복사를 건너뛴다.
 - **`setup.sh`**(항상 — **마지막** 산출물) — `templates/setup.sh.template` 에서 만들고 `chmod +x`. 이 구성
   그대로를 위한 Linux/Ubuntu 설치·실행 스크립트다: preflight(javac 로 JDK 21 확인, gradlew, SNAPSHOT 이면
   mavenLocal 의 protean jar, docker DB 면 Docker 데몬 + compose, `worker.runtime=sidecar` 면 sidecar 아티팩트,

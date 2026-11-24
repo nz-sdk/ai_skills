@@ -27,6 +27,7 @@
 
 ### 버그 수정
 
+* **nz_amoeba_make:** 점검 결과(#57) — 생성 infra(CI · deploy · HEALTHCHECK · compose · setup.sh)가 OAuth · DB vendor 선택을 따른다(`{{OAUTH}}` · `{{DB_VENDOR}}` · `{{DB_PORT_DEFAULT}}` · `{{DB_COMPOSE_FILE}}`), 시크릿 성격의 `protean.*` 값은 `${ENV}` 로만 쓴다, 기존 MySQL 은 `sslMode=REQUIRED`, 로컬 DB 는 `127.0.0.1` 바인드 · root 비밀번호 고정 제거, 러너 이미지 판 고정, 치환 목록에 `{{ADMIN_USER}}` · `{{ADMIN_PW}}` 와 잔여 자리표시 검색, 고아 isolation 템플릿 삭제, `docs/api-compatibility.md` 복사, SecurityConfig 오류 문구 · `mavenLocal` 범위 ([#65](https://github.com/nz-sdk/ai_skills/pull/65))
 * **issue-sync-install:** 에픽 이름에 대괄호가 있으면 Jira 설명의 상위 에픽 키 칸이 깨지던 문제 — 링크 글자 안 대괄호를 전각으로 ([#43](https://github.com/nz-sdk/ai_skills/pull/43))
 * **issue-sync-install:** 등록자 줄 「등록: 이름(Jira)」 을 GitHub 계정이 없는 보고자일 때만 쓴다 ([#41](https://github.com/nz-sdk/ai_skills/pull/41))
 * **issue-sync-install:** 등록자 줄을 Jira 원본의 GitHub 사본에만 「등록: 이름(Jira)」 로 쓰고, GitHub 원본의 Jira 사본에는 넣지 않는다(보고자 칸으로 충분) ([#39](https://github.com/nz-sdk/ai_skills/pull/39))

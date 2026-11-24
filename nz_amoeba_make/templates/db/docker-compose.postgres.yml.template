@@ -1,5 +1,10 @@
 # Local PostgreSQL for the {{NAME}} sample. Database/user/password match application.yml ({{DB}} / {{DB}} / {{PW}}).
 #   docker compose up -d   |   docker compose down   |   docker compose down -v  (wipe)
+# ★ Pin the project name. At deployment-infra level >= container this file is written next to the APP's
+#   docker-compose.yml as docker-compose.db.yml; without a name both would share the directory's project and
+#   `docker compose down` on one would report the other's containers as orphans.
+name: {{NAME_KEBAB}}-db
+
 services:
   postgres:
     image: postgres:16

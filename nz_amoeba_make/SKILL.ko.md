@@ -383,7 +383,14 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 **★ 사용자가 입력하지 않지만 생성기가 채워야 하는 플레이스홀더** — 각각 템플릿이 분기하는 값이고, 안 채우면
 조용히 "false" 로 읽힌다: `{{NAME_KEBAB}}`, `{{IS_SNAPSHOT}}`, `{{HAS_DB_DOCKER}}`,
 `{{HAS_DB_EXTERNAL}}`(연결 방식이 `existing`/`other` 인 데이터 접근 — `setup.sh` 의 외부 DB 프리플라이트를
-켜는 값), `{{ISOLATION}}`, `{{WORKER_RUNTIME}}`, `{{SIDECAR_*}}`, `{{OAUTH}}`, `{{REPO_URL}}`.
+켜는 값), `{{ISOLATION}}`, `{{WORKER_RUNTIME}}`, `{{SIDECAR_*}}`, `{{OAUTH}}`, `{{REPO_URL}}`, 그리고 생성되는
+infra 가 선택을 따르게 하는 셋:
+- `{{DB_VENDOR}}` — `mysql` | `postgresql` | `h2` | `other` | `none`(step 4 의 vendor. `none` = 데이터 접근 없음).
+  `ci.yml` 과 `deploy.yml` 이 실행 시점에 이 값으로 분기한다.
+- `{{DB_PORT_DEFAULT}}` — `db-vendors.yaml` 의 vendor `default_port`(`3306` / `5432`). `h2` · `other` · `none` 이면
+  공백. 모든 곳의 `DB_PORT` fallback 이므로 PostgreSQL 프로젝트가 3306 을 넘겨받지 않는다.
+- `{{DB_COMPOSE_FILE}}` — `setup.sh` 의 호스트 실행 경로에서 DB **만** 담은 compose 파일: 6 단계 `none` 이면
+  `docker-compose.yml`, `container` 이상이면 `docker-compose.db.yml`. docker DB 가 없으면 공백.
 
 엔진:
 
@@ -470,10 +477,15 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   **용도**에 따라 다르다: **데이터 접근**용 DataSource 는 `init/01-schema.sql`(`items` 테이블)을 받고,
   **jdbc module-store** 만 받치는 DataSource 는 받지 않는다(Protean 이 자체 store 테이블을 만든다) — items init 을
   생략한다. H2 데이터 접근: `schema.sql`. existing/other: 없음.
-  ⚠ **6 단계가 `none` 일 때만이다.** `container` 이상에서는 `docker-compose.yml` 이 앱의 파일이므로, DB 는
-  `templates/infra/docker-compose.local-db.<vendor>.yml.template` 로 `docker-compose.local-db.yml` 에 쓴다.
+  ⚠ **그 파일 이름은 6 단계가 `none` 일 때만이다.** `container` 이상에서는 `docker-compose.yml` 이 앱의
+  파일이므로, 같은 `templates/db/*` compose(와 그 `init/`)를 **`docker-compose.db.yml`** 로 쓴다 — `setup.sh` 가
+  호스트 실행 경로에서 띄우는 파일이다(`{{DB_COMPOSE_FILE}}`). 오버레이는 그 역할을 할 수 없다: `app` 서비스를
+  덧씌우는 파일이고, 둘을 함께 읽으면 기본 파일의 `:?` 가드가 걸리며, 계정이 `application.yml` 의 docker
+  fallback 이 아니라 `.env` 에서 온다. **컨테이너** 경로용으로는
+  `templates/infra/docker-compose.local-db.<vendor>.yml.template` 로 `docker-compose.local-db.yml` 도 쓴다.
   그 오버레이는 `init/` 마운트를 갖지 않는다(디렉터리 바인드가 엔트리포인트를 깨뜨리는 이유는 그 파일의
-  주석에 있다) — seed SQL 이 필요하면 파일 하나를 직접 마운트한다.
+  주석에 있다) — seed SQL 이 필요하면 파일 하나를 직접 마운트한다. 둘은 같은 호스트 포트를 쓰므로 README 에
+  둘 중 하나만 띄운다고 적는다.
 - **배포 인프라 (6 단계)** — 고른 수준에 따라 `templates/infra/` 에서 복사하며 파일명을 바꾼다:
   `Dockerfile.template` → `Dockerfile`, `dockerignore.template` → `.dockerignore`,
   `gitattributes.template` → `.gitattributes`, `env.example.template` → `.env.example`,
@@ -482,7 +494,17 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   `runner/env.example.template` → `.github/runner/.env.example`, `docs/*.md.template` → `docs/*.md`.
   `{{NAME}}`, `{{NAME_KEBAB}}`(= `{{NAME}}` 의 `_`→`-`. 컨테이너·볼륨·compose 프로젝트 이름을 만든다),
   `{{PKG}}`, `{{PORT}}`, `{{DB}}`, 그리고 `full` 수준에서는 `{{REPO_URL}}` 을 치환한다.
-  틀리기 쉬운 것 넷:
+  틀리기 쉬운 것:
+  - **★ infra 는 선택을 따른다 — 모든 infra 파일에서 `{{OAUTH}}` / `{{DB_VENDOR}}` / `{{DB_PORT_DEFAULT}}` 를
+    채우고, 표시 두 가지를 가지치기한다.** `ci.yml` · `deploy.yml` · Dockerfile `HEALTHCHECK` 는 채워진 값으로
+    실행 시점에 분기한다(준비 판정, discovery 스모크, DB 컨테이너, 필수 `.env` 키) — 손으로 고치지 않는다.
+    compose 는 분기할 수 없으므로 거기서는 지운다:
+    `[OPTIONAL secured MCP]` — MCP OAuth 가 없으면 `OAUTH_ISSUER_URI` 블록을 지운다.
+    `[OPTIONAL server DB]` — mysql / postgresql 이면 `DB_*` 블록을 두고, 직접 입력한 `other` vendor 면
+    `DB_USER` / `DB_PASSWORD` 만 두고, `h2` 나 데이터 접근 없음이면 지운다. 표시는
+    `docker-compose.app.yml.template`, `env.example.template`, `docs/docker.md.template`,
+    `docs/secrets.md.template` 에 있다. 앱이 읽지 않는 값에 `:?` 가드를 남기면 운영자가 값을 지어 넣어야 하고,
+    `{{OAUTH}}` 를 안 채우면 CI 가 나오지 않는 discovery 문서를 끝까지 기다린다.
   - **`db_query_tools` 를 고르지 않았다면 `[db_query_tools ONLY]` 블록을 모두 지운다** — README 처럼
     `env.example.template`, `docker-compose.app.yml.template`, `docs/docker.md.template` 에 하나씩 있다.
   - **★ 오버레이를 만들지 않았다면 `[OPTIONAL local-db]` 블록을 모두 지운다.** `docker-compose.local-db.yml` 은
@@ -513,6 +535,8 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 - **프로비저닝 admin (D5)** — `worker.db.auto-provision=true` 이고 DB 가 docker 로 관리될 때,
   `init/00-provision-admin.sql` 을 생성해 `worker.db.admin-username`/`admin-password` 계정을 만든다. MySQL 은
   CREATE DATABASE/USER + GRANT, Postgres 는 CREATE SCHEMA/ROLE — 그래야 배포 시점에 프로비저닝이 동작한다.
+  6 단계가 `container` 이상이면 sidecar 오버레이에는 `init/` 마운트가 없다: 그 파일의
+  `[OPTIONAL auto-provision]` 단일 파일 마운트 줄의 주석을 푼다. 그러지 않으면 계정이 거기에 만들어지지 않는다.
   기존 서버라면 대신 admin 계정에 필요한 정확한 GRANT 문을 출력한다. 대상 DB 에 존재하지 않는 admin 자격증명을
   절대 남기지 말 것.
 - **scope seed + 배포 안내 (auto-provision)** — `application.yml` 의 `protean.worker.db.scopes` 에 최소 하나의
@@ -531,7 +555,8 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
 - **`setup.sh`**(항상 — **마지막** 산출물) — `templates/setup.sh.template` 에서 만들고 `chmod +x`. 이 구성
   그대로를 위한 Linux/Ubuntu 설치·실행 스크립트다: preflight(javac 로 JDK 21 확인, gradlew, SNAPSHOT 이면
   mavenLocal 의 protean jar, docker DB 면 Docker 데몬 + compose, `worker.runtime=sidecar` 면 sidecar 아티팩트,
-  포트 사용 가능 여부) → `docker compose up -d --wait`(docker DB 인 경우) → `./gradlew run`.
+  포트 사용 가능 여부) → `docker compose -f {{DB_COMPOSE_FILE}} up -d --wait`(docker DB 인 경우) →
+  `./gradlew run`. `{{DB_COMPOSE_FILE}}` 과 `{{DB_PORT_DEFAULT}}`(위)를 채운다.
   `{{IS_SNAPSHOT}}`(버전이 `-SNAPSHOT` 로 끝나는지), **`{{HAS_DB_EXTERNAL}}`**(같은 조건이지만 연결 방식이
   `existing`/`other` 인 경우 — 외부 DB 프리플라이트를 켠다: `DB_PASSWORD` 존재, `DB_HOST` 가 조용히
   `localhost` 로 떨어지지 않는지, TCP 프로브, 그리고 DDL 을 실행하는 도구가 없다는 안내.
@@ -562,7 +587,7 @@ Linux/Ubuntu 서버용 원커맨드 설치를 앞세우고, 그다음 수동 등
 - **`./setup.sh`** — 환경과 전제조건을 preflight 하고, (있다면) DB 를 띄우고, 서버를 실행한다.
   `./setup.sh --check` 는 검사만 한다. (이것이 마지막으로 생성되는 산출물이다.)
 - (mavenLocal 경로) `cd <protean repo> && ./gradlew publishToMavenLocal`.
-- (DB docker) `docker compose up -d`.
+- (DB docker) `docker compose up -d` — 6 단계가 `container` 이상이면 `docker compose -f docker-compose.db.yml up -d`.
 - `./gradlew run` (JDK 21).
 - (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
 - 배포된 모듈 엔드포인트를 호출해 본다. 상태는 `curl localhost:{{PORT}}/platform/modules`.

@@ -70,6 +70,13 @@ services:
       #   and layering files inside it does NOT work either — Docker cannot create a mountpoint inside a
       #   read-only mount and the container refuses to start. The numeric prefix is the execution order:
       #   - ./sql/items.sql:/docker-entrypoint-initdb.d/01-items.sql:ro
+      #
+      # [OPTIONAL auto-provision] GENERATOR: when protean.worker.db.auto-provision=true, UNCOMMENT the line below
+      #   (and emit init/00-provision-admin.sql). Without it the admin account application.yml names is never
+      #   created in this sidecar, and the first scope provisioning fails on the database login. Otherwise
+      #   delete this paragraph. It is a single-file bind, so the rule above holds — but a workspace bind does
+      #   not resolve on the containerised self-hosted runner (see .github/runner/docker-compose.yml).
+      # - ./init/00-provision-admin.sql:/docker-entrypoint-initdb.d/00-provision-admin.sql:ro
 
     healthcheck:
       # -h 127.0.0.1 forces TCP rather than the unix socket: during the initdb phase the temporary server

@@ -376,7 +376,13 @@ substituting: `{{COORD}}` = `org.htcom:protean`, `{{VERSION}}` = `0.0.2`. Templa
 the templates branch on and an unset one silently reads as "false": `{{NAME_KEBAB}}`, `{{IS_SNAPSHOT}}`,
 `{{HAS_DB_DOCKER}}`, `{{HAS_DB_EXTERNAL}}` (data access whose connection mode is `existing` or `other` — this is
 what arms `setup.sh`'s external-DB preflight), `{{ISOLATION}}`, `{{WORKER_RUNTIME}}`, `{{SIDECAR_*}}`,
-`{{OAUTH}}`, `{{REPO_URL}}`.
+`{{OAUTH}}`, `{{REPO_URL}}`, and three that keep the generated infra in step with the selection:
+- `{{DB_VENDOR}}` — `mysql` | `postgresql` | `h2` | `other` | `none` (the step 4 vendor; `none` = no data access).
+  `ci.yml` and `deploy.yml` branch on it at run time.
+- `{{DB_PORT_DEFAULT}}` — the vendor's `default_port` from `db-vendors.yaml` (`3306` / `5432`); empty for `h2`,
+  `other` and `none`. It is the `DB_PORT` fallback everywhere, so a PostgreSQL project is never handed 3306.
+- `{{DB_COMPOSE_FILE}}` — the compose file that holds ONLY the database for the host-run path of `setup.sh`:
+  `docker-compose.yml` at step 6 `none`, `docker-compose.db.yml` at `container` or above; empty without a docker DB.
 
 Engine:
 - **`application.yml`** — start from `templates/application.yml.template` (minimal base) and **inject every set
@@ -460,10 +466,14 @@ Engine:
   DataSource's PURPOSE: a **data-access** DataSource gets `init/01-schema.sql` (the `items` table); a DataSource
   that only backs the **jdbc module-store** does NOT (Protean creates its own store tables) — omit the items init.
   H2 data-access: `schema.sql`. existing/other: none.
-  ⚠ **Only when step 6 chose `none`.** At `container` or above, `docker-compose.yml` is the APP's file, so the
-  database is written as `docker-compose.local-db.yml` from
-  `templates/infra/docker-compose.local-db.<vendor>.yml.template` instead. That overlay carries no `init/`
-  mount (see its comment on why a directory bind breaks the entrypoint) — put seed SQL in a single-file mount.
+  ⚠ **That file NAME is only for step 6 `none`.** At `container` or above, `docker-compose.yml` is the APP's
+  file, so write the same `templates/db/*` compose (and its `init/`) as **`docker-compose.db.yml`** — it is what
+  `setup.sh` starts for the host-run path (`{{DB_COMPOSE_FILE}}`). The overlay cannot play that part: it patches
+  the `app` service, the base file's `:?` guards fire when the two are read together, and its account comes from
+  `.env` rather than from the docker fallback in `application.yml`. For the CONTAINER path also write
+  `docker-compose.local-db.yml` from `templates/infra/docker-compose.local-db.<vendor>.yml.template`. That overlay
+  carries no `init/` mount (see its comment on why a directory bind breaks the entrypoint) — put seed SQL in a
+  single-file mount. Both publish the same host port: say in the README that one or the other runs, not both.
 - **deployment infra (step 6)** — copy from `templates/infra/` per the chosen level, mapping filenames:
   `Dockerfile.template` → `Dockerfile`, `dockerignore.template` → `.dockerignore`,
   `gitattributes.template` → `.gitattributes`, `env.example.template` → `.env.example`,
@@ -472,7 +482,17 @@ Engine:
   `runner/env.example.template` → `.github/runner/.env.example`, `docs/*.md.template` → `docs/*.md`.
   Substitute `{{NAME}}`, `{{NAME_KEBAB}}` (= `{{NAME}}` with `_`→`-`; it names containers, volumes and the
   compose project), `{{PKG}}`, `{{PORT}}`, `{{DB}}`, and at the `full` level `{{REPO_URL}}`.
-  Four things to get right:
+  Things to get right:
+  - **★ THE INFRA FOLLOWS THE SELECTION — fill `{{OAUTH}}` / `{{DB_VENDOR}}` / `{{DB_PORT_DEFAULT}}` in every
+    infra file, and prune two markers.** `ci.yml`, `deploy.yml` and the Dockerfile `HEALTHCHECK` branch on the
+    filled values at run time (readiness, the discovery smokes, the database container, which `.env` keys are
+    required), so do not hand-edit those. Compose cannot branch, so there you prune:
+    `[OPTIONAL secured MCP]` — without MCP OAuth delete the `OAUTH_ISSUER_URI` block;
+    `[OPTIONAL server DB]` — keep the `DB_*` block for mysql / postgresql, keep only `DB_USER` / `DB_PASSWORD` for
+    a typed `other` vendor, delete it for `h2` or no data access. The markers sit in
+    `docker-compose.app.yml.template`, `env.example.template`, `docs/docker.md.template` and
+    `docs/secrets.md.template`. A `:?` guard left on a value the app never reads makes the operator invent one;
+    an unfilled `{{OAUTH}}` makes CI wait for a discovery document that is never published.
   - **Drop every `[db_query_tools ONLY]` block when that capability is not selected** — `env.example.template`,
     `docker-compose.app.yml.template` and `docs/docker.md.template` carry one each, like the README's.
   - **★ PRUNE EVERY `[OPTIONAL local-db]` BLOCK WHEN NO OVERLAY IS EMITTED.** `docker-compose.local-db.yml` is
@@ -504,7 +524,9 @@ Engine:
     `docs/secrets.md`, including `DEPLOY_RUNNER_NAME`.
 - **provisioning admin (D5)** — when `worker.db.auto-provision=true` AND the DB is docker-managed, generate
   `init/00-provision-admin.sql` creating the `worker.db.admin-username`/`admin-password` account with
-  CREATE DATABASE/USER + GRANT (MySQL) or CREATE SCHEMA/ROLE (Postgres), so provisioning works at deploy. For an
+  CREATE DATABASE/USER + GRANT (MySQL) or CREATE SCHEMA/ROLE (Postgres), so provisioning works at deploy. At
+  step 6 `container` or above the sidecar overlay has no `init/` mount: uncomment its
+  `[OPTIONAL auto-provision]` single-file mount line, or the account is never created there. For an
   existing server, instead print the exact GRANT the admin account needs. Never leave admin creds that don't
   exist on the target DB.
 - **scope seed + deploy guidance (auto-provision)** — set `protean.worker.db.scopes` in `application.yml` to at
@@ -522,7 +544,8 @@ Engine:
 - **setup.sh** (always — the FINAL artifact) — from `templates/setup.sh.template`, `chmod +x`. A Linux/Ubuntu
   install-and-run script for this exact configuration: preflight (JDK 21 via javac, gradlew, protean jar in
   mavenLocal when SNAPSHOT, Docker daemon + compose when a docker DB, sidecar artifact when
-  `worker.runtime=sidecar`, free port) → `docker compose up -d --wait` (if docker DB) → `./gradlew run`. Fill
+  `worker.runtime=sidecar`, free port) → `docker compose -f {{DB_COMPOSE_FILE}} up -d --wait` (if docker DB) →
+  `./gradlew run`. Fill `{{DB_COMPOSE_FILE}}` and `{{DB_PORT_DEFAULT}}` (above),
   `{{IS_SNAPSHOT}}` (version ends with `-SNAPSHOT`) and `{{HAS_DB_DOCKER}}` (data access OR jdbc-store DataSource
   selected AND connection = docker), **`{{HAS_DB_EXTERNAL}}`** (the same but connection = `existing`/`other` —
   arms the external-DB preflight: `DB_PASSWORD` present, `DB_HOST` not silently falling back to `localhost`, a
@@ -550,7 +573,7 @@ Korean; print every command byte-for-byte** — a translated or "tidied" command
 - **`./setup.sh`** — preflight-checks the environment and prerequisites, brings up the DB (if any), and runs the
   server. `./setup.sh --check` runs the checks only. (This is the final generated artifact.)
 - (mavenLocal path) `cd <protean repo> && ./gradlew publishToMavenLocal`.
-- (DB docker) `docker compose up -d`.
+- (DB docker) `docker compose up -d` — at step 6 `container` or above, `docker compose -f docker-compose.db.yml up -d`.
 - `./gradlew run` (JDK 21).
 - (MCP) `curl -s localhost:{{PORT}}/platform/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
 - Hit a deployed module endpoint; `curl localhost:{{PORT}}/platform/modules` for state.

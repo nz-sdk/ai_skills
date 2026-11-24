@@ -150,12 +150,21 @@ jobs:
       #   The same value feeds the app's env and the smoke expectation — changing only one would make the
       #   smoke self-evident.
       EXPECTED_ISSUER: http://as.invalid:9300
+      # ★ GENERATOR: the two values below are filled at generation — nothing in this file is pruned by hand.
+      #   SECURED_MCP = 'true' when protean.mcp.authorization.resource is set, else 'false'. The protected-resource
+      #   document only exists on a secured app, so the steps below branch on this: an unsecured sample is probed
+      #   for "answers HTTP at all" instead of spinning to "app never became ready".
+      #   DB_VENDOR = mysql | postgresql | h2 | other | none (the step-4 vendor; `none` = no data access). Only
+      #   mysql and postgresql get a database container — h2 is embedded, and for the rest there is no server this
+      #   job could stand up. The app starts without one either way (Hikari connects lazily).
+      SECURED_MCP: '{{OAUTH}}'
+      DB_VENDOR: '{{DB_VENDOR}}'
       # Same as the application.yml / Dockerfile ENV default. The job's network is isolated so there is no
       # collision risk; the point is to verify the default actually reaches the advertised value.
       APP_PORT: '{{PORT}}'
       # Credentials for a container that lives only inside this job. Deliberately unlike any real account —
       # a name left in the repository should exist nowhere.
-      DB_NAME: {{DB}}
+      DB_NAME: '{{DB}}'
       DB_USER: ci-db-user
       DB_PW: ci-db-pw
       DB_ROOT_PW: root-pw
@@ -169,14 +178,33 @@ jobs:
         run: |
           set -e
           docker network create "$NET"
-          docker run -d --name "$DB_CT" --network "$NET" --network-alias "$DB_ALIAS" \
-            -e MYSQL_ROOT_PASSWORD="$DB_ROOT_PW" \
-            -e MYSQL_DATABASE="$DB_NAME" \
-            -e MYSQL_USER="$DB_USER" \
-            -e MYSQL_PASSWORD="$DB_PW" \
-            --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -p$DB_ROOT_PW --silent" \
-            --health-interval=10s --health-timeout=5s --health-retries=12 \
-            mysql:8.4 --default-time-zone=+00:00
+          # The database container follows the vendor the project was generated for. Starting MySQL for a
+          # PostgreSQL project would still let the app boot (the pool is lazy) — and verify nothing.
+          case "$DB_VENDOR" in
+            mysql)
+              docker run -d --name "$DB_CT" --network "$NET" --network-alias "$DB_ALIAS" \
+                -e MYSQL_ROOT_PASSWORD="$DB_ROOT_PW" \
+                -e MYSQL_DATABASE="$DB_NAME" \
+                -e MYSQL_USER="$DB_USER" \
+                -e MYSQL_PASSWORD="$DB_PW" \
+                --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -p$DB_ROOT_PW --silent" \
+                --health-interval=10s --health-timeout=5s --health-retries=12 \
+                mysql:8.4 --default-time-zone=+00:00
+              ;;
+            postgresql)
+              docker run -d --name "$DB_CT" --network "$NET" --network-alias "$DB_ALIAS" \
+                -e POSTGRES_DB="$DB_NAME" \
+                -e POSTGRES_USER="$DB_USER" \
+                -e POSTGRES_PASSWORD="$DB_PW" \
+                --health-cmd="pg_isready -h 127.0.0.1 -U $DB_USER -d $DB_NAME" \
+                --health-interval=10s --health-timeout=5s --health-retries=12 \
+                postgres:16
+              ;;
+            *)
+              echo "no database container for DB_VENDOR=$DB_VENDOR"
+              exit 0
+              ;;
+          esac
           # Wait for the healthcheck to flip to healthy. `services:` did this for us; having built it by hand,
           # we wait by hand.
           for i in $(seq 1 60); do
@@ -211,14 +239,20 @@ jobs:
           #   Why an unreachable value is used: see the EXPECTED_ISSUER comment in env above. Verifying with a
           #   real token would mean standing up the Authorization Server as a third container; that is separate
           #   work. The manual procedure is in the README.
+          # Only what this configuration reads is passed. An unsecured app has no issuer, and a project without
+          # a server database has no DB_* — and the port is the VENDOR's, not always 3306.
+          auth_env=()
+          if [ "$SECURED_MCP" = "true" ]; then auth_env=(-e OAUTH_ISSUER_URI="$EXPECTED_ISSUER"); fi
+          db_env=()
+          case "$DB_VENDOR" in
+            mysql)      db_env=(-e DB_HOST="$DB_ALIAS" -e DB_PORT=3306 -e DB_USER="$DB_USER" -e DB_PASSWORD="$DB_PW") ;;
+            postgresql) db_env=(-e DB_HOST="$DB_ALIAS" -e DB_PORT=5432 -e DB_USER="$DB_USER" -e DB_PASSWORD="$DB_PW") ;;
+          esac
           docker run -d --name "$APP_CT" --network "$NET" --network-alias "$APP_HOST" \
             -e SERVER_PORT="$APP_PORT" \
             -e SERVER_HOST="$APP_HOST" \
-            -e OAUTH_ISSUER_URI="$EXPECTED_ISSUER" \
-            -e DB_HOST="$DB_ALIAS" \
-            -e DB_PORT=3306 \
-            -e DB_USER="$DB_USER" \
-            -e DB_PASSWORD="$DB_PW" \
+            "${auth_env[@]}" \
+            "${db_env[@]}" \
             protean-{{NAME}}-sample:${{ github.sha }}
 
       # Smoke curls run via docker exec: the job step's shell lives inside the runner container and cannot
@@ -241,44 +275,58 @@ jobs:
           #     ★ Probe the protected-resource document, NOT /.well-known/oauth-authorization-server — that
           #     endpoint exists only on an Authorization Server, so here it is 404 and this loop would spin
           #     until timeout.
+          #     ★ That document exists only when the MCP surface is secured. An unsecured sample publishes none,
+          #     so there "ready" means the app answers HTTP at all (any status — 000 is curl's "no connection").
+          if [ "$SECURED_MCP" = "true" ]; then ready_path="/.well-known/oauth-protected-resource"; else ready_path="/"; fi
           for i in $(seq 1 60); do
-            code=$(probe -s -o /dev/null -w '%{http_code}' \
-                   "$BASE/.well-known/oauth-protected-resource" || true)
-            if [ "$code" = "200" ]; then echo "up after $((i*2))s"; break; fi
+            code=$(probe -s -o /dev/null -w '%{http_code}' "$BASE$ready_path" || true)
+            ready=no
+            if [ "$SECURED_MCP" = "true" ]; then
+              if [ "$code" = "200" ]; then ready=yes; fi
+            else
+              case "$code" in ''|000) ;; *) ready=yes ;; esac
+            fi
+            if [ "$ready" = "yes" ]; then echo "up after $((i*2))s (GET $ready_path → $code)"; break; fi
             if [ "$i" = "60" ]; then echo "app never became ready"; exit 1; fi
             sleep 2
           done
 
-          # (1) TWO INDEPENDENT AXES, pinned separately:
-          #
-          #       resource              = this app itself ($BASE/platform/mcp)  ← SERVER_HOST/PORT axis
-          #       authorization_servers = the external AS ($EXPECTED_ISSUER)    ← OAUTH_ISSUER_URI axis
-          #
-          #     If these diverge the app starts perfectly and every request 401s — the hardest failure in this
-          #     project to diagnose. In particular, authorization_servers coming back as $BASE means a fallback
-          #     to self has been reintroduced, and MCP clients would come HERE for tokens this app cannot issue.
-          #     Pinned INCLUDING the brackets, as a single element — Jackson serialises without spaces.
-          meta=$(probe -s "$BASE/.well-known/oauth-protected-resource")
-          echo "$meta"
-          echo "$meta" | grep -q "\"resource\":\"$BASE/platform/mcp\"" \
-            || { echo "resource mismatch (expected $BASE/platform/mcp)"; exit 1; }
-          echo "$meta" | grep -q "\"authorization_servers\":\[\"$EXPECTED_ISSUER\"\]" \
-            || { echo "authorization_servers mismatch (expected [$EXPECTED_ISSUER])"; exit 1; }
-          echo "discovery ok (resource=$BASE/platform/mcp, as=$EXPECTED_ISSUER)"
+          # (1) and (2) apply to a SECURED control plane only: an unsecured sample publishes no discovery document
+          # and answers /platform/mcp without a token — by design a local demo, which the README says.
+          if [ "$SECURED_MCP" = "true" ]; then
+            # (1) TWO INDEPENDENT AXES, pinned separately:
+            #
+            #       resource              = this app itself ($BASE/platform/mcp)  ← SERVER_HOST/PORT axis
+            #       authorization_servers = the external AS ($EXPECTED_ISSUER)    ← OAUTH_ISSUER_URI axis
+            #
+            #     If these diverge the app starts perfectly and every request 401s — the hardest failure in this
+            #     project to diagnose. In particular, authorization_servers coming back as $BASE means a fallback
+            #     to self has been reintroduced, and MCP clients would come HERE for tokens this app cannot issue.
+            #     Pinned INCLUDING the brackets, as a single element — Jackson serialises without spaces.
+            meta=$(probe -s "$BASE/.well-known/oauth-protected-resource")
+            echo "$meta"
+            echo "$meta" | grep -q "\"resource\":\"$BASE/platform/mcp\"" \
+              || { echo "resource mismatch (expected $BASE/platform/mcp)"; exit 1; }
+            echo "$meta" | grep -q "\"authorization_servers\":\[\"$EXPECTED_ISSUER\"\]" \
+              || { echo "authorization_servers mismatch (expected [$EXPECTED_ISSUER])"; exit 1; }
+            echo "discovery ok (resource=$BASE/platform/mcp, as=$EXPECTED_ISSUER)"
 
-          #     The RFC 9728 address for this resource is the PATH-APPENDED one, and a strict client (VS Code) tries
-          #     it first and rejects the root document above. It must exist and name the same resource.
-          meta=$(probe -s "$BASE/.well-known/oauth-protected-resource/platform/mcp")
-          echo "$meta" | grep -q "\"resource\":\"$BASE/platform/mcp\"" \
-            || { echo "path-appended metadata missing or wrong resource: $meta"; exit 1; }
-          echo "path-appended discovery ok"
+            #     The RFC 9728 address for this resource is the PATH-APPENDED one, and a strict client (VS Code) tries
+            #     it first and rejects the root document above. It must exist and name the same resource.
+            meta=$(probe -s "$BASE/.well-known/oauth-protected-resource/platform/mcp")
+            echo "$meta" | grep -q "\"resource\":\"$BASE/platform/mcp\"" \
+              || { echo "path-appended metadata missing or wrong resource: $meta"; exit 1; }
+            echo "path-appended discovery ok"
 
-          # (2) Is the RCE surface closed without a token? /platform/mcp compiles and hot-loads submitted source.
-          code=$(probe -s -o /dev/null -w '%{http_code}' -XPOST "$BASE/platform/mcp" \
-                 -H 'Content-Type: application/json' \
-                 -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
-          [ "$code" = "401" ] || { echo "expected 401 on /platform/mcp, got $code"; exit 1; }
-          echo "mcp closed ok"
+            # (2) Is the RCE surface closed without a token? /platform/mcp compiles and hot-loads submitted source.
+            code=$(probe -s -o /dev/null -w '%{http_code}' -XPOST "$BASE/platform/mcp" \
+                   -H 'Content-Type: application/json' \
+                   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+            [ "$code" = "401" ] || { echo "expected 401 on /platform/mcp, got $code"; exit 1; }
+            echo "mcp closed ok"
+          else
+            echo "unsecured sample — discovery and no-token-401 smokes skipped (local demo only)"
+          fi
 
           # (3) Pin that this app is NOT an Authorization Server. A 200 here means someone re-added the AS
           #     starter. This catches it even if build.gradle is restored afterwards, because
@@ -296,7 +344,7 @@ jobs:
         run: |
           docker logs "$APP_CT" || true
           echo "----- database -----"
-          docker logs --tail=50 "$DB_CT" || true
+          docker logs --tail=50 "$DB_CT" 2>/dev/null || echo "(no database container in this configuration)"
 
       # Remove the network too. A self-hosted runner is not a fresh VM, so leftovers accumulate.
       - name: Clean up

@@ -100,6 +100,12 @@ jobs:
       # ⚠️ Under workflow_run every inputs.* is EMPTY. Without the fallback, COMPOSE_FILE becomes an empty
       #   string and compose behaviour diverges rather than defaulting to the base file.
       COMPOSE_FILE: ${{ inputs.compose_files || 'docker-compose.yml' }}
+      # ★ GENERATOR: filled at generation, same meaning as in ci.yml. SECURED_MCP = 'true' when
+      #   protean.mcp.authorization.resource is set. DB_VENDOR = mysql | postgresql | h2 | other | none.
+      #   The .env step and the smoke branch on them, so a project without OAuth or without a server database
+      #   is not asked for values it never reads.
+      SECURED_MCP: '{{OAUTH}}'
+      DB_VENDOR: '{{DB_VENDOR}}'
 
     steps:
       # ★ The label alone is not enough — anyone can attach a label to any runner in the GitHub UI, and a new
@@ -142,16 +148,39 @@ jobs:
           cat > .env <<EOF
           SERVER_PORT=${{ vars.SERVER_PORT || '{{PORT}}' }}
           SERVER_HOST=${{ vars.SERVER_HOST || 'localhost' }}
-          OAUTH_ISSUER_URI=${{ vars.OAUTH_ISSUER_URI }}
-          DB_HOST=${{ vars.DB_HOST }}
-          DB_PORT=${{ vars.DB_PORT || '3306' }}
-          DB_USER=${{ vars.DB_USER }}
-          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
           IMAGE_TAG=${{ github.sha }}
           EOF
+          # Only the keys this configuration reads are written and required — the same set docker-compose.yml
+          # guards with :?. The DB_PORT fallback is the VENDOR's port ({{DB_PORT_DEFAULT}}), not always 3306.
+          required=""
+          if [ "$SECURED_MCP" = "true" ]; then
+            cat >> .env <<EOF
+          OAUTH_ISSUER_URI=${{ vars.OAUTH_ISSUER_URI }}
+          EOF
+            required="$required OAUTH_ISSUER_URI"
+          fi
+          case "$DB_VENDOR" in
+            mysql|postgresql)
+              cat >> .env <<EOF
+          DB_HOST=${{ vars.DB_HOST }}
+          DB_PORT=${{ vars.DB_PORT || '{{DB_PORT_DEFAULT}}' }}
+          DB_USER=${{ vars.DB_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          EOF
+              required="$required DB_HOST DB_USER DB_PASSWORD"
+              ;;
+            other)
+              # A typed JDBC URL carries its own host and port; only the account is injected.
+              cat >> .env <<EOF
+          DB_USER=${{ vars.DB_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          EOF
+              required="$required DB_USER DB_PASSWORD"
+              ;;
+          esac
           # Values are never echoed — only WHICH key is empty. compose's :? guards would catch this too, but
           # their message appears at container-creation time, so seeing it here reads better.
-          for k in OAUTH_ISSUER_URI DB_HOST DB_USER DB_PASSWORD; do
+          for k in $required; do
             grep -q "^${k}=.\+$" .env || { echo "::error::${k} is empty. Check Settings ▸ Secrets and variables ▸ Actions (docs/ci-cd.md)"; exit 1; }
           done
 
@@ -181,13 +210,25 @@ jobs:
           echo "smoke target: ${base}"
           # ★ Probe protected-resource, never /.well-known/oauth-authorization-server — that exists only on an
           #   Authorization Server and is 404 here, so this loop would spin to timeout.
+          # ★ That document exists only on a SECURED app. An unsecured one is probed for "answers HTTP at all"
+          #   (any status; 000 is curl's "no connection") and the discovery checks below are skipped.
+          if [ "$SECURED_MCP" = "true" ]; then ready_path="/.well-known/oauth-protected-resource"; else ready_path="/"; fi
           for i in $(seq 1 60); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' \
-                   "${base}/.well-known/oauth-protected-resource" || true)
-            if [ "$code" = "200" ]; then echo "smoke ok after $((i*2))s"; break; fi
+            code=$(curl -s -o /dev/null -w '%{http_code}' "${base}${ready_path}" || true)
+            ready=no
+            if [ "$SECURED_MCP" = "true" ]; then
+              if [ "$code" = "200" ]; then ready=yes; fi
+            else
+              case "$code" in ''|000) ;; *) ready=yes ;; esac
+            fi
+            if [ "$ready" = "yes" ]; then echo "smoke ok after $((i*2))s (GET ${ready_path} → ${code})"; break; fi
             if [ "$i" = "60" ]; then echo "smoke failed: no response within 120s"; exit 1; fi
             sleep 2
           done
+          if [ "$SECURED_MCP" != "true" ]; then
+            echo "unsecured sample — discovery checks skipped"
+            exit 0
+          fi
 
           # ★ TWO AXES, checked separately (this document has no `issuer` field):
           #     resource              = the deployed app        (${base}/platform/mcp)

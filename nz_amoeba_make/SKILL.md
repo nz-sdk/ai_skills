@@ -118,6 +118,10 @@ Drive from `reference/db-vendors.yaml`:
 2. **Connection**:
    - server-backed (mysql/postgresql): **existing** (user *types* host/port/db/user/password → datasource only,
      no compose) or **docker** (generate `docker-compose.yml` + `init/01-schema.sql` from the vendor templates).
+     For **mysql + existing**, also ask whether the server accepts TLS (default yes) and take the URL from
+     `url_existing` or `url_existing_no_tls` accordingly — the docker URL turns TLS off and must not be pointed
+     at a remote server. Say what `sslMode=REQUIRED` does not do: it encrypts but does not verify the server's
+     certificate, so with a CA available the operator should move to `VERIFY_CA` / `VERIFY_IDENTITY`.
    - `h2` (embedded): ask `mem` or `file` — no server, no docker; write `src/main/resources/schema.sql`.
    - other: user *types* driver Maven coordinate, driver-class-name, JDBC URL, user/password — datasource + driver
      dep only, no compose.
@@ -275,6 +279,14 @@ on-screen wording is Korean; **the semantics below are the rule and do not chang
 Non-booleans (int/long/duration/string): a "check which to set" multi-select, then ask each chosen one's value
 (typed) — checking only means "I want to override this default", then you collect the value. Enums: a selection
 of the allowed values (default preselected in wording).
+
+**★ A key marked `secret: true` in the yaml is NEVER collected or written as a literal.** Today that is
+`protean.worker.db.admin-password`, `protean.bridge.secret` and `protean.worker.admin-auth.secret`. Ask only
+whether to set it; the value itself goes in an environment variable named by the key's `env:` field, and
+`application.yml` carries the placeholder (step 9). Typing it here would put a credential into `application.yml`
+and into `ConfigMatchesSelectionTest.java` — two committed files. For the two shared secrets, recommend leaving
+them unset: blank + enabled means protean generates one per JVM and injects it into the workers.
+(`protean.gate.signature.keys` is the opposite case — trusted PUBLIC keys, meant to be committed and reviewed.)
 
 ### 8. Validation + dependency resolution
 After all selections (steps 3–6), run a **validation pass** over the full resolved set before writing anything.
@@ -524,11 +536,16 @@ Engine:
     `docs/secrets.md`, including `DEPLOY_RUNNER_NAME`.
 - **provisioning admin (D5)** — when `worker.db.auto-provision=true` AND the DB is docker-managed, generate
   `init/00-provision-admin.sql` creating the `worker.db.admin-username`/`admin-password` account with
-  CREATE DATABASE/USER + GRANT (MySQL) or CREATE SCHEMA/ROLE (Postgres), so provisioning works at deploy. At
+  CREATE DATABASE/USER + GRANT (MySQL) or CREATE SCHEMA/ROLE (Postgres), so provisioning works at deploy. The
+  password is a `secret: true` key: write `${WORKER_DB_ADMIN_PASSWORD:{{ADMIN_PW}}}` for this docker path (a
+  generated throwaway that must match the init SQL) and `${WORKER_DB_ADMIN_PASSWORD}` with no fallback for an
+  existing server. At
   step 6 `container` or above the sidecar overlay has no `init/` mount: uncomment its
   `[OPTIONAL auto-provision]` single-file mount line, or the account is never created there. For an
-  existing server, instead print the exact GRANT the admin account needs. Never leave admin creds that don't
-  exist on the target DB.
+  existing server, instead print the statements under `provision_admin` in `db-vendors.yaml` verbatim — do not
+  compose a GRANT yourself — together with its warning: on MySQL this account can reach every schema on the
+  instance, so it belongs on an instance used for provisioning only. Never leave admin creds that don't exist
+  on the target DB.
 - **scope seed + deploy guidance (auto-provision)** — set `protean.worker.db.scopes` in `application.yml` to at
   least one seed scope (e.g. `[default]`) so modules have an ACTIVE scope to bind to. In the README's deploy
   section, show that every module deploy MUST pass a **`scope`** (deploy-arg / `module.yaml` `scope:`) naming a
@@ -557,10 +574,16 @@ Engine:
   then checks the artifact required for this track and skips the bootJar build under `runtime=sidecar`). Also fill
   `{{OAUTH}}` (`true` when `mcp.authorization.resource` is set) — that gates the issuer preflight block, which
   fails `--check` on an unset `OAUTH_ISSUER_URI` instead of letting the app die with a stack trace, and prints the
-  advertised `RESOURCE_URL` built from `SERVER_HOST`/`SERVER_PORT`. Supports `./setup.sh --check`.
+  advertised `RESOURCE_URL` built from `SERVER_HOST`/`SERVER_PORT`. Fill `{{SECRET_ENVS}}` with the
+  space-separated `env:` names of the `secret: true` keys written WITHOUT a fallback (empty when there are
+  none) — the preflight fails on an unset one, because the binder would otherwise pass the literal `${...}`
+  string on as the secret. Supports `./setup.sh --check`.
 - **self-check test** (always) — `src/test/java/{{PKG_PATH}}/ConfigMatchesSelectionTest.java` from
   `templates/fragments/ConfigMatchesSelectionTest.java.template`. Fill its `<<assertions>>` with one
-  `assertEquals(<value>, cfg.get("<protean.key>"))` per selected `protean.*` key, `<<fragment-checks>>` with a
+  `assertEquals(<value>, cfg.get("<protean.key>"))` per selected `protean.*` key (for a `secret: true` key the
+  expected value is the PLACEHOLDER string exactly as written in `application.yml`, e.g.
+  `"${WORKER_DB_ADMIN_PASSWORD}"` — the test reads the raw yaml, so this pins the indirection and never holds
+  the secret), `<<fragment-checks>>` with a
   `Class.forName` check per selected fragment, and `<<module-classpath-checks>>` with one `Class.forName` per
   selected `module_classpath` entry (the representative FQCN each entry documents). That last block is the only
   automated guard on module-facing deps — without it a missing jar surfaces at the FIRST DEPLOY as a module

@@ -200,6 +200,22 @@ host daemon would have to resolve a path that exists only inside the runner cont
 
 ⚠️ **`docker.sock` access is equivalent to host root.** Use this runner only on trusted machines.
 
+### Raising the runner version
+
+The image tag in `.github/runner/docker-compose.yml` is pinned (`myoung34/github-runner:2.338.2`) and
+`DISABLE_AUTO_UPDATE` keeps the runner from replacing itself, so the version only moves when you move it.
+GitHub stops dispatching jobs to a runner that is more than about 30 days behind the newest release — the
+symptom is jobs that stay queued while the runner still shows as online. Before that:
+
+```bash
+# 1. pick the new tag: https://github.com/actions/runner/releases (the image tag is the same number)
+# 2. change BOTH image lines (init and runner) in .github/runner/docker-compose.yml, then on every runner machine:
+cd .github/runner && docker compose pull && docker compose up -d
+docker compose logs -f     # "Listening for Jobs"
+```
+
+Registration survives the swap (`runner-data` volume), so no new token is needed.
+
 ## Housekeeping
 
 A self-hosted runner is not a fresh VM. The `image` job removes its containers and network in an

@@ -121,6 +121,10 @@
 2. **연결 방식**:
    - 서버 기반(mysql/postgresql): **existing**(사용자가 host/port/db/user/password 를 *입력* → datasource 만,
      compose 없음) 또는 **docker**(벤더 템플릿에서 `docker-compose.yml` + `init/01-schema.sql` 생성).
+     **mysql + existing** 이면 서버가 TLS 를 받는지도 묻고(기본 예) 그에 따라 `url_existing` 또는
+     `url_existing_no_tls` 의 URL 을 쓴다 — docker 용 URL 은 TLS 를 끄므로 원격 서버에 쓰면 안 된다.
+     `sslMode=REQUIRED` 가 하지 않는 일도 말한다: 암호화는 하지만 서버 인증서를 검증하지 않는다. CA 가 있으면
+     운영자가 `VERIFY_CA` / `VERIFY_IDENTITY` 로 올려야 한다.
    - `h2`(임베디드): `mem` 또는 `file` 을 묻는다 — 서버도 docker 도 없음. `src/main/resources/schema.sql` 을 쓴다.
    - other: 사용자가 드라이버 Maven 좌표, driver-class-name, JDBC URL, user/password 를 *입력* → datasource +
      드라이버 의존성만, compose 없음.
@@ -280,6 +284,13 @@ AskUserQuestion 은 질문당 선택지 4개가 상한이므로, 나누기를 �
 boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" 다중 선택 후, 고른 것마다 값을 묻는다(타이핑) —
 체크는 "이 기본값을 덮어쓰고 싶다"는 뜻일 뿐이고, 그다음 값을 수집한다. enum: 허용값 중에서 고르는 선택
 (기본값을 문구에서 미리 표시).
+
+**★ yaml 에 `secret: true` 로 표시된 키는 값을 받지도, 리터럴로 쓰지도 않는다.** 지금은
+`protean.worker.db.admin-password`, `protean.bridge.secret`, `protean.worker.admin-auth.secret` 이다. 설정할지
+여부만 묻는다. 값은 그 키의 `env:` 가 이름 붙인 환경변수에 두고 `application.yml` 에는 자리표시만 쓴다(step 9).
+여기서 값을 입력받으면 자격증명이 `application.yml` 과 `ConfigMatchesSelectionTest.java` — 커밋되는 두 파일 —
+에 들어간다. 두 shared secret 은 비워 두기를 권한다: 비어 있고 켜져 있으면 protean 이 JVM 마다 하나를 만들어
+워커에 주입한다. (`protean.gate.signature.keys` 는 반대다 — 신뢰할 **공개키**이고 커밋해 검토받는 값이다.)
 
 ### 8. 검증 + 의존성 해소
 
@@ -535,10 +546,13 @@ infra 가 선택을 따르게 하는 셋:
 - **프로비저닝 admin (D5)** — `worker.db.auto-provision=true` 이고 DB 가 docker 로 관리될 때,
   `init/00-provision-admin.sql` 을 생성해 `worker.db.admin-username`/`admin-password` 계정을 만든다. MySQL 은
   CREATE DATABASE/USER + GRANT, Postgres 는 CREATE SCHEMA/ROLE — 그래야 배포 시점에 프로비저닝이 동작한다.
+  비밀번호는 `secret: true` 키다: 이 docker 경로에서는 `${WORKER_DB_ADMIN_PASSWORD:{{ADMIN_PW}}}`(init SQL 과
+  일치해야 하는 생성된 일회용 값), 기존 서버에서는 fallback 없는 `${WORKER_DB_ADMIN_PASSWORD}` 로 쓴다.
   6 단계가 `container` 이상이면 sidecar 오버레이에는 `init/` 마운트가 없다: 그 파일의
   `[OPTIONAL auto-provision]` 단일 파일 마운트 줄의 주석을 푼다. 그러지 않으면 계정이 거기에 만들어지지 않는다.
-  기존 서버라면 대신 admin 계정에 필요한 정확한 GRANT 문을 출력한다. 대상 DB 에 존재하지 않는 admin 자격증명을
-  절대 남기지 말 것.
+  기존 서버라면 대신 `db-vendors.yaml` 의 `provision_admin` 아래 문장을 **그대로** 출력한다 — GRANT 를 직접
+  지어내지 않는다 — 그 경고도 함께: MySQL 에서 이 계정은 인스턴스의 모든 스키마에 닿으므로 프로비저닝 전용
+  인스턴스에 두어야 한다. 대상 DB 에 존재하지 않는 admin 자격증명을 절대 남기지 말 것.
 - **scope seed + 배포 안내 (auto-provision)** — `application.yml` 의 `protean.worker.db.scopes` 에 최소 하나의
   seed scope(예: `[default]`)를 설정해, 모듈이 바인딩할 ACTIVE scope 가 있게 한다. README 의 배포 절에는
   모든 모듈 배포가 seed 된/ACTIVE scope 를 지목하는 **`scope`** 를 반드시 넘겨야 한다는 점(deploy-arg /
@@ -568,10 +582,15 @@ infra 가 선택을 따르게 하는 셋:
   아티팩트를 확인하고, `runtime=sidecar` 아래에서는 bootJar 빌드를 건너뛴다)를 채운다. `{{OAUTH}}`
   (`mcp.authorization.resource` 가 설정됐으면 `true`)도 채운다 — 이것이 issuer preflight 블록을 게이팅하며,
   `OAUTH_ISSUER_URI` 가 설정되지 않았을 때 앱이 스택 트레이스로 죽게 두는 대신 `--check` 에서 실패하게 하고,
-  `SERVER_HOST`/`SERVER_PORT` 로 조립한 광고 `RESOURCE_URL` 을 출력한다. `./setup.sh --check` 를 지원한다.
+  `SERVER_HOST`/`SERVER_PORT` 로 조립한 광고 `RESOURCE_URL` 을 출력한다. `{{SECRET_ENVS}}` 에는 fallback **없이**
+  쓴 `secret: true` 키들의 `env:` 이름을 공백으로 이어 채운다(없으면 공백) — 하나라도 설정되지 않았으면
+  preflight 가 실패한다. 그러지 않으면 binder 가 `${...}` 리터럴 문자열을 secret 으로 넘긴다.
+  `./setup.sh --check` 를 지원한다.
 - **자기검증 테스트**(항상) — `templates/fragments/ConfigMatchesSelectionTest.java.template` 에서
   `src/test/java/{{PKG_PATH}}/ConfigMatchesSelectionTest.java` 를 만든다. `<<assertions>>` 에는 선택된
-  `protean.*` 키마다 `assertEquals(<value>, cfg.get("<protean.key>"))` 한 줄, `<<fragment-checks>>` 에는 선택된
+  `protean.*` 키마다 `assertEquals(<value>, cfg.get("<protean.key>"))` 한 줄(`secret: true` 키의 기대값은
+  `application.yml` 에 쓴 **자리표시 문자열 그대로**다, 예: `"${WORKER_DB_ADMIN_PASSWORD}"` — 테스트는 yaml
+  원문을 읽으므로 간접화를 못박을 뿐 secret 을 담지 않는다), `<<fragment-checks>>` 에는 선택된
   fragment 마다 `Class.forName` 확인 한 줄, `<<module-classpath-checks>>` 에는 선택된 `module_classpath` 엔트리마다
   `Class.forName` 한 줄(각 엔트리가 문서화한 대표 FQCN)을 채운다. 마지막 블록이 모듈 대면 의존성에 대한 유일한
   자동 방어선이다 — 없으면 jar 누락이 **첫 배포**에서 모듈 컴파일 에러로만 드러난다. `build.gradle` 은 이미

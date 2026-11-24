@@ -57,9 +57,10 @@ services:
       TZ: UTC
 
     ports:
-      # Host side only. The app connects over the container network to postgres:5432 and is unaffected.
-      # If the host already runs Postgres on 5432, step aside with POSTGRES_HOST_PORT=15432.
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      # Host side only, and LOOPBACK only — without the 127.0.0.1 prefix Docker binds 0.0.0.0 and the sidecar is
+      # reachable from the whole network. The app connects over the container network to postgres:5432 and is
+      # unaffected. If the host already runs Postgres on 5432, step aside with POSTGRES_HOST_PORT=15432.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
 
     volumes:
       - {{NAME_KEBAB}}-postgres-data:/var/lib/postgresql/data

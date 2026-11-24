@@ -237,6 +237,8 @@ groups:
         default: ""
         advanced: true
         desc: Shared secret for bridge auth. Blank + enabled → auto-generated per JVM and injected into workers.
+        secret: true            # never asked or written as a literal — see SKILL.md step 7
+        env: BRIDGE_SECRET      # application.yml carries ${BRIDGE_SECRET}; prefer leaving the key unset
       - key: protean.bridge.auth-mode
         type: enum
         allowed: [token, hmac]
@@ -283,6 +285,7 @@ groups:
         default: "{}"
         advanced: true
         desc: Trusted public keys keyId → Base64(X.509 Ed25519). Generate with ModuleSigning.generateKeyPair().
+        note: PUBLIC keys — not a secret. Write them into application.yml as typed; they are meant to be committed and reviewed.
 
   isolation:
     title: Isolation mode (execution shape)
@@ -572,6 +575,8 @@ groups:
         default: ""
         advanced: true
         desc: Admin DB password.
+        secret: true                     # never asked or written as a literal — see SKILL.md step 7
+        env: WORKER_DB_ADMIN_PASSWORD    # docker DB: ${WORKER_DB_ADMIN_PASSWORD:<generated>} · existing: no fallback
       # (no deprovision-on-undeploy key — removed from protean; undeploy never tears down a scope,
       #  teardown is operator-driven via the scope admin API: detach (data-safe) / destroy.)
       # --- sidecar runtime ---
@@ -604,6 +609,8 @@ groups:
         default: ""
         advanced: true
         desc: Shared secret. Blank + enabled → auto-generated per JVM and injected into workers.
+        secret: true                     # never asked or written as a literal — see SKILL.md step 7
+        env: WORKER_ADMIN_AUTH_SECRET    # application.yml carries ${WORKER_ADMIN_AUTH_SECRET}; prefer leaving the key unset
       - key: protean.worker.admin-auth.mode
         type: enum
         allowed: [hmac, token]

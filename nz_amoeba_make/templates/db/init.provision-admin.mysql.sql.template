@@ -2,6 +2,13 @@
 -- (protean.worker.db.admin-username / admin-password). Auto-provision carves a per-module DB scope at deploy via
 -- this account, so it needs CREATE DATABASE/USER + GRANT OPTION. Runs on first boot of a fresh data volume.
 -- Name this so it sorts BEFORE any data init (e.g. 00-provision-admin.sql). Live-demo credentials — not for prod.
+--
+-- ★ WHY *.* AND WHY THAT MEANS "THIS INSTANCE ONLY". protean names each scope database and its account after the
+-- scope itself (no prefix) and grants the scope account ALL on it, so the admin must hold those privileges on any
+-- database name a scope could take. That makes it able to read and change EVERY schema on the instance. Fine for
+-- this throwaway sidecar; on a real server use an instance that exists for provisioning only (db-vendors.yaml
+-- `provision_admin`). The password below is the generated throwaway that application.yml carries as the
+-- ${WORKER_DB_ADMIN_PASSWORD:...} fallback.
 CREATE USER IF NOT EXISTS '{{ADMIN_USER}}'@'%' IDENTIFIED BY '{{ADMIN_PW}}';
 GRANT ALL PRIVILEGES ON *.* TO '{{ADMIN_USER}}'@'%' WITH GRANT OPTION;
 FLUSH PRIVILEGES;

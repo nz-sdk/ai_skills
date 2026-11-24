@@ -10,7 +10,9 @@ services:
     image: postgres:16
     container_name: protean-{{NAME}}-postgres
     ports:
-      - "5432:5432"
+      # Loopback only. A bare "5432:5432" binds 0.0.0.0 and offers this demo database — and its demo password —
+      # to the whole network. Only the app on this host needs it.
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_DB: {{DB}}
       POSTGRES_USER: {{DB}}

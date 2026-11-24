@@ -22,7 +22,18 @@ vendors:
     # column — without them the driver shifts it by the server's offset (9 hours in KST). The case that forced
     # this was a token-expiry column round-tripping through jdbc, but the correctness applies to any module
     # storing datetimes, so it is set for every generated project.
+    # ★ THE URL FOLLOWS THE CONNECTION MODE. `url` is the DOCKER one: a loopback sidecar with no TLS, where
+    # allowPublicKeyRetrieval=true is required (MySQL 8.4 negotiates caching_sha2_password, and over plaintext the
+    # driver must fetch the server key). Pointed at a REMOTE server the same two parameters send the password
+    # exchange and every row in the clear and accept a key from whoever answers.
     url: "jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/{{DB}}?useSSL=false&allowPublicKeyRetrieval=true&preserveInstants=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+    # existing server (default): TLS required, so no public-key retrieval is needed.
+    # ⚠ sslMode=REQUIRED encrypts but does NOT verify the server certificate — it stops passive sniffing, not an
+    #   active man-in-the-middle. With a CA available use sslMode=VERIFY_CA (or VERIFY_IDENTITY) plus a trust store.
+    url_existing: "jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/{{DB}}?sslMode=REQUIRED&preserveInstants=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+    # existing server WITHOUT TLS — only when the user says so explicitly in step 4. Same parameters as the docker
+    # URL; say in the README that the connection is unencrypted.
+    url_existing_no_tls: "jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/{{DB}}?useSSL=false&allowPublicKeyRetrieval=true&preserveInstants=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
     docker:
       compose_template: templates/db/docker-compose.mysql.yml.template
       init_template: templates/db/init.mysql.sql.template
@@ -64,8 +75,29 @@ vendors:
 #   docker DB    → also generate templates/db/init.provision-admin.<mysql|postgres>.sql.template as
 #                  init/00-provision-admin.sql (creates the admin account with CREATE DB/USER/GRANT). {{ADMIN_USER}}
 #                  / {{ADMIN_PW}} = protean.worker.db.admin-username / admin-password.
-#   existing DB  → do NOT generate; print the exact GRANT the admin account must already have.
+#   existing DB  → do NOT generate; print the statements under `provision_admin` below VERBATIM, with the warning.
 # A DataSource that ONLY backs the jdbc module-store gets NO items data init (Protean creates its own store tables).
+
+# What the provisioning admin account needs, per vendor. Printed verbatim for an existing server (SKILL.md step 9,
+# "provisioning admin") so the generator never composes a GRANT of its own.
+provision_admin:
+  mysql:
+    statements: |
+      CREATE USER IF NOT EXISTS '<admin-username>'@'%' IDENTIFIED BY '<admin-password>';
+      GRANT ALL PRIVILEGES ON *.* TO '<admin-username>'@'%' WITH GRANT OPTION;
+    warning: >-
+      protean names each scope database and its account after the scope itself, with no prefix, and grants the
+      scope account ALL on that database. The admin therefore has to hold those privileges on every database name
+      a scope could take, i.e. on *.* — it can read and change every schema on the instance, and a shorter
+      privilege list does not change that while mysql.* stays inside *.*. Put this account on a MySQL instance
+      used for provisioning ONLY, never on the one that holds business data or an authorization server. Do not
+      let anyone create a scope named after an existing database.
+  postgresql:
+    statements: |
+      CREATE ROLE "<admin-username>" LOGIN PASSWORD '<admin-password>' CREATEDB CREATEROLE;
+    warning: >-
+      CREATEROLE lets this role create and alter other non-superuser roles. Use a dedicated role for provisioning;
+      do not reuse an application or owner role.
 
 # spring.datasource block the skill writes into application.yml (server-backed vendors + other):
 #   spring:

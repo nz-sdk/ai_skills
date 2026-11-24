@@ -39,6 +39,7 @@ SIDECAR_JAR="{{SIDECAR_JAR}}"                # protean.worker.sidecar.jar   (emp
 SIDECAR_IMAGE="{{SIDECAR_IMAGE}}"            # protean.worker.sidecar.image (empty when unset)
 SIDECAR_SHARED_API="{{SIDECAR_SHARED_API}}"  # protean.worker.sidecar.shared-api (empty when unset)
 OAUTH="{{OAUTH}}"                    # true | false — protean.mcp.authorization.resource is set
+SECRET_ENVS="{{SECRET_ENVS}}"        # env names application.yml reads with NO fallback for a secret key (may be empty)
 SERVER_HOST="${SERVER_HOST:-localhost}"  # ADVERTISED hostname (not a bind address — that would be server.address)
 SERVER_PORT="${SERVER_PORT:-{{PORT}}}"   # see the header: this name is what carries through to server.port
 export SERVER_HOST SERVER_PORT       # the app reads both from the environment; no command-line argument needed
@@ -184,6 +185,14 @@ if [ "${OAUTH}" = "true" ]; then
   # client that silently cannot reach it.
   echo "  MCP resource:     ${RESOURCE_URL}"
 fi
+
+# Secret keys written as ${NAME} with no fallback (protean-options.yaml `secret: true`). Same trap as DB_PASSWORD:
+# the binder leaves an unresolved ${NAME} in place as a literal string, so the app would start and then present
+# that literal as the credential. Fail here instead.
+for name in ${SECRET_ENVS}; do
+  [ -n "${!name:-}" ] || err "${name} is not set. application.yml reads it with no fallback (a secret that lives in no committed file). Set it: export ${name}=<value>"
+  echo "  ${name}: set"
+done
 
 # HTTP port free — this is the real bind port (server.port derives from SERVER_PORT), so the check is meaningful.
 #

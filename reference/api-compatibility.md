@@ -3,7 +3,7 @@
 화면(FE)과 API(BE)를 각자 배포하면 둘이 어긋나는 순간이 반드시 생긴다. 이 문서는 그 어긋남을 막는 **규칙 · 순서 · 표시**를 정한다.
 코드 없이도 오늘부터 지킬 수 있는 규칙이 먼저이고, 도구(타입 생성 · 호환성 게이트 · 헤더)는 그 규칙을 기계가 지키게 하는 보조다.
 
-- 이 문서는 skill 공용이다. `create-frontend` 와 `nz_amoeba_make` 가 이 문서를 가리킨다.
+- 이 문서는 skill 공용이다. `create-frontend` 와 `nz-amoeba-make` 가 이 문서를 가리킨다.
 - 생성한 프로젝트에는 이 문서를 `docs/api-compatibility.md` 로 복사하고, 「정할 것」에서 고른 값을 채운다.
 
 ## 어긋남 세 가지
@@ -113,7 +113,7 @@
 
 ### 3. Deprecation 공지
 
-공지는 아래 템플릿으로 한다. 채널은 「정할 것」에서 정한다. BE 의 배포 웹훅이 deprecation 목록을 실어 보내면(`nz_amoeba_make` 의 `{{deprecations}}`) 자동 알림의 바탕이 된다.
+공지는 아래 템플릿으로 한다. 채널은 「정할 것」에서 정한다. BE 의 배포 웹훅이 deprecation 목록을 실어 보내면(`nz-amoeba-make` 의 `{{deprecations}}`) 자동 알림의 바탕이 된다.
 
 ```markdown
 [API deprecate] <모듈> v1.x — GET /orders/{id}
@@ -141,7 +141,7 @@ BE 를 배포한 뒤 그 판의 스펙을 게시하고, FE 는 그 스펙으로 
 
 ## 게이트 두 개와 그 차이
 
-| | BE 배포 게이트(`nz_amoeba_make` 의 `SpecCompatibility`) | FE CI 의 oasdiff |
+| | BE 배포 게이트(`nz-amoeba-make` 의 `SpecCompatibility`) | FE CI 의 oasdiff |
 |---|---|---|
 | 언제 | 배포된 module 을 update 할 때, 컴파일 전에 | 스펙 스냅샷이 바뀐 PR |
 | 무엇과 비교 | 배포돼 있는 판의 봉인된 스펙 | 기본 브랜치의 스펙 스냅샷 |

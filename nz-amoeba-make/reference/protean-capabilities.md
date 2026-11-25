@@ -1,7 +1,7 @@
 # Protean Capability Reference
 
 The authoritative catalog of protean capabilities a generated sample can include. The
-`nz_amoeba_make` skill reads this file to (1) present selectable capabilities, (2) resolve their
+`nz-amoeba-make` skill reads this file to (1) present selectable capabilities, (2) resolve their
 dependencies, and (3) emit the right config, dependencies, and code fragments.
 
 **Grounding:** derived from `protean/docs/guide/{03-configuration,05-isolation-modes,06-promotion-gates,07-data-access,08-mcp-integration,10-spi-extension,11-operations,12-security}.md`
@@ -146,21 +146,9 @@ one off is not a prohibition.
 | Registration ignores the return type — the registrar builds a `RequestMappingInfo` and calls `handlerMapping.registerMapping(info, handler, method)` | `dynamic/DynamicEndpointRegistrar` |
 | `module.request-timeout-ms` does **not** kill a stream — `ModuleTimeoutFilter` is a `OncePerRequestFilter`, which skips ASYNC dispatches; the initial dispatch returns as soon as async starts, so the watchdog deregisters immediately | `runtime/ModuleTimeoutFilter` |
 
-Four pitfalls to surface whenever a user asks for streaming:
-
-1. **worker/container + SSE → events can sit in the buffer.** `ReverseProxy.handle()` streams
-   (`BodyHandlers.ofInputStream()` + `in.transferTo(out)`) but **never calls `flush()`**, so small SSE events may
-   not reach the client until the container buffer fills. The copy is also blocking, so the stream holds one
-   main-side request thread for its whole life. **in-process has neither problem — recommend it for streaming.**
-   (This is a protean-side gap, not something the generated sample can fix.)
-2. **Do not declare a verify probe on a streaming path.** `VerificationGate` probes with `BodyHandlers.ofString()`
-   on the shared `HttpClient`, which sets only `connectTimeout(5s)` — there is no read timeout, so the gate blocks
-   until the stream ends and the deploy hangs. Safe because the gate is opt-in: it returns immediately when
-   `descriptor.verification()` is null.
-3. **Close emitters on unload.** An open emitter pins the module `ClassLoader` and defeats the Metaspace
-   reclamation protean otherwise guarantees. Register a `ModuleUnloadCallback`, and push from the injected
-   `ProteanTaskExecutor` rather than a hand-rolled thread (it is reclaimed automatically on unload).
-4. **`module.executor.pool-size` defaults to 2.** A handful of long-lived streams exhausts it.
+The four pitfalls to surface whenever a user asks for streaming — proxy buffering under worker/container, the
+verify-probe hang, unload leaks, executor pool size — live in `protean-options.yaml`, `module_classpath` →
+`rest_mvc` → `note`. The skill reads them there, so they are not repeated here.
 
 ### WebSocket / STOMP — not supported for module routes
 

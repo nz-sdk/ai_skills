@@ -576,7 +576,8 @@ infra 가 선택을 따르게 하는 셋:
     그 글자 그대로의 DB 계정, compose 프로젝트 이름, 셸 값이 된다.
   - **load-bearing 한 부분을 "정리"하지 말 것.** 각각이 조용히 나는 실패를 설명하는 주석이다: `java -jar` 금지,
     build 스테이지에서의 `jmods` 제거, CI 의 `services:`/`--network host` 금지, 아티팩트 업로드의
-    `overwrite: true`, deploy-host 라벨 + `$RUNNER_NAME` 자기검증, 스모크가 `localhost` 가 아니라
+    `overwrite: true`, deploy-host 라벨 + `$RUNNER_NAME` 자기검증, deploy job 의
+    `workflow_run.event == 'push'` · `head_repository` 조건, 스모크가 `localhost` 가 아니라
     `SERVER_HOST` 를 치는 것, `ports` 양쪽 숫자를 같게 하는 것.
   - **사람만 할 수 있는 일을 알려줄 것**: `git update-index --chmod=+x gradlew setup.sh`(`.gitattributes` 가
     고칠 수 없는 mode 비트), 그리고 `full` 에서는 `docs/secrets.md` 에 적힌 Actions Secrets/Variables 등록

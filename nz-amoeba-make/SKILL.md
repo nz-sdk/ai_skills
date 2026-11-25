@@ -569,7 +569,8 @@ Engine:
     is rarely loud: it becomes a database account, a compose project name or a shell value of that literal text.
   - **Do not "simplify" the load-bearing parts.** Each is a comment explaining a failure that is otherwise
     silent: no `java -jar`, `jmods` removed in the build stage, no `services:`/`--network host` in CI,
-    `overwrite: true` on the artifact uploads, the deploy-host label plus `$RUNNER_NAME` self-check, the smoke
+    `overwrite: true` on the artifact uploads, the deploy-host label plus `$RUNNER_NAME` self-check, the
+    `workflow_run.event == 'push'` and `head_repository` conditions on the deploy job, the smoke
     hitting `SERVER_HOST` rather than `localhost`, and identical numbers on both sides of `ports`.
   - **Tell the user what only a human can do**: `git update-index --chmod=+x gradlew setup.sh` (a mode bit
     `.gitattributes` cannot fix), and — at `full` — registering the Actions Secrets/Variables listed in

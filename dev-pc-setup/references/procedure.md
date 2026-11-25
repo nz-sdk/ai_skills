@@ -2,6 +2,7 @@
 
 `SKILL.md` 의 「빠진 것만 채우기」에서 해당 번호 절만 읽는다. 사람용 같은 내용은 아티팩트 「개발자 PC 초기 설정」이다.
 주소는 공개 호스트명(`*.newzen.kr`)만 쓴다. IP · DB 계정 · 비밀번호 · 토큰 값은 이 문서와 대화 어디에도 적지 않는다.
+`powershell` 블록은 Windows PowerShell 문법이다. Claude 가 돌릴 때는 `SKILL.md` 「범위」의 셸 규칙(PowerShell 도구, 없으면 `powershell -NoProfile -Command '…'`)을 따른다.
 
 - [부트스트랩 — 이 스킬을 처음 쓰기](#부트스트랩--이-스킬을-처음-쓰기)
 - [0. 받아 둘 계정 · 권한](#0-받아-둘-계정--권한)
@@ -29,12 +30,14 @@ winget install --id GitHub.cli -e
 winget install --id Microsoft.VisualStudioCode -e --scope user
 # 새 PowerShell 창에서
 gh auth login --hostname github.com --git-protocol https --web
-gh repo clone nz-sdk/ai_skills D:\work\ai_skills
+$w = "$HOME\work"   # 받을 폴더. 다른 드라이브를 쓰려면 이 줄만 바꾼다(예: D:\work)
+gh repo clone nz-sdk/ai_skills "$w\ai_skills"
 New-Item -ItemType Directory -Force "$HOME\.claude\skills" | Out-Null
-New-Item -ItemType Junction -Path "$HOME\.claude\skills\dev-pc-setup" -Target "D:\work\ai_skills\dev-pc-setup"
+New-Item -ItemType Junction -Path "$HOME\.claude\skills\dev-pc-setup" -Target "$w\ai_skills\dev-pc-setup"
 code --install-extension anthropic.claude-code
 ```
 
+- 받을 폴더는 `$w` 한 줄로 정한다. junction 이 그 경로를 가리키므로 나중에 폴더를 옮기면 junction 을 다시 건다.
 - 스킬 하나만 junction 으로 건다. 이미 `~/.claude/skills` 에 다른 스킬이 있어도 건드리지 않는다. 관리자 권한은 필요 없다.
 - VS Code 에서 Claude Code 에 팀 계정으로 로그인한 뒤 「개발자 PC 세팅 점검해줘」 또는 `/dev-pc-setup` 을 부른다.
 
@@ -72,7 +75,7 @@ winget install --id Microsoft.VisualStudioCode -e --scope user
 
 확인은 **새 창**에서 한다: `git --version` · `gh --version` · `node -v`(v22.x) · `npm -v` · `code --version`.
 
-- **`code` 가 PATH 에 없음:** 점검이 「at …\bin\code.cmd, but 'code' is not on PATH」로 낸다. zip 판이거나 설치 전에 연 셸이다.
+- **`code` 가 PATH 에 없음:** 점검이 「'code' is not on PATH; found …\bin\code.cmd」로 낸다. zip 판이거나 설치 전에 연 셸이다.
   사용자 승인 뒤 그 `bin` 폴더를 사용자 PATH 에 더하거나, 사용자 설치판으로 다시 깔게 한다.
 - **한글 깨짐:** 출력이 깨지면 `chcp 65001`.
 - **python 스텁:** `python` 은 Windows 스토어 스텁이라 아무것도 하지 않고 성공처럼 끝난다. 이 작업에는 Python 이 필요 없다.
@@ -140,6 +143,8 @@ gh repo view nz-sdk/bridge-backoffice --json viewerPermission -q .viewerPermissi
 
 fine-grained 토큰은 `E403 token does not match expected scopes` 가 난다. 반드시 classic 이다.
 
+점검 스크립트는 접두사로 종류(`ghp_` = classic)만 본다. 다른 권한이 붙었는지는 알 수 없으니, 만들 때 4번을 지킨다.
+
 ### 2-5. `NODE_AUTH_TOKEN` 등록 (사람)
 
 Claude 는 창만 열어 줄 수 있다: `rundll32 sysdm.cpl,EditEnvironmentVariables`.
@@ -149,10 +154,12 @@ Claude 는 창만 열어 줄 수 있다: `rundll32 sysdm.cpl,EditEnvironmentVari
 3. 열려 있는 PowerShell · VS Code 를 모두 닫고 다시 연다.
 
 - **창으로 넣는 이유:** 명령으로 넣으면 PowerShell 기록에 토큰이 남는다.
+- **사용자 변수의 범위:** 그 사용자로 뜨는 모든 프로세스가 읽는다. 다른 프로젝트의 npm 설치 스크립트도 읽을 수 있다.
+  그래서 권한은 `read:packages` 하나, 만료는 90일로 둔다. 위쪽 「시스템 변수」에는 넣지 않는다(이 PC 의 모든 계정이 읽는다).
 - **저장소 쪽 연결:** 저장소에 커밋된 `.npmrc` 가 `@nz-sdk` 를 `https://npm.pkg.github.com` 으로 보내고, `${NODE_AUTH_TOKEN}` 을 읽는다.
 - **토큰을 받으면 안 되는 곳:** 토큰을 `~/.npmrc` 에 적지 않는다(오히려 E401). 채팅 · 파일 · 커밋 · 스크린샷에도 남기지 않는다.
 - **대안 (bridge-web README 방식):** gh 로그인 토큰을 쓴다. `gh auth refresh -h github.com -s read:packages` 뒤 창마다 `$env:NODE_AUTH_TOKEN = gh auth token`.
-  gh 토큰은 권한이 넓으니 영구 환경변수로는 넣지 않는다.
+  gh 토큰은 권한이 넓으니 영구 환경변수로는 넣지 않는다. 점검은 이 방식(이 창에만 있는 gh 토큰)을 info 로, 영구 변수에 든 gh 토큰을 warn 으로 낸다.
 
 ---
 
@@ -224,7 +231,9 @@ VITE_API_BASE=https://bridge-api.newzen.kr
 이 스킬이 돌고 있다면 이미 설치 · 로그인돼 있다. 점검만 한다.
 
 - **설치:** VS Code 확장은 `code --install-extension anthropic.claude-code` 로 깐다(1.94 이상).
-  - 터미널 CLI 는 선택이다: `irm https://claude.ai/install.ps1 | iex` → `claude --version` · `claude doctor`.
+  - 터미널 CLI 는 선택이다. VS Code 확장만 쓰면 필요 없다.
+    깔 때는 공식 설치 명령 `irm https://claude.ai/install.ps1 | iex` 를 쓴다. 받은 스크립트를 확인 없이 바로 실행하는 방식이므로,
+    먼저 보려면 `irm https://claude.ai/install.ps1 -OutFile install.ps1` 로 받아 읽은 뒤 돌린다. 깐 뒤 `claude --version` · `claude doctor`.
 - **로그인:** 초대받은 회사 claude.ai 팀 계정으로 한다. 사용자가 `/status` 의 계정 행을 확인하고, 바꿀 때는 `/login`.
 - **API 키 변수:** `ANTHROPIC_API_KEY` · `ANTHROPIC_AUTH_TOKEN` 이 있으면 Claude Code 가 그 키로 붙고 claude.ai 커넥터(BridgeX · Atlassian)를 가져오지 않는다.
   사용자 승인 뒤 지우고 VS Code 를 다시 시작한다.
@@ -378,7 +387,7 @@ people:
 | 「승인을 기다리고 있습니다」 | 관리자 승인 전 | 가입 방법과 계정을 알려 활성화 요청 |
 | 배포 · SELECT 도구 권한 오류 | `mcp.write` 없음 | 관리자에게 요청 → 커넥터 재연결 |
 | `claude_design` 인증 오류 | Claude Design 로그인 없음 · 만료 | `/design-login` |
-| MCP `CONNECT_TIMEOUT` | 타임아웃 설정은 세션 시작 때만 읽힘 | 새 세션. 계속되면 `[Environment]::SetEnvironmentVariable('MCP_TIMEOUT','180000','User')` 후 VS Code 재시작 |
+| MCP `CONNECT_TIMEOUT` | 타임아웃 설정은 세션 시작 때만 읽힘 | 새 세션. 계속되면 저장소 `.claude/settings.local.json` 의 `env` 에 `"MCP_TIMEOUT": "180000"` 을 넣고 새 세션(사용자 환경변수로 넣지 않는다 — 모든 프로젝트에 번지고, 저장소 `settings.json` 의 값과 겹친다) |
 | 백오피스 CORS 오류 | 5174 가 아닌 포트 · `.env` 누락 | `npm run dev`(5174 고정) · `.env` 두 줄 |
 | `code` 명령 없음 | zip 판 · PATH 미반영 | 사용자 설치판으로 다시 깔거나 `…\bin` 을 사용자 PATH 에 추가 |
 | 한글 깨짐 | 콘솔 코드페이지 | `chcp 65001` |

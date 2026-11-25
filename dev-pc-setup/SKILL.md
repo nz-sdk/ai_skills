@@ -6,7 +6,7 @@ compatibility:
   agents:
     - claude
 metadata:
-  version: 0.1.2
+  version: 0.1.3
 ---
 
 # dev-pc-setup — 개발자 PC 초기 설정
@@ -26,6 +26,9 @@ AX 개발 프로세스에서 개발자는 bridge-web · bridge-backoffice 화면
 - **대상:** AX 개발자(화면 개발). JDK 와 bridge-api · bridge-auth 로컬 실행은 범위 밖이다. 서버 호스트를 고치는 사람만 필요하다.
 - **환경:** Windows 10 · 11, Windows PowerShell 5.1. 다른 OS 면 `scripts/check.ps1` 을 돌리지 않고, procedure.md 의 순서와 확인 기준을 손으로 따른다.
 - **전제:** 이 스킬이 돌고 있다면 Claude Code 는 이미 설치 · 로그인돼 있다. 스킬을 처음 받는 방법은 procedure.md 「부트스트랩」이다.
+- **셸:** 이 문서와 procedure.md 의 `powershell` 블록은 Windows PowerShell 문법이다. Claude 는 PowerShell 도구로 돌린다.
+  - Bash 도구(Git Bash)만 있으면 `powershell -NoProfile -Command '<블록>'` 으로 감싼다. 안쪽 문자열은 큰따옴표로 쓴다.
+  - bash 에 블록을 그대로 넣지 않는다. `$env:` · `| Out-Null` 이 안 돌고, 따옴표 없는 `D:\work\bridge` 는 `D:workbridge` 가 된다.
 
 ## 지킬 것과 그 이유
 
@@ -37,14 +40,19 @@ AX 개발 프로세스에서 개발자는 bridge-web · bridge-backoffice 화면
 2. **브라우저 · 대화형 로그인은 사람이 한다.**
    - `gh auth login --web` 은 기기 코드 입력을 기다리며 멈춘다. Claude 의 셸로 돌리지 말고, 사용자가 별도 PowerShell 창에서 실행하게 한다.
    - bridge-auth 가입, claude.ai 커넥터 연결, `/design-login` 도 사람 몫이다.
-3. **PC 를 바꾸는 명령은 먼저 보여 주고 승인받는다.** winget 설치 · clone · `git config` · `npm ci` · `.env` 쓰기 · PATH 변경이 해당한다.
+3. **PC 를 바꾸는 명령은 먼저 보여 주고 승인받는다.** winget 설치 · VS Code 확장 설치 · clone · 최신화(`git pull`) · `git config` ·
+   `gh auth setup-git` · `npm ci` · `.env` 쓰기 · PATH 변경 · 환경변수 삭제 · `claude mcp remove` · 저장소 PR 이 해당한다.
    - 같은 단계의 명령은 묶어서 한 번에 보여 줘도 된다.
 4. **된 것은 다시 하지 않는다.** 점검이 `ok` 인 항목은 건너뛴다. 이 스킬은 여러 번 불러도 같은 상태로 수렴해야 한다.
    - 사람을 기다리는 일(계정 승인, 커넥터 연결 뒤 새 세션)이 생기면 거기서 멈추고 남은 일을 보고한다.
    - 다시 부르면 점검부터 이어 간다.
-5. **전역을 바꾸지 않는다.**
-   - 작성자는 저장소 local `git config` 에 넣는다. `--global` 은 다른 프로젝트까지 바꾼다.
-   - DS 토큰은 사용자 환경변수에 넣는다. `~/.npmrc` 에 넣으면 프로젝트 `.npmrc` 가 같은 키를 덮어써 E401 이 난다.
+5. **다른 프로젝트에 번지는 전역 설정은 하지 않는다.**
+   - 작성자는 저장소 local `git config` 에 넣는다. `--global` 은 다른 프로젝트의 작성자까지 바꾼다.
+   - 전역에 두는 것은 아래 둘뿐이다. 둘 다 이유가 있는 예외다.
+     - **DS 토큰 — 사용자 환경변수 `NODE_AUTH_TOKEN`.** `~/.npmrc` 에 넣으면 프로젝트 `.npmrc` 가 같은 키를 덮어써 E401 이 난다.
+       사용자 변수는 그 사용자로 뜨는 모든 프로세스(다른 프로젝트의 npm 스크립트 포함)가 읽는다. 그래서 `read:packages` 하나 · 90일 만료인 classic PAT 만 둔다.
+       권한이 넓은 gh 토큰(`gho_`)은 두지 않고, 시스템 변수에도 두지 않는다(이 PC 의 모든 계정이 읽는다).
+     - **`gh auth setup-git` — `~/.gitconfig` 의 github.com 자격 도우미.** github.com 에만 걸리고, 화면 없는 세션에서 GCM 이 인증 창을 띄운 채 멈추는 것을 막는다.
 6. **공유 서버에 쓰지 않는다.**
    - 연결 확인은 읽기 도구(`protean_list_modules`, `atlassianUserInfo`)로만 한다.
    - 배포 · SQL 조회 · 시험 행 쓰기는 이 스킬의 일이 아니다. 개발 DB 와 운영 DB 가 나뉘어 있지 않다.
@@ -77,6 +85,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<base directory>\scripts\ch
   - `warn`: 동작은 하지만 고칠 것.
   - `missing`: 절차를 막는다.
   - `info`: 선택 사항이거나 참고.
+  - `unknown`: 확인할 수 없다(예: `~/.claude.json` 을 읽지 못함). 보고에서는 ? 로 쓰고 Claude 가 다른 방법으로 확인한다.
+- 토큰은 접두사로 종류만 본다. classic PAT 에 `read:packages` 말고 다른 권한이 붙었는지는 스크립트가 알 수 없다.
 
 ### Claude 가 직접 보는 것
 
@@ -93,7 +103,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<base directory>\scripts\ch
 
 모든 항목을 보여 준다. 사용자가 전체 상태를 봐야 무엇을 할지 고를 수 있다.
 
-- 상태 기호는 `ok` ✓, `warn` ⚠, `missing` ✗, `info` –, 확인할 수 없음 ? 로 쓴다.
+- 상태 기호는 `ok` ✓, `warn` ⚠, `missing` ✗, `info` –, `unknown` · 확인할 수 없음 ? 로 쓴다.
 - ✓ 인 항목은 단계마다 한 행으로 묶어도 된다. ⚠ · ✗ · ? 는 한 항목에 한 행이다.
 - 원인이 같은 항목은 한 행으로 합친다. 예를 들어 세션 루트가 틀려 claude_design 이 안 보이는 경우다.
 
@@ -126,8 +136,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<base directory>\scripts\ch
 |---|---|---|---|
 | 0 계정 · 권한 | 남은 것만 요청 문구로 정리 | 조직 관리자 · 설계자 · Jira 관리자에게 요청 | 사용자 확인 |
 | 1 도구 | winget 설치, 필요하면 VS Code `bin` 을 사용자 PATH 에 추가(모두 승인 후) | — | node v22.x, VS Code 1.94 이상 · `code` 가 PATH 에 있음. 사용자 설치판은 권장(info) |
-| 2 GitHub | `gh auth setup-git` 실행, 토큰 화면 경로 안내, 환경 변수 창 열기(`rundll32 sysdm.cpl,EditEnvironmentVariables`) | 별도 창에서 `gh auth login … --web`, classic PAT 만들기, `NODE_AUTH_TOKEN` 입력. gh 계정이 여럿이면 쓸 계정 고르기(`gh auth switch -u <계정>`) | 활성 gh 계정이 oauth, `npm view` 가 판 번호 |
-| 3 저장소 | clone 또는 최신화(main 이면 `git pull --ff-only`), local `git config`, `npm ci`, 백오피스 `.env` 두 줄(모두 승인 후) | 이름 · 회사 메일 답하기(AskUserQuestion) | 3단계 모두 ok |
+| 2 GitHub | `gh auth setup-git` 실행, 토큰 화면 경로 안내, 환경 변수 창 열기(`rundll32 sysdm.cpl,EditEnvironmentVariables`) | 별도 창에서 `gh auth login … --web`, classic PAT 만들기, `NODE_AUTH_TOKEN` 입력. gh 계정이 여럿이면 쓸 계정 고르기(`gh auth switch -u <계정>`) | 활성 gh 계정이 oauth, `NODE_AUTH_TOKEN` 이 사용자 변수의 classic PAT(ok) |
+| 3 저장소 | clone 또는 최신화(main 이면 `git pull --ff-only`), local `git config`, `npm ci`, 백오피스 `.env` 두 줄(모두 승인 후) | 이름 · 회사 메일 답하기(AskUserQuestion) | 3단계 모두 ok. `DS package registry`(`npm view` 가 판 번호)가 2단계 토큰의 실제 확인이다 — 레지스트리 연결이 저장소 `.npmrc` 에 있어 clone 뒤에만 돈다 |
 | 4 Claude Code | API 키 변수가 있는지 확인 | `/status` 로 팀 계정 확인 | API key variables ok |
 | 5 커넥터 | 가입 → 승인 요청 → 연결 순서와 요청 문구 안내 | bridge-auth 가입, 관리자 승인 요청, claude.ai 에서 BridgeX 연결 · 사용자 지정 커넥터 「Atlassian MCP」(v2) 추가 · 옛 Atlassian 커넥터 삭제 | 새 세션에서 도구가 보임 |
 | 6 첫 세션 | `/mcp` 안내, `protean_list_modules` · `atlassianUserInfo` 호출, 검사 4종 실행 | 저장소 루트로 새 창 열기, 프로젝트 MCP 승인, 필요하면 `/design-login` | 모두 통과 |
@@ -146,6 +156,12 @@ winget 설치나 환경변수 등록은 **새로 시작한 프로세스에만** 
 $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
 $env:NODE_AUTH_TOKEN = [Environment]::GetEnvironmentVariable('NODE_AUTH_TOKEN','User')
 npm ci
+```
+
+Bash 도구만 있으면 같은 일을 이렇게 감싼다(위 「범위」의 셸 규칙).
+
+```bash
+powershell -NoProfile -Command '$env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User"); $env:NODE_AUTH_TOKEN = [Environment]::GetEnvironmentVariable("NODE_AUTH_TOKEN","User"); npm ci'
 ```
 
 그래도 사용자가 쓸 터미널과 VS Code 는 다시 열어야 한다고 알린다.

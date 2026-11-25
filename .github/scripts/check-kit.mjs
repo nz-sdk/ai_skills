@@ -83,6 +83,12 @@ if (mode === 'copies') {
   console.log(`${bad ? '✗' : '✓'} 운영본 ↔ 키트 사본 ${n}개 비교 — 다른 파일 ${bad}개`);
   process.exit(bad ? 1 : 0);
 } else if (mode === 'verify') {
+  // 이 저장소의 동기화가 v2(scripts/issue-sync)면 v1 키트의 맞물림 검사(웹후크 Secret · 규칙 입력 · kind)는 해당이 없다.
+  // 키트를 v2 로 바꾸면 이 갈래를 없앤다.
+  if (/scripts\/issue-sync/.test(fs.readFileSync('.github/workflows/issue-sync.yml', 'utf8'))) {
+    console.log(`${gh ? '::notice::' : 'ℹ '}동기화가 v2 라 v1 키트 맞물림 검사(verify-install)를 건너뛴다`);
+    process.exit(0);
+  }
   const rules = path.join(tmp, 'rules');
   const r = node(`${KITDIR}/jira-rules/render-rules.mjs`, '--values', write('render.json', render), '--out', rules);
   if (r.status) { console.log(r.stdout, r.stderr); process.exit(r.status); }

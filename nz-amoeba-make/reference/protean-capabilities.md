@@ -1,7 +1,7 @@
 # Protean Capability Reference
 
 The authoritative catalog of protean capabilities a generated sample can include. The
-`nz_amoeba_make` skill reads this file to (1) present selectable capabilities, (2) resolve their
+`nz-amoeba-make` skill reads this file to (1) present selectable capabilities, (2) resolve their
 dependencies, and (3) emit the right config, dependencies, and code fragments.
 
 **Grounding:** derived from `protean/docs/guide/{03-configuration,05-isolation-modes,06-promotion-gates,07-data-access,08-mcp-integration,10-spi-extension,11-operations,12-security}.md`

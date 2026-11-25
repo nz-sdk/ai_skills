@@ -9,6 +9,11 @@
 
 ## [Unreleased]
 
+### ⚠ BREAKING CHANGES
+
+* **nz-amoeba-make:** 스킬 이름을 `nz_amoeba_make` 에서 `nz-amoeba-make` 로 바꾼다 — Agent Skills 규격(소문자 · 숫자 · 하이픈)을 따라 이름을 검사하는 곳(API 업로드 등)에서도 쓸 수 있게. 호출명이 `/nz-amoeba-make` 로 바뀌고 옛 이름으로는 호출되지 않는다 ([#66](https://github.com/nz-sdk/ai_skills/issues/66))
+
+
 ### 기능
 
 * **issue-sync-install:** 이 저장소의 GitHub ↔ Jira 동기화를 v2 로 올린다 — 워크플로가 Jira REST 로 직접 읽고 쓴다(서식 · 그림 · 첨부 · 댓글 수정 양방향 · GitHub 이슈 필드). v1 이 맞춰 둔 짝은 처음 만날 때 짝 기록만 남기고 이어받는다(옛 댓글을 다시 옮기지 않음). 수동 실행 `mode: preview`(쓰지 않는 미리보기) · `adopt`, 전환 시각 `SYNC_CREATE_SINCE`. Jira 규칙은 「동기화 요청」 3개로 바뀐다 ([#70](https://github.com/nz-sdk/ai_skills/pull/70))

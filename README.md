@@ -6,7 +6,7 @@
 
 | 영문명 | 한글명 | 작성AI | 설명 |
 | --- | --- | --- | --- |
-| [nz_amoeba_make](nz_amoeba_make/) | 프로틴 샘플 생성기 | Claude | Protean 설정을 안내에 따라 고르면 실행 가능한 Spring Boot 샘플 서버를 생성한다 |
+| [nz-amoeba-make](nz-amoeba-make/) | 프로틴 샘플 생성기 | Claude | Protean 설정을 안내에 따라 고르면 실행 가능한 Spring Boot 샘플 서버를 생성한다 |
 | [scaffold-shadcn-app](scaffold-shadcn-app/) | shadcn 신규 스캐폴드 | Claude | Vite+React+TS+Tailwind v4+shadcn/ui 신규 프로젝트를 처음부터 스캐폴딩한다 |
 | [create-frontend](create-frontend/) | 프론트 표준 기반 세팅 | Claude | 스캐폴드 위에 표준 프론트엔드 기반(i18n·폰트·통신 SDK·공유 번들)을 올린다 |
 | [appcontext-architecture](appcontext-architecture/) | 셸↔앱 계약 세우기 | Claude | 셸↔앱 계약(AppContext 근간)을 세운다 — create-frontend 다음 단계 |
@@ -22,13 +22,13 @@
 
 | 문서 | 내용 | 쓰는 스킬 |
 | --- | --- | --- |
-| [reference/api-compatibility.md](reference/api-compatibility.md) | FE · BE 를 따로 배포할 때의 API 호환 정책 — 버전 규칙 · 깨는 변경 체크리스트 · Expand → Migrate → Contract · Deprecation 과 제거 규칙 · 정할 것 | create-frontend · nz_amoeba_make |
+| [reference/api-compatibility.md](reference/api-compatibility.md) | FE · BE 를 따로 배포할 때의 API 호환 정책 — 버전 규칙 · 깨는 변경 체크리스트 · Expand → Migrate → Contract · Deprecation 과 제거 규칙 · 정할 것 | create-frontend · nz-amoeba-make |
 
 ## 스킬 아티팩트
 
 | 스킬 영문명 | 아티팩트 |
 | --- | --- |
-| nz_amoeba_make | [Amoeba Maker 선택 지도](https://claude.ai/code/artifact/6fe78fca-2674-4bcf-a76f-866bb81fe074?org=dbcf19a7-9d52-448d-b3cd-0945742ba48e) |
+| nz-amoeba-make | [Amoeba Maker 선택 지도](https://claude.ai/code/artifact/6fe78fca-2674-4bcf-a76f-866bb81fe074?org=dbcf19a7-9d52-448d-b3cd-0945742ba48e) |
 | dev-pc-setup | [개발자 PC 초기 설정](https://claude.ai/artifact/1tDQtkD5Pn6rKYn5XcbL6n) — 같은 절차의 사람용 체크리스트 |
 
 ## 스킬 설정

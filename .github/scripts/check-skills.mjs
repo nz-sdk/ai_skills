@@ -7,7 +7,8 @@
 //   YAML_DIR=<폴더> BASE_SHA=<기준 커밋> node .github/scripts/check-skills.mjs   # + PR 검사
 //
 // 저장소 전체 검사
-//   1. SKILL.md 머리말 — YAML · name(= 폴더 이름, 소문자 · 숫자 · - · _, 64자 이하) · description(1024자 이하)
+//   1. SKILL.md 머리말 — YAML · name(= 폴더 이름, Agent Skills 규격: 소문자 · 숫자 · 하이픈, 하이픈으로 시작 · 끝 · 연속 금지,
+//      64자 이하) · description(1024자 이하)
 //      · license · version(위 또는 metadata.version, x.y.z)
 //   2. 번역본(SKILL.ko.md 등)에는 머리말이 없다 — 있으면 스킬이 두 번 등록된다
 //   3. README 「스킬 목록」 표와 최상위 스킬 폴더가 서로 빠짐없이 같다
@@ -63,7 +64,9 @@ for (const f of SKILL_FILES) {
   if (typeof fm.name !== 'string' || !fm.name) err(f, 'name 이 없다');
   else {
     if (fm.name !== dir) err(f, `name(${fm.name}) 이 폴더 이름(${dir}) 과 다르다`);
-    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(fm.name)) err(f, `name(${fm.name}) 은 소문자 · 숫자 · - · _ 로 64자 이하`);
+    // Agent Skills 규격(agentskills.io · Claude API)은 밑줄을 받지 않는다. Claude Code 는 읽지만 업로드에서 거부된다
+    if (fm.name.length > 64 || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(fm.name))
+      err(f, `name(${fm.name}) 은 소문자 · 숫자 · 하이픈(시작 · 끝 · 연속 금지)으로 64자 이하`);
   }
   if (typeof fm.description !== 'string' || !fm.description.trim()) err(f, 'description 이 없다');
   else if (fm.description.length > 1024) err(f, `description 이 ${fm.description.length}자다 — 1024자 이하`);

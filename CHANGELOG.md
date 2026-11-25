@@ -59,6 +59,7 @@
 ### 빌드 · 설정
 
 * CI 가 모든 PR 에서 스킬(머리말 · README 스킬 목록 · 상대 링크 · 문법 · CHANGELOG 줄 · 번역본)과 설치 키트(자체 시험 · 운영본 ↔ 키트 사본 — 지금은 경고 · verify-install)를 검사한다 ([#64](https://github.com/nz-sdk/ai_skills/pull/64))
+* CI 의 스킬 `name` 검사를 Agent Skills 규격으로 좁힌다 — 밑줄과 하이픈으로 시작 · 끝 · 연속을 거부한다. 밑줄 이름은 Claude Code 에서는 동작하지만 이름을 검사하는 곳에서 거부된다 ([#66](https://github.com/nz-sdk/ai_skills/issues/66))
 
 ## [1.0.0](https://github.com/nz-sdk/ai_skills/releases/tag/v1.0.0) (2026-09-14) — 최초 등록
 

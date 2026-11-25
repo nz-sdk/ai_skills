@@ -5,7 +5,10 @@
 .DESCRIPTION
   Checks the dev-pc-setup procedure (steps 1-4, 7 and leftovers of the old setup) and prints
   one row per item. It never prints secret values: tokens are reported only as present/absent
-  and by kind (taken from the prefix). It writes nothing.
+  and by kind (taken from the prefix), and credentials inside a remote URL are masked.
+  The kind does not tell a classic PAT's scopes; this script cannot see them.
+  It changes no settings and no repo files. npm and gh may still write their own cache and logs.
+  It never waits for a credential prompt: git runs with GIT_TERMINAL_PROMPT=0 and GCM_INTERACTIVE=never.
   Connectors (BridgeX, Atlassian MCP v2), claude_design and the session root are not visible from here;
   Claude checks those from its own tool list.
 
@@ -35,7 +38,15 @@ param(
 $ErrorActionPreference = 'Continue'
 $results = New-Object System.Collections.Generic.List[object]
 
+# git ls-remote below talks to a private repo. With the default GCM helper and no stored login it
+# would open a sign-in window and wait, hanging a non-interactive shell. Fail instead. These are
+# restored at the end, so a dot-sourced run leaves the caller's session as it was.
+$savedPrompt = @{ GIT_TERMINAL_PROMPT = $env:GIT_TERMINAL_PROMPT; GCM_INTERACTIVE = $env:GCM_INTERACTIVE }
+$env:GIT_TERMINAL_PROMPT = '0'
+$env:GCM_INTERACTIVE = 'never'
+
 # Status: ok | warn (works but should be fixed) | missing (blocks the procedure) | info (optional / FYI)
+#         | unknown (could not be checked)
 function Add-Result([string]$Step, [string]$Item, [string]$Status, [string]$Detail) {
   $results.Add([pscustomobject]@{ Step = $Step; Status = $Status; Item = $Item; Detail = $Detail })
 }
@@ -62,10 +73,23 @@ function Get-FirstLine($r) {
   if ($line) { return $line.Trim() } else { return '' }
 }
 
+# Process holds what this shell inherited; User and Machine are what new processes will get.
+# A Machine value is inherited too, so a value seen only in Process may still be permanent.
 function Get-EnvAny([string]$Name) {
   $p = [Environment]::GetEnvironmentVariable($Name, 'Process')
   $u = [Environment]::GetEnvironmentVariable($Name, 'User')
-  return [pscustomobject]@{ Process = [bool]$p; User = [bool]$u; Value = $(if ($p) { $p } else { $u }) }
+  $m = [Environment]::GetEnvironmentVariable($Name, 'Machine')
+  return [pscustomobject]@{
+    Process = [bool]$p; User = [bool]$u; Machine = [bool]$m
+    ProcessValue = $p
+    # The permanent value new processes get: the user variable wins over the system one.
+    StoredValue = $(if ($u) { $u } else { $m })
+  }
+}
+
+# Credentials may sit in a remote URL (https://<token>@github.com/...). Never print them.
+function Hide-UrlCredential([string]$Url) {
+  return ($Url -replace '://[^@/]+@', '://***@')
 }
 
 function Get-TokenKind([string]$Value) {
@@ -77,13 +101,17 @@ function Get-TokenKind([string]$Value) {
   return 'unknown kind'
 }
 
+# Keys are the first indentation level under people:, whatever its width (the schema does not fix it).
 function Get-PeopleKeys([string]$File) {
-  $keys = @(); $in = $false
+  $keys = @(); $in = $false; $indent = $null
   foreach ($line in Get-Content -LiteralPath $File -Encoding UTF8) {
     if ($line -match '^people:\s*(#.*)?$') { $in = $true; continue }
-    if ($in) {
-      if ($line -match '^\S') { break }
-      if ($line -match '^  ([A-Za-z0-9-]+):') { $keys += $Matches[1] }
+    if (-not $in) { continue }
+    if ($line -match '^\s*(#.*)?$') { continue }
+    if ($line -match '^\S') { break }
+    if ($line -match '^(\s+)["'']?([A-Za-z0-9-]+)["'']?\s*:') {
+      if ($null -eq $indent) { $indent = $Matches[1].Length }
+      if ($Matches[1].Length -eq $indent) { $keys += $Matches[2] }
     }
   }
   return $keys
@@ -146,11 +174,24 @@ if (-not $codeExe) {
   }
 }
 
-$gitBash = Test-Path 'C:\Program Files\Git\bin\bash.exe'
-if ($gitBash -or $env:CLAUDE_CODE_GIT_BASH_PATH) {
-  Add-Result '1' 'Git Bash' 'ok' 'found (Claude Code uses it for bash commands)'
+# Git may be a per-user install or on another drive: also look next to the git on PATH
+# (...\Git\cmd\git.exe, ...\Git\bin\git.exe or ...\Git\mingw64\bin\git.exe -> ...\Git\bin\bash.exe).
+$bashCands = @('C:\Program Files\Git\bin\bash.exe')
+$gitPath = Get-Command git -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source
+if ($gitPath) {
+  $d = Split-Path -Parent $gitPath
+  foreach ($i in 1..2) {
+    $d = Split-Path -Parent $d
+    if ($d) { $bashCands += (Join-Path $d 'bin\bash.exe') }
+  }
+}
+$gitBash = $bashCands | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($env:CLAUDE_CODE_GIT_BASH_PATH) {
+  Add-Result '1' 'Git Bash' 'ok' 'CLAUDE_CODE_GIT_BASH_PATH is set (Claude Code uses it for bash commands)'
+} elseif ($gitBash) {
+  Add-Result '1' 'Git Bash' 'ok' "found at $gitBash (Claude Code uses it for bash commands)"
 } else {
-  Add-Result '1' 'Git Bash' 'warn' 'not at the default path; Claude Code falls back to PowerShell'
+  Add-Result '1' 'Git Bash' 'warn' 'bash.exe not found next to git; Claude Code falls back to PowerShell'
 }
 
 # ---------------------------------------------------------------- step 2: GitHub
@@ -224,18 +265,29 @@ if ($activeAcct -and -not $Offline) {
   }
 }
 
+# Every process the user starts inherits a permanent variable, so only a classic PAT with
+# read:packages belongs there. A gh token (gho_) is broad: per terminal only (bridge-web README way).
 $tok = Get-EnvAny 'NODE_AUTH_TOKEN'
-$kind = Get-TokenKind $tok.Value
-if (-not $tok.User -and -not $tok.Process) {
+$storedKind = Get-TokenKind $tok.StoredValue
+$procKind = Get-TokenKind $tok.ProcessValue
+$scope = $(if ($tok.User) { 'user env' } else { 'system env' })
+$scopeNote = 'its scopes cannot be read from the value: keep read:packages only'
+if (-not $tok.StoredValue -and -not $tok.ProcessValue) {
   Add-Result '2' 'NODE_AUTH_TOKEN' 'missing' 'create a classic PAT with read:packages only, add it as a USER environment variable'
-} elseif ($kind -eq 'fine-grained PAT') {
+} elseif ($storedKind -eq 'fine-grained PAT' -or (-not $tok.StoredValue -and $procKind -eq 'fine-grained PAT')) {
   Add-Result '2' 'NODE_AUTH_TOKEN' 'missing' 'is a fine-grained PAT: GitHub Packages rejects it (E403). Use a classic PAT with read:packages'
-} elseif ($tok.User -and -not $tok.Process) {
-  Add-Result '2' 'NODE_AUTH_TOKEN' 'warn' "set in user env ($kind) but not in this process: restart the terminal / VS Code"
-} elseif ($tok.Process -and -not $tok.User) {
-  Add-Result '2' 'NODE_AUTH_TOKEN' 'warn' "set only in this process ($kind): it disappears with this terminal"
+} elseif ($tok.StoredValue -and $storedKind -ne 'classic PAT') {
+  Add-Result '2' 'NODE_AUTH_TOKEN' 'warn' "$scope holds a token of kind '$storedKind': every process you start can read it. Store a classic PAT with read:packages only; use a gh token per terminal at most"
+} elseif ($tok.Machine -and -not $tok.User) {
+  Add-Result '2' 'NODE_AUTH_TOKEN' 'warn' 'set as a SYSTEM variable: every account on this PC can read it. Move it to a USER variable'
+} elseif ($tok.StoredValue -and -not $tok.Process) {
+  Add-Result '2' 'NODE_AUTH_TOKEN' 'warn' "set in $scope ($storedKind) but not in this process: restart the terminal / VS Code"
+} elseif ($tok.StoredValue) {
+  Add-Result '2' 'NODE_AUTH_TOKEN' 'ok' "set in $scope ($storedKind); $scopeNote"
+} elseif ($procKind -eq 'oauth (browser login)') {
+  Add-Result '2' 'NODE_AUTH_TOKEN' 'info' 'gh token in this process only (bridge-web README way): fine per terminal, do not store it permanently. A classic PAT in a USER variable lasts across terminals'
 } else {
-  Add-Result '2' 'NODE_AUTH_TOKEN' 'ok' "set in user env ($kind)"
+  Add-Result '2' 'NODE_AUTH_TOKEN' 'warn' "set only in this process ($procKind): it disappears with this terminal. Add a classic PAT (read:packages) as a USER variable"
 }
 
 $npmrc = Join-Path $HOME '.npmrc'
@@ -269,7 +321,7 @@ foreach ($repo in @('bridge-web', 'bridge-backoffice')) {
     continue
   }
   $repoDirs[$repo] = $dir
-  $remote = Get-FirstLine (Invoke-Native 'git' @('-C', $dir, 'remote', 'get-url', 'origin'))
+  $remote = Hide-UrlCredential (Get-FirstLine (Invoke-Native 'git' @('-C', $dir, 'remote', 'get-url', 'origin')))
   if ($remote -match "nz-sdk/$repo(\.git)?$") { Add-Result '3' "$repo clone" 'ok' $remote }
   else { Add-Result '3' "$repo clone" 'warn' "origin is '$remote'" }
 
@@ -316,7 +368,7 @@ foreach ($repo in @('bridge-web', 'bridge-backoffice')) {
   if (-not $Offline -and -not $npmViewDone -and (Test-Cmd 'npm')) {
     $npmViewDone = $true
     $saved = $env:NODE_AUTH_TOKEN
-    if (-not $saved -and $tok.User) { $env:NODE_AUTH_TOKEN = [Environment]::GetEnvironmentVariable('NODE_AUTH_TOKEN', 'User') }
+    if (-not $saved -and $tok.StoredValue) { $env:NODE_AUTH_TOKEN = $tok.StoredValue }
     $r = Invoke-Native 'npm' @('view', '@nz-sdk/ds-bridge', 'version') $dir
     $env:NODE_AUTH_TOKEN = $saved
     $all = $r.Out -join ' '
@@ -364,7 +416,7 @@ if (Test-Cmd 'claude') {
 } else {
   Add-Result '4' 'claude CLI' 'info' 'not installed (optional)'
 }
-$keys = @('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN') | Where-Object { (Get-EnvAny $_).Process -or (Get-EnvAny $_).User }
+$keys = @('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN') | Where-Object { $e = Get-EnvAny $_; $e.Process -or $e.User -or $e.Machine }
 if ($keys) {
   Add-Result '4' 'API key variables' 'warn' (($keys -join ', ') + ' set: Claude Code will not load claude.ai connectors (BridgeX, Atlassian MCP)')
 } else {
@@ -417,7 +469,7 @@ if (Test-Path $cj) {
   if ($raw -notmatch $oldBridge) {
     Add-Result 'old' 'user MCP servers' 'ok' 'no direct bridge MCP server'
   } else {
-    $hit = @()
+    $hit = @(); $parsed = $false
     try {
       # ConvertFrom-Json in PS 5.1 caps input size and rejects keys that differ only by case,
       # both common in ~/.claude.json. The .NET serializer handles both.
@@ -439,13 +491,19 @@ if (Test-Path $cj) {
           if ($ser.Serialize($b[1][$sk]) -match $oldBridge) { $hit += "$sk [$($b[0])]" }
         }
       }
+      $parsed = $true
     } catch { $hit = @() }
-    if ($hit) { Add-Result 'old' 'user MCP servers' 'warn' ('direct bridge MCP servers: ' + ($hit -join ', ') + '. Remove with: claude mcp remove <name> -s user|local') }
+    # The raw text already matched, so a parse failure means "cannot tell", not "none".
+    if (-not $parsed) {
+      Add-Result 'old' 'user MCP servers' 'unknown' 'cannot parse ~/.claude.json and the old bridge address appears in it: check with claude mcp list'
+    } elseif ($hit) { Add-Result 'old' 'user MCP servers' 'warn' ('direct bridge MCP servers: ' + ($hit -join ', ') + '. Remove with: claude mcp remove <name> -s user|local') }
     else { Add-Result 'old' 'user MCP servers' 'ok' 'no direct bridge MCP server (the address appears elsewhere in ~/.claude.json)' }
   }
 }
 
 # ---------------------------------------------------------------- output
+foreach ($k in $savedPrompt.Keys) { [Environment]::SetEnvironmentVariable($k, $savedPrompt[$k], 'Process') }
+
 if ($Json) {
   $results | ConvertTo-Json -Depth 3
 } else {
@@ -453,5 +511,6 @@ if ($Json) {
   $ok = @($results | Where-Object { $_.Status -eq 'ok' }).Count
   $warn = @($results | Where-Object { $_.Status -eq 'warn' }).Count
   $miss = @($results | Where-Object { $_.Status -eq 'missing' }).Count
-  "Summary: ok=$ok warn=$warn missing=$miss. Connectors, claude_design and the session root are checked by Claude, not by this script."
+  $unk = @($results | Where-Object { $_.Status -eq 'unknown' }).Count
+  "Summary: ok=$ok warn=$warn missing=$miss unknown=$unk. Connectors, claude_design and the session root are checked by Claude, not by this script."
 }

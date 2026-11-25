@@ -62,9 +62,15 @@ jobs:
   deploy:
     # ★ `types: [completed]` fires on FAILED CI too. Without this condition, a red CI would still deploy.
     #   A workflow_dispatch run has no workflow_run context, so it is allowed through separately.
+    #
+    # ★ AND ONLY A CI RUN THAT A PUSH TO THIS REPOSITORY STARTED. `branches: [main]` above matches the run's
+    #   head BRANCH NAME, so a fork's pull request from a branch called `main` would pass it — why that matters:
+    #   docs/ci-cd.md. Do not relax the two conditions to make a pull request deploy; use workflow_dispatch.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
 
     # Register the runner with the label `docker` (self-hosted / Linux / X64 are added automatically).
     # Registration procedure: docs/ci-cd.md, "Registering a self-hosted runner".

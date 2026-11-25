@@ -106,6 +106,11 @@ Triggered by `workflow_run` (CI completed on main) plus `workflow_dispatch`.
   deploy commits whose tests are broken.
 - `types: [completed]` fires on **failed** CI too, hence
   `if: github.event.workflow_run.conclusion == 'success'`.
+- The same `if` also requires `workflow_run.event == 'push'` and
+  `workflow_run.head_repository.full_name == github.repository`. `branches: [main]` matches the run's **head
+  branch name**, so a pull request from a fork whose branch is named `main` would otherwise pass: its CI runs
+  hosted and goes green, and this job would check out the fork's `head_sha` and build it on the deploy host,
+  in a workspace that holds `.env` with `DB_PASSWORD`. Keep both conditions.
 - Checkout uses `github.event.workflow_run.head_sha`, **not** `main` — deploy exactly the commit CI verified.
 - `COMPOSE_PROJECT_NAME` is pinned: the runner's checkout directory differs from a developer's, and without it
   compose would treat the deployment as a different project and build a second stack alongside the running one.

@@ -238,6 +238,10 @@ AskUserQuestion 은 질문당 선택지 4개가 상한이므로, 나누기를 �
 2. **`.gitignore` 에 `.env`/`.env.local` 이 붙는다**(`templates/gitignore.template` 에 `[OPTIONAL infra]` 로
    표시돼 있다).
 
+**`full` 은 제어면이 보호될 때만 낸다**(MCP OAuth = 예, 즉 `SecurityConfig` 가 생성됨). 그렇지 않으면 앱에
+인증이 전혀 없다 — MCP 를 켰든 껐든 `/platform/**` 이 누구에게나 응답한다 — 그런데 `full` 은 앱을 서버에
+올리는 수준이다. `container + CI` 에서 멈추고 이유를 말한다. README 가 이미 그 구성을 로컬 데모라고 부른다.
+
 적용될 수 없으면 질문 자체를 건너뛴다: `h2` 인메모리 + MCP 표면 없음이면 배포할 것이 없다. 인프라 생성은
 `protean.isolation.mode` 와도 무관하다 — `worker`/`container` 격리는 **모듈**이 어디서 도는지에 관한 것이고,
 앱 자체를 어떻게 실어 보내는지가 아니다.
@@ -323,7 +327,11 @@ boolean 이 아닌 것(int/long/duration/string): "어떤 것을 설정할지" �
   shared-api 를 함께 담고 있다.
 - **충돌 없음** — 예: 데이터 접근 / 공유 빈 / 라이브러리 모듈을 `isolation.mode` = worker/container 와 함께
   (그 모드에서는 호스트 빈을 주입할 수 없다). 격리가 in-process 인데 `worker.*`/`bridge.*` 값이 설정된 경우
-  (inert — 경고).
+  (inert — 경고). **`protean.bridge.auth-enabled` 는 예외다 — inert 인 적이 없다.** 다음 규칙을 본다.
+- **bridge 엔드포인트를 열어 두지 않는다** — `protean.bridge.auth-enabled: true` 는 **모든** 선택에서 쓴다
+  (`application.yml.template` 에 들어 있다. 묻지 않고, `ConfigMatchesSelectionTest` 에서 단언한다). 이유는
+  `protean-options.yaml` 의 그 키 `desc` · `emit` 에 있다. 이 키를 `false` 로 두는 구성은, `SecurityConfig` 가
+  생성되고 `/__bridge/**` deny 가 그대로 있을 때가 아니면 **차단**한다.
 - **auto-provision = SCOPE 모델 (worker/container 전용)** — `protean.worker.db.auto-provision=true` 는
   `isolation.mode` ∈ {worker, container} 를 요구한다. in-process 에서는 **차단**한다. `worker.db.dialect` ∈
   {mysql, postgresql, <custom id>} + admin 자격증명이 필요하다(MySQL 은 CREATE DATABASE/USER + GRANT, Postgres 는
@@ -568,7 +576,8 @@ infra 가 선택을 따르게 하는 셋:
     그 글자 그대로의 DB 계정, compose 프로젝트 이름, 셸 값이 된다.
   - **load-bearing 한 부분을 "정리"하지 말 것.** 각각이 조용히 나는 실패를 설명하는 주석이다: `java -jar` 금지,
     build 스테이지에서의 `jmods` 제거, CI 의 `services:`/`--network host` 금지, 아티팩트 업로드의
-    `overwrite: true`, deploy-host 라벨 + `$RUNNER_NAME` 자기검증, 스모크가 `localhost` 가 아니라
+    `overwrite: true`, deploy-host 라벨 + `$RUNNER_NAME` 자기검증, deploy job 의
+    `workflow_run.event == 'push'` · `head_repository` 조건, 스모크가 `localhost` 가 아니라
     `SERVER_HOST` 를 치는 것, `ports` 양쪽 숫자를 같게 하는 것.
   - **사람만 할 수 있는 일을 알려줄 것**: `git update-index --chmod=+x gradlew setup.sh`(`.gitattributes` 가
     고칠 수 없는 mode 비트), 그리고 `full` 에서는 `docs/secrets.md` 에 적힌 Actions Secrets/Variables 등록

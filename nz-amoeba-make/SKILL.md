@@ -233,6 +233,11 @@ Two things this step CHANGES elsewhere, both easy to miss:
    `depends_on` and `DB_HOST` onto the app service. Never emit both under the same name.
 2. **`.gitignore` gains `.env`/`.env.local`** (already marked `[OPTIONAL infra]` in `templates/gitignore.template`).
 
+**Offer `full` only when the control plane is secured** (MCP OAuth = yes, so `SecurityConfig` is emitted). Without
+it the app has no authentication at all — `/platform/**` answers anyone, with MCP on or off — and `full`
+exists to put the app on a server. Stop at `container + CI` and say why; the README already calls that
+configuration a local demo.
+
 Skip the question entirely when it cannot apply: `h2` in-memory with no MCP surface has nothing to deploy.
 Emitting infra is also independent of `protean.isolation.mode` — `worker`/`container` isolation describes where
 MODULES run, not how the app itself is shipped.
@@ -317,6 +322,11 @@ Check, and fix or stop on each:
   shared-api.
 - **no conflicts** — e.g. data access / shared beans / library modules with `isolation.mode` = worker/container
   (host beans can't be injected there); a `worker.*`/`bridge.*` value set while isolation is in-process (inert — warn).
+  **`protean.bridge.auth-enabled` is the exception — it is never inert.** See the next rule.
+- **the bridge endpoint is never left open** — `protean.bridge.auth-enabled: true` is written for EVERY
+  selection (it is in `application.yml.template`; do not ask it, and assert it in `ConfigMatchesSelectionTest`).
+  Why: the key's `desc` and `emit` in `protean-options.yaml`. **Block** a configuration that sets it to `false`
+  unless `SecurityConfig` is emitted and still carries its `/__bridge/**` deny.
 - **auto-provision = the SCOPE model (worker/container-only)** — `protean.worker.db.auto-provision=true` requires
   `isolation.mode` ∈ {worker, container}; **block** it for in-process. It requires `worker.db.dialect` ∈
   {mysql, postgresql, <custom id>} + admin creds (CREATE DATABASE/USER + GRANT for MySQL, CREATE SCHEMA/ROLE for

@@ -50,6 +50,11 @@ protean:
     mode: in-process              # in-process | worker | container (data-access/shared-beans need in-process)
   module-store:
     dir: ${java.io.tmpdir}/protean-{{NAME}}-sample   # durable store; restored via reconcile on restart
+  bridge:
+    # ★ ALWAYS ON, whatever was selected. protean registers POST /__bridge/invoke (a reflective call into any
+    #   host bean) on every non-worker host, and its guard loads only with this key (library default: false).
+    #   Leave the secret unset: protean generates one per JVM for its own workers, so nothing else can call it.
+    auth-enabled: true
   # mcp:
   #   authorization:
   #     # The identifier MCP clients discover and then CALL, so it must be the EXTERNALLY visible address — hence

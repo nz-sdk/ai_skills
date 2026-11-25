@@ -238,6 +238,10 @@ groups:
           POST /__bridge/invoke (a reflective call into any host bean) on EVERY non-worker host, not only when
           rpc-bridge is on — so this default (false) leaves it open unless SecurityConfig denies /__bridge/**, which
           the generated one does. MUST be true whenever protean.worker.rpc-bridge is on.
+        emit: >-
+          ALWAYS write `protean.bridge.auth-enabled: true` (it is in templates/application.yml.template; never
+          asked). The other guard, SecurityConfig, exists only when the MCP surface is secured. A "no" in the
+          bridge group must not remove the line — step 8 refuses `false` unless SecurityConfig is emitted.
       - key: protean.bridge.secret
         type: string
         default: ""

@@ -1,0 +1,10 @@
+{
+  "name": "issue-sync",
+  "private": true,
+  "type": "module",
+  "description": "Jira <-> GitHub issue sync (REST v3 ADF): markdown<->ADF converter and runner.",
+  "dependencies": {
+    "marked": "^18.0.0",
+    "yaml": "^2.8.1"
+  }
+}

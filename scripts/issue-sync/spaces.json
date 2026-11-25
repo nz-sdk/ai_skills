@@ -1,0 +1,112 @@
+{
+  "TEST1": {
+    "createType": "10460",
+    "types": {
+      "Task": "10460",
+      "Bug": "10463",
+      "Feature": "10462"
+    },
+    "doneStatus": "완료",
+    "openStatus": "할 일",
+    "fields": [
+      {
+        "id": "priority",
+        "label": "우선 순위"
+      },
+      {
+        "id": "customfield_10724",
+        "label": "Effort"
+      },
+      {
+        "id": "customfield_10015",
+        "label": "시작 날짜"
+      },
+      {
+        "id": "duedate",
+        "label": "기한"
+      }
+    ],
+    "statusLabelPrefix": "jira:",
+    "startDateField": "customfield_10015",
+    "startDateOnCreate": true,
+    "closeReason": {
+      "notPlannedStatuses": [],
+      "duplicateStatuses": []
+    }
+  },
+  "_ghFields": [
+    {
+      "id": 43557294,
+      "name": "Priority",
+      "data_type": "single_select",
+      "options": [
+        {
+          "id": 76227506,
+          "name": "High"
+        },
+        {
+          "id": 76227508,
+          "name": "Low"
+        },
+        {
+          "id": 76227507,
+          "name": "Medium"
+        },
+        {
+          "id": 76227505,
+          "name": "Urgent"
+        }
+      ]
+    },
+    {
+      "id": 43557295,
+      "name": "Start date",
+      "data_type": "date"
+    },
+    {
+      "id": 43557296,
+      "name": "Target date",
+      "data_type": "date"
+    },
+    {
+      "id": 43557297,
+      "name": "Effort",
+      "data_type": "single_select",
+      "options": [
+        {
+          "id": 76227509,
+          "name": "High"
+        },
+        {
+          "id": 76227511,
+          "name": "Low"
+        },
+        {
+          "id": 76227510,
+          "name": "Medium"
+        }
+      ]
+    }
+  ],
+  "_ghPinned": {
+    "types": {
+      "Task": [
+        "Priority",
+        "Effort"
+      ],
+      "Bug": [
+        "Priority",
+        "Effort"
+      ],
+      "Feature": [
+        "Priority",
+        "Start date",
+        "Target date",
+        "Effort"
+      ]
+    },
+    "none": [
+      "Priority"
+    ]
+  }
+}

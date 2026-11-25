@@ -11,6 +11,7 @@
 
 ### 기능
 
+* **issue-sync-install:** 이 저장소의 GitHub ↔ Jira 동기화를 v2 로 올린다 — 워크플로가 Jira REST 로 직접 읽고 쓴다(서식 · 그림 · 첨부 · 댓글 수정 양방향 · GitHub 이슈 필드). v1 이 맞춰 둔 짝은 처음 만날 때 짝 기록만 남기고 이어받는다(옛 댓글을 다시 옮기지 않음). 수동 실행 `mode: preview`(쓰지 않는 미리보기) · `adopt`, 전환 시각 `SYNC_CREATE_SINCE`. Jira 규칙은 「동기화 요청」 3개로 바뀐다 ([#PR](https://github.com/nz-sdk/ai_skills/pull/PR))
 * **issue-sync-install:** 자체 러너(컨테이너 포함)에서도 돈다 — 저장소 변수 `ISSUE_SYNC_RUNS_ON`(러너 라벨 JSON, 비면 `ubuntu-latest`)로 러너를 고르고, pandoc · yq 를 sudo 없이 판 고정 + sha256 확인으로 도구 캐시에 받는다 · 빠진 도구는 「Runner check」 가 먼저 알린다 · `LANG` · `LC_ALL` = `C.UTF-8` ([#54](https://github.com/nz-sdk/ai_skills/pull/54))
 * **issue-sync-install:** Jira 작업 목록(체크박스)이 GitHub 에 보통 목록 · 취소선으로 오던 것을 본문 「할 일」 칸 안에서 `- [ ]` · `- [x]` 로 되살린다. 시험 스위치 변수 `SYNC_ADF_TASKLIST=1` 이면 GitHub → Jira 설명의 체크박스 묶음을 `{adf}` 작업 목록으로 보낸다(기본 꺼짐) ([#46](https://github.com/nz-sdk/ai_skills/pull/46))
 * **issue-sync-install:** 상위 에픽 칸을 「[키 · 에픽 이름](링크)」 하나로(사본 출처의 상위 줄과 겹치지 않게), Jira 상태를 GitHub 라벨 `jira:<상태>` 로 · 정한 해결이면 「계획 안 함」 으로 닫기(대조표 `notPlannedResolutions`), 담당은 한 명 안내(실행 요약 · 양식 · 스킬). 옛 규칙 본문이면 옛 동작 ([#38](https://github.com/nz-sdk/ai_skills/pull/38))

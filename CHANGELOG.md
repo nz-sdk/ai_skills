@@ -34,6 +34,7 @@
 
 ### 버그 수정
 
+* **nz-amoeba-make:** `metadata.version` 을 0.5.1 로 올린다 — 아래 보안 수정(#73)이 들어간 판을 버전으로 가른다. 0.5.0 은 수정 전(#72)과 후(#73) 모두를 가리켰다 (GHSA-cmhf-8ffv-x4pq)
 * **nz-amoeba-make:** 생성물 보안 기본값 — `protean.bridge.auth-enabled: true` 를 선택과 무관하게 쓰고(8단계 검증 추가), 생성되는 deploy 워크플로는 이 저장소에 push 로 시작된 CI 성공에서만 배포한다, 제어면이 보호되지 않으면 `full` 을 내지 않는다 (GHSA-cmhf-8ffv-x4pq)
 * **dev-pc-setup:** 점검 결과(#62) — 점검 스크립트가 origin URL 의 자격을 가리고, `git ls-remote` 가 인증 창을 기다리지 않는다. `NODE_AUTH_TOKEN` 은 영구 변수의 gh 토큰 · 시스템 변수를 warn, 창에만 있는 gh 토큰을 info 로 내고, `~/.claude.json` 을 못 읽으면 `unknown`(?). Git Bash 는 PATH 의 git 옆에서도, people 키는 들여쓰기와 무관하게 찾는다. 문서: 셸 규칙(PowerShell 도구 · `powershell -Command` 감싸기), 전역 예외 둘과 위험, 승인 대상, 부트스트랩 경로, `MCP_TIMEOUT` 은 `settings.local.json` ([#69](https://github.com/nz-sdk/ai_skills/pull/69))
 * **nz_amoeba_make:** 점검 결과(#57) — 생성 infra(CI · deploy · HEALTHCHECK · compose · setup.sh)가 OAuth · DB vendor 선택을 따른다(`{{OAUTH}}` · `{{DB_VENDOR}}` · `{{DB_PORT_DEFAULT}}` · `{{DB_COMPOSE_FILE}}`), 시크릿 성격의 `protean.*` 값은 `${ENV}` 로만 쓴다, 기존 MySQL 은 `sslMode=REQUIRED`, 로컬 DB 는 `127.0.0.1` 바인드 · root 비밀번호 고정 제거, 러너 이미지 판 고정, 치환 목록에 `{{ADMIN_USER}}` · `{{ADMIN_PW}}` 와 잔여 자리표시 검색, 고아 isolation 템플릿 삭제, `docs/api-compatibility.md` 복사, SecurityConfig 오류 문구 · `mavenLocal` 범위 ([#65](https://github.com/nz-sdk/ai_skills/pull/65))

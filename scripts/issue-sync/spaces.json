@@ -30,8 +30,21 @@
     "startDateField": "customfield_10015",
     "startDateOnCreate": true,
     "closeReason": {
-      "notPlannedStatuses": [],
-      "duplicateStatuses": []
+      "notPlannedStatuses": [
+        "계획 안 함"
+      ],
+      "duplicateStatuses": [
+        "중복"
+      ],
+      "notPlannedResolutions": [
+        "Won't Do",
+        "Declined"
+      ],
+      "duplicateResolutions": [
+        "Duplicate",
+        "복제"
+      ],
+      "duplicateLink": "Duplicate"
     }
   },
   "_ghFields": [

@@ -23,7 +23,9 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 
 const env = process.env;
-const log = (...a) => console.log(...a);
+// 상세는 디버그로(실행마다 결과 한 줄만 보이게). 디버그 로그를 켜면 다 보인다. 보이는 줄은 say().
+const log = (...a) => console.log('::debug::' + a.map(String).join(' '));
+const say = (...a) => console.log(...a);
 // 멈춰야 하는 오류 — 맨 아래 main().catch 가 로그 · Slack(동기화 실패) 뒤 종료한다
 const die = (msg) => { throw new Error(msg); };
 const warn = (msg) => console.log('::warning::' + msg);
@@ -58,7 +60,46 @@ const FIELD_NAME = { summary: '제목', description: '본문', labels: '레이�
 const TODO_DEV = '👉 할 일: 계속되면 담당 개발자에게 알려 주세요.';
 function need(name) { if (!env[name]) die(`필수 환경변수 없음: ${name}`); return env[name]; }
 
+// ──────────────── 실행 요약 표 (동작 아님 · 화면 표시용) ────────────────
+// 표 칸(한국어): 순서 · 시간 · 위치 · 대상 · 항목 · 변경자 · 반영 계정. jira()/gh() 가 쓸 때마다 한 줄씩 담는다.
+const dbg = (msg) => console.log('::debug::' + msg); // 상세 로그는 디버그로 내린다(실행마다 결과 한 줄만 보이게)
+const FIELD_KO = { summary: '제목', title: '제목', description: '본문', body: '본문', labels: '레이블', issuetype: '유형', type: '유형', assignee: '담당', assignees: '담당', parent: '상위', priority: '우선순위', duedate: '기한', status: '상태', state: '상태', resolution: '상태', state_reason: '상태', duplicate_issue_id: '상태' };
+const REPORT = []; // { n, time, side, tgt, item, by, account }
+let _wseq = 0;
+let SHARED_NAME = '공용'; // 공용 Jira 계정 표시 이름(/myself). main 에서 미리 채운다.
+const nowKst = () => { try { return new Date().toLocaleTimeString('ko-KR', { hour12: false, timeZone: 'Asia/Seoul' }); } catch { return ''; } };
+// 표에 넣을 항목(한국어). bookkeeping(속성 · 링크 · 레이블 만들기 등)은 null → 기록 안 함.
+function reportItem(side, method, path, body) {
+  if (side === 'Jira') {
+    if (/\/properties\//.test(path)) return null;
+    if (method === 'POST' && /\/rest\/api\/3\/issue$/.test(path)) return '새로 등록';
+    if (/\/transitions$/.test(path)) return '상태';
+    if (/\/comment\/\d+$/.test(path)) return '댓글 수정';
+    if (/\/comment$/.test(path)) return '새 댓글';
+    if (method === 'PUT' && /\/rest\/api\/3\/issue\/[^/]+$/.test(path) && body && body.fields) return [...new Set(Object.keys(body.fields).map((k) => FIELD_KO[k] || k))].join(' · ');
+    return null;
+  }
+  if (method === 'POST' && /\/issues$/.test(path)) return '새로 등록';
+  if (/\/issues\/comments\/\d+$/.test(path)) return '댓글 수정';
+  if (/\/issues\/\d+\/comments$/.test(path)) return '새 댓글';
+  if (method === 'PATCH' && /\/issues\/\d+$/.test(path) && body) return [...new Set(Object.keys(body).map((k) => FIELD_KO[k] || k))].join(' · ');
+  return null;
+}
+function reportTgt(side, path, res) {
+  if (side === 'Jira') { if (/\/comment/.test(path)) return '댓글 1건'; const m = /\/rest\/api\/3\/issue\/([^/?]+)/.exec(path); if (m) return decodeURIComponent(m[1]); return (res && res.key) || '새 업무'; }
+  if (/\/comments/.test(path)) return '댓글 1건'; const m = /\/issues\/(\d+)/.exec(path); return m ? `#${m[1]}` : (res && res.number ? `#${res.number}` : '새 이슈');
+}
+// 한 건 기록. by = 변경자(없으면 자동 처리) · account = 반영 계정(이미 이유까지 붙인 글자)
+function record(side, method, path, body, res, by, account) {
+  const item = reportItem(side, method, path, body); if (!item) return;
+  REPORT.push({ n: ++_wseq, time: nowKst(), side, tgt: reportTgt(side, path, res), item, by: by || '자동 처리', account });
+}
+
 const JIRA_BASE = (env.JIRA_BASE_URL || '').replace(/\/+$/, '');
+// 범위 지정(scoped) Jira 토큰은 사이트 주소가 아니라 api.atlassian.com/ex/jira/<cloudId> 로 부른다(사람 토큰 쓰기만).
+// cloudId 는 대조표 .github/github-jira-map.yml 의 jira.cloudId — loadPeople() 가 채운다.
+let CLOUD_ID = null;
+const JIRA_SCOPED_BASE = () => (CLOUD_ID ? `https://api.atlassian.com/ex/jira/${CLOUD_ID}` : null);
 const jiraAuth = () => 'Basic ' + Buffer.from(`${env.JIRA_EMAIL}:${env.JIRA_API_TOKEN}`).toString('base64');
 // 미리보기 — 쓰지 않고 쓸 것만 남긴다(맨 위 머리말)
 const DRY = /^(1|true)$/i.test(String(env.SYNC_DRY_RUN || ''));
@@ -67,26 +108,40 @@ const GH_REPO = (DRY && env.SYNC_TARGET_REPO) || env.GITHUB_REPOSITORY;
 // 전환 전에 만들어진 짝 없는 이슈 · 업무는 새로 등록하지 않는다(Variable SYNC_CREATE_SINCE = 날짜) —
 // v2 로 바꾼 뒤 옛 이슈 · 업무를 고쳤다고 반대쪽에 사본이 새로 생기지 않게. 비우면 언제 만든 것이든 등록한다.
 const CREATE_SINCE = env.SYNC_CREATE_SINCE && !Number.isNaN(Date.parse(env.SYNC_CREATE_SINCE)) ? Date.parse(env.SYNC_CREATE_SINCE) : null;
-// GitHub 쓰기는 GITHUB_TOKEN(github-actions 봇) — 자기 쓰기로 새 실행을 만들지 않는다.
-// 예외: Jira 에서 만든 업무의 GitHub 사본은, 등록자가 대조표에서 GitHub 아이디와 짝이고 그 사람 토큰이 있으면
-// 그 사람 토큰으로 만든다(작성자 = 본인).
-// 토큰은 사람마다 Secret 하나 — 이름 GH_USER_TOKEN_<GitHub 아이디를 대문자로, 영문 · 숫자 밖의 글자는 _>
-//   예: octo-cat → GH_USER_TOKEN_OCTO_CAT
-// 운영자가 `gh secret set GH_USER_TOKEN_<아이디>` 를 띄우고 그 사람이 숨김 입력에 붙여 넣는다(운영자는 값을 보지 않는다).
-// 워크플로는 동기화 단계에만 Secret 목록(USER_SECRETS = toJSON(secrets))을 넘기고, 여기서 이 이름으로 시작하는 것만 쓴다.
+// GitHub 쓰기는 기본 GITHUB_TOKEN(github-actions 봇) — 자기 쓰기로 새 실행을 만들지 않는다.
+// 사람 행동은 그 사람 토큰으로 반대쪽에 쓴다(작성자 = 본인). 「누가 바꿨나」 단계가 고른 사람의 열쇠만 6칸으로 넘어온다:
+//   WHO_KEYS = {"jira1":"<GitHub 아이디>",…,"gh1":"<GitHub 아이디>",…}  (값 = 그 칸 열쇠의 주인)
+//   gh1..3   → GH_USER_TOKEN_1..3   (Issues RW)            — Jira → GitHub 쓰기
+//   jira1..3 → JIRA_USER_TOKEN_1..3 (값 "이메일:범위 토큰")  — GitHub → Jira 쓰기
+// 열쇠가 없거나(빈 칸) 실패하면 그 쓰기만 공용(GitHub 봇 · Jira 공용 계정)으로 간다.
 const ghAuth = (tok) => `Bearer ${tok || env.GITHUB_TOKEN}`;
-const USER_TOKEN_PREFIX = 'GH_USER_TOKEN_';
-const userSecretName = (login) => USER_TOKEN_PREFIX + String(login).toUpperCase().replace(/[^A-Z0-9]/g, '_');
-let _userTokens = null;
+// 아이디 정규화(대문자 · 영문 숫자 밖은 _) — Secret 이름 규칙과 같게 맞춰 같은 사람인지 견준다.
+const idKey = (login) => String(login || '').toUpperCase().replace(/[^A-Z0-9]/g, '_');
+// 주인 확인(§3-3) 실패한 사람 — 그 열쇠는 이번 실행에서 안 쓴다. 요약용 목록도 따로 둔다.
+const KEY_FAILED = new Set(); // idKey
+const KEY_BAD = []; // [{ person, side, why }]
+// 사람인데 봇/공용으로 떨어질 때 뒷말 — 거절(4xx) · 확인 실패(주인 다름 §3-3) · 미등록(열쇠 없음)
+const failWhy = (login, had4xx) => (had4xx ? '토큰 거절' : (KEY_FAILED.has(idKey(login)) ? '토큰 확인 실패' : '토큰 미등록'));
+let _whoKeys = null;
+const whoKeys = () => { if (!_whoKeys) { try { _whoKeys = JSON.parse(env.WHO_KEYS || '{}') || {}; } catch { warn('WHO_KEYS 를 읽지 못함 → 모두 공용'); _whoKeys = {}; } } return _whoKeys; };
+// login 의 열쇠 칸 번호(1..3) — dir 'gh'(GH_USER_TOKEN) · 'jira'(JIRA_USER_TOKEN). 없으면 null.
+function slotOf(login, dir) {
+  const want = idKey(login);
+  if (!want) return null;
+  const wk = whoKeys();
+  for (let i = 1; i <= 3; i++) if (idKey(wk[`${dir}${i}`]) === want) return i;
+  return null;
+}
+// GitHub 사람 토큰(Jira → GitHub 쓰기) — 없으면 null(→ 봇)
 function userToken(login) {
-  if (!login) return null;
-  if (!_userTokens) {
-    _userTokens = {};
-    let all = {};
-    try { all = JSON.parse(env.USER_SECRETS || '{}') || {}; } catch { warn('USER_SECRETS 를 읽지 못함 → 사본은 봇으로 만든다'); }
-    for (const [k, v] of Object.entries(all)) if (k.toUpperCase().startsWith(USER_TOKEN_PREFIX) && v) _userTokens[k.toUpperCase()] = String(v).trim();
-  }
-  return _userTokens[userSecretName(login)] || null;
+  const n = slotOf(login, 'gh');
+  return (n && (env[`GH_USER_TOKEN_${n}`] || '').trim()) || null;
+}
+// Jira 사람 토큰(GitHub → Jira 쓰기) — 값 "이메일:토큰" → Basic. 없거나 꼴이 틀리면 null(→ 공용)
+function jiraUserAuth(login) {
+  const n = slotOf(login, 'jira');
+  const raw = n ? (env[`JIRA_USER_TOKEN_${n}`] || '').trim() : '';
+  return raw && raw.includes(':') ? 'Basic ' + Buffer.from(raw).toString('base64') : null;
 }
 // 스페이스 설정 — 기본은 옆의 spaces.json. SYNC_SPACES_FILE(다른 파일) · 미리보기에서는 SYNC_SPACES_JSON(내용)도 받는다
 const SPACES = JSON.parse((DRY && env.SYNC_SPACES_JSON) || fs.readFileSync(env.SYNC_SPACES_FILE || new URL('./spaces.json', import.meta.url), 'utf8'));
@@ -99,7 +154,7 @@ let JONLY = {}; // Jira 계정만 있는 사람 — 이름 -> accountId (대조�
 async function loadPeople() {
   try {
     const { parse } = await import('yaml');
-    const mapFile = new URL('../../.github/github-jira-map.yml', import.meta.url);
+    const mapFile = env.SYNC_MAP_FILE || new URL('../../.github/github-jira-map.yml', import.meta.url); // SYNC_MAP_FILE: 시험용 대조표 경로(운영 미설정)
     let text = null;
     if (DRY && env.SYNC_TARGET_REPO) {
       // 다른 저장소 미리보기 — 그 저장소의 대조표를 읽는다(읽기만)
@@ -111,6 +166,7 @@ async function loadPeople() {
       const doc = parse(text) || {};
       for (const [login, p] of Object.entries(doc.people || {})) if (p && p.jiraAccountId) MENTION[p.jiraAccountId] = login;
       for (const [name, p] of Object.entries(doc.jiraOnly || {})) if (p && p.jiraAccountId) JONLY[name] = p.jiraAccountId;
+      if (doc.jira && doc.jira.cloudId) CLOUD_ID = String(doc.jira.cloudId); // 범위 지정 토큰 주소(JIRA_SCOPED_BASE)
     }
   } catch (e) { warn(`대조표 people 읽기 실패 → 멘션 · 담당은 이름으로만: ${e.message}`); }
   try { if (env.MENTION_MAP) Object.assign(MENTION, JSON.parse(env.MENTION_MAP)); } catch { warn('MENTION_MAP 파싱 실패 → 무시'); }
@@ -124,6 +180,35 @@ const jiraOnlyKey = (name) => Object.keys(JONLY).find((n) => nameKey(n) === name
 const jiraOnlyAcct = (name) => { const k = jiraOnlyKey(name); return k ? JONLY[k] : null; };
 const jiraOnlyName = (acct) => Object.keys(JONLY).find((n) => JONLY[n] === acct) || null;
 const acctOf = (login) => (login && LOGIN_TO_ACCT[String(login).replace(/^@/, '').toLowerCase()]) || null;
+
+// 3-3) 열쇠 주인 확인 — 실행마다 한 번, 쓰기 전에. 이번 실행에 넘어온 칸(최대 6)만 GET 한 번씩.
+//   GitHub 열쇠: GET /user 의 login == 그 아이디 · Jira 열쇠: GET /myself(범위 지정 주소) 의 accountId == 대조표의 그 사람 계정.
+//   다르거나 어떤 오류든 실패하면 그 열쇠는 이번 실행에서 쓰지 않고(env 비움 → 공용으로), 요약에 「○○ 님 — 열쇠 확인 실패」.
+//   값은 출력하지 않는다. 쓰기 전에 하므로(미리보기 포함) 사칭 · 만료 · 범위 부족을 미리 거른다.
+async function verifyUserTokens() {
+  const wk = whoKeys();
+  for (let i = 1; i <= 3; i++) {
+    const ghId = wk[`gh${i}`];
+    const ght = (env[`GH_USER_TOKEN_${i}`] || '').trim();
+    if (ghId && ght) {
+      let ok = false, why = '';
+      try { const u = await ghReal('GET', '/user', null, 'application/vnd.github+json', ght); ok = !!(u && idKey(u.login) === idKey(ghId)); if (!ok) why = '주인 다름'; }
+      catch (e) { why = e && e.status ? `오류 ${e.status}` : '실패'; }
+      if (!ok) { env[`GH_USER_TOKEN_${i}`] = ''; KEY_FAILED.add(idKey(ghId)); KEY_BAD.push({ person: ghId, side: 'GitHub', why }); dbg(`GitHub 열쇠 gh${i}(${ghId}) 주인 확인 실패(${why}) → 이번 실행 안 씀`); }
+    }
+    const jId = wk[`jira${i}`];
+    const jraw = (env[`JIRA_USER_TOKEN_${i}`] || '').trim();
+    const sBase = JIRA_SCOPED_BASE();
+    if (jId && jraw && jraw.includes(':') && sBase) {
+      const want = acctOf(jId); // 그 GitHub 아이디의 Jira accountId(대조표)
+      let ok = false, why = '';
+      try { const me = await jiraReal('GET', '/rest/api/3/myself', null, false, 'Basic ' + Buffer.from(jraw).toString('base64'), sBase); ok = !!(me && want && me.accountId === want); if (!ok) why = want ? '주인 다름' : '대조표에 Jira 계정 없음'; }
+      catch (e) { why = e && e.status ? `오류 ${e.status}` : '실패'; }
+      if (!ok) { env[`JIRA_USER_TOKEN_${i}`] = ''; KEY_FAILED.add(idKey(jId)); KEY_BAD.push({ person: jId, side: 'Jira', why }); dbg(`Jira 열쇠 jira${i}(${jId}) 주인 확인 실패(${why}) → 이번 실행 안 씀`); }
+    }
+  }
+  if (KEY_BAD.length) warn(`토큰 주인 확인 실패 ${KEY_BAD.length}건 → 그 토큰은 이번 실행에서 안 씀(공용으로)`);
+}
 
 // ──────────────── HTTP (429 · 5xx 는 기다렸다 다시 — 대량 등록 대비) ────────────────
 async function req(url, init, label) {
@@ -246,7 +331,8 @@ function dryJira(method, path, body) {
 const isReadPost = (side, path, body) => (side === 'GitHub' && path === '/graphql' && !/^\s*mutation/.test((body && body.query) || ''))
   || (side === 'Jira' && /^\/rest\/api\/3\/search\/jql/.test(path));
 
-async function gh(method, path, body, accept = 'application/vnd.github+json', tok = null) {
+// meta(선택) = { by: 변경자, reason: 공용 이유 글자 } — 표 기록용. tok 있으면 그 사람이 쓴 것, 없으면 봇.
+async function gh(method, path, body, accept = 'application/vnd.github+json', tok = null, meta = {}) {
   if (DRY && method !== 'GET' && !isReadPost('GitHub', path, body)) return dryGh(method, path, body);
   if (DRY && method === 'GET') {
     // 미리보기에서 이미 고친 것으로 친 이슈는 그 모양을 돌려준다(뒤 단계가 고친 값을 보게)
@@ -254,6 +340,7 @@ async function gh(method, path, body, accept = 'application/vnd.github+json', to
     if (m && DRY_STORE.ghIssue.has(m[1]) && DRY_STORE.ghIssue.get(m[1]).__dry) return DRY_STORE.ghIssue.get(m[1]);
   }
   const res = await ghReal(method, path, body, accept, tok);
+  if (method !== 'GET' && !meta.skip) record('GitHub', method, path, body, res, meta.by || (tok ? meta.by : null), tok ? (meta.by || '알 수 없음') : 'github-actions 봇' + (meta.reason ? ' ' + meta.reason : ''));
   if (DRY && method === 'GET') {
     const m = /^\/repos\/[^/]+\/[^/]+\/issues\/(\d+)$/.exec(path);
     if (m && res && !DRY_STORE.ghIssue.has(m[1])) DRY_STORE.ghIssue.set(m[1], res);
@@ -267,26 +354,43 @@ async function ghReal(method, path, body, accept, tok) {
     headers: { Authorization: ghAuth(tok), Accept: accept, 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'issue-sync', ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   }, `GitHub ${method}`);
-  if (!r.ok) throw new Error(`GitHub ${method} ${path} ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  if (!r.ok) throw Object.assign(new Error(`GitHub ${method} ${path} ${r.status}: ${(await r.text()).slice(0, 300)}`), { status: r.status });
   return r.status === 204 ? null : r.json();
 }
-async function jira(method, path, body, { allow404 = false } = {}) {
+async function jira(method, path, body, { allow404 = false, as = null, sharedBody = undefined } = {}) {
   if (DRY && method !== 'GET' && !isReadPost('Jira', path, body)) return dryJira(method, path, body);
   // 미리보기: 업무를 다시 읽으면 고친 것으로 친 칸을 덧씌운다
   const im = DRY && method === 'GET' ? /^\/rest\/api\/3\/issue\/([^/?]+)\?/.exec(path) : null;
   if (im && DRY_STORE.jiraIssue.has(decodeURIComponent(im[1])) && DRY_STORE.jiraIssue.get(decodeURIComponent(im[1])).__dry) return DRY_STORE.jiraIssue.get(decodeURIComponent(im[1]));
-  const res = await jiraReal(method, path, body, allow404);
+  // 사람 토큰(GitHub → Jira 쓰기 as=작성자 login) — 있으면 범위 지정 주소 + 그 사람 Basic. 읽기는 늘 공용.
+  //   4xx(권한 없음 404 포함)면 그 쓰기만 공용으로 다시. 5xx · 끊김은 공용으로 다시 하지 않는다(두 번 쓰기 방지) — 던진다.
+  //   상태는 e.status 로만 본다 — 오류 문구 속 업무 키(TEST1-450)의 숫자를 상태로 오인하지 않게.
+  const pAuth = as && method !== 'GET' ? jiraUserAuth(as) : null;
+  const sBase = pAuth ? JIRA_SCOPED_BASE() : null;
+  let rejected = false;
+  if (pAuth && sBase) {
+    try { const res = await jiraReal(method, path, body, allow404, pAuth, sBase); record('Jira', method, path, body, res, as, as); return res; }
+    catch (e) {
+      if (!(e && e.status >= 400 && e.status < 500)) throw e; // 5xx · 끊김(상태 없음)은 다시 쓰지 않는다
+      dbg(`${as} 사람 Jira 토큰 ${e.status} → 이 쓰기만 공용으로`); rejected = true;
+    }
+  }
+  // 공용으로 쓸 때, 사람을 겨눈 쓰기(as)였으면 공용 모양 body(sharedBody — 댓글 첫 줄 「○○ 님 …」 등)를 쓴다.
+  const outBody = as && sharedBody !== undefined ? sharedBody : body;
+  const res = await jiraReal(method, path, outBody, allow404, jiraAuth(), JIRA_BASE);
+  if (method !== 'GET') record('Jira', method, path, outBody, res, as || null, SHARED_NAME + (as ? (pAuth && !rejected ? '' : ' (공용 · ' + failWhy(as, rejected) + ')') : ''));
   if (im && res && !DRY_STORE.jiraIssue.has(decodeURIComponent(im[1]))) DRY_STORE.jiraIssue.set(decodeURIComponent(im[1]), res);
   return res;
 }
-async function jiraReal(method, path, body, allow404) {
-  const r = await req(`${JIRA_BASE}${path}`, {
+async function jiraReal(method, path, body, allow404, auth, base) {
+  const r = await req(`${base || JIRA_BASE}${path}`, {
     method,
-    headers: { Authorization: jiraAuth(), Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    // Accept-Language ko-KR — 공용 열쇠가 익명 처리돼도 오류 문구가 한국어로 오게(사용자가 중국어 원문을 봄)
+    headers: { Authorization: auth || jiraAuth(), Accept: 'application/json', 'Accept-Language': 'ko-KR', ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   }, `Jira ${method}`);
   if (allow404 && r.status === 404) return null;
-  if (!r.ok) throw new Error(`Jira ${method} ${path.split('?')[0]} ${r.status}: ${(await r.text()).slice(0, 400)}`);
+  if (!r.ok) throw Object.assign(new Error(`Jira ${method} ${path.split('?')[0]} ${r.status}: ${(await r.text()).slice(0, 400)}`), { status: r.status });
   const t = await r.text();
   return t ? JSON.parse(t) : null;
 }
@@ -964,6 +1068,102 @@ async function latestStatusLabel(num, pref, names) {
   const s = names.map((n) => [n, at.get(n) || [0, 0]]).sort((a, b) => b[1][0] - a[1][0] || b[1][1] - a[1][1]);
   return s[0][1][0] > s[1][1][0] ? s[0][0] : null;
 }
+
+// ──────────────── §4 누가 바꿨나 — 기록에서만 읽는다 ────────────────
+// 규칙 입력 · workflow_dispatch 의 actor/sender(= Jira 규칙 PAT 주인)는 쓰지 않는다(사칭 방지).
+// 항목별 「진짜 마지막으로 바꾼 사람」 만 기록한다 — 앞사람으로 건너뛰지 않는다.
+//   동기화가 봇 · 공용으로 쓴 값은 이미 스냅숏에 들어가 「옮길 변경」 이 되지 않으므로, 옮길 항목의 마지막 작성자는
+//   곧 사람의 수동 변경이다. 분류(봇 · 앱 → 공용 / 공용 Jira 계정 = 사용자 본인 / 그 밖 사람 → 그 사람)는 쓰는 쪽에서 한다.
+//   예외는 레이블뿐: 동기화 자신의 레이블(jira:* · jira · github · 짝 레이블) 이벤트는 이름으로 걸러 후보에서 뺀다.
+//   못 찾는 항목(사람이 바꾼 적 없음 · 읽기 실패)은 빠진다 → 그 쓰기는 공용.
+// GraphQL 의 봇 로그인은 「[bot]」 접미사가 없을 수 있다(예: github-actions) — 그 이름도 봇으로 본다.
+const isBotLogin = (l) => { const s = String(l || '').toLowerCase(); return /\[bot\]$/.test(s) || s === 'github-actions'; };
+async function ghGraphQL(query, variables) {
+  const r = await req('https://api.github.com/graphql', {
+    method: 'POST',
+    headers: { Authorization: ghAuth(), 'Content-Type': 'application/json', 'User-Agent': 'issue-sync' },
+    body: JSON.stringify({ query, variables }),
+  }, 'GitHub GraphQL');
+  if (!r.ok) throw Object.assign(new Error(`GitHub GraphQL ${r.status}`), { status: r.status });
+  const j = await r.json();
+  if (j.errors) throw new Error(`GitHub GraphQL: ${JSON.stringify(j.errors).slice(0, 200)}`);
+  return j.data;
+}
+// 본문 마지막 편집자 · 편집이 없으면 작성자 — 소문자 로그인(봇이면 쓰는 쪽에서 공용 처리). 못 찾으면 null(→ 공용)
+async function ghBodyEditor(num) {
+  const [owner, repo] = String(GH_REPO).split('/');
+  try {
+    // userContentEdits 연결 순서에 기대지 않고 editedAt 최댓값(가장 최근 편집)을 고른다. 편집이 없으면 작성자.
+    const d = await ghGraphQL(`query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){author{login} userContentEdits(first:10){nodes{editor{login} editedAt}}}}}`, { o: owner, r: repo, n: Number(num) });
+    const iss = d && d.repository && d.repository.issue;
+    if (!iss) return null;
+    const nodes = (iss.userContentEdits && iss.userContentEdits.nodes) || [];
+    let best = null, bestT = -1;
+    for (const n of nodes) { const t = Date.parse(n.editedAt) || 0; if (t >= bestT && n.editor && n.editor.login) { bestT = t; best = n.editor.login; } }
+    const login = best || (iss.author && iss.author.login);
+    return login ? String(login).toLowerCase() : null;
+  } catch (e) { warn(`GitHub 본문 편집자 읽기 실패 → 본문 공용: ${e.message.slice(0, 120)}`); return null; }
+}
+// GitHub 항목별 진짜 마지막으로 바꾼 사람 로그인. isSyncLabel(name) = 동기화 자신의 레이블(그 이벤트만 제외).
+async function ghActors(num, isSyncLabel) {
+  let ev = [];
+  try { ev = await ghList(`/repos/${GH_REPO}/issues/${num}/events`); }
+  catch (e) { warn(`GitHub 이벤트 읽기 실패 → GitHub 쪽 작성자 공용: ${e.message.slice(0, 120)}`); return {}; }
+  const a = {};
+  const put = (k, actor, t) => { const login = actor && actor.login; if (!login) return; const tt = Date.parse(t) || 0; if (!a[k] || tt >= a[k].t) a[k] = { login: String(login).toLowerCase(), t: tt }; };
+  for (const e of ev) {
+    const t = e.created_at;
+    if (e.event === 'renamed') put('title', e.actor, t);
+    else if (e.event === 'labeled' || e.event === 'unlabeled') { if (!(e.label && isSyncLabel && isSyncLabel(e.label.name))) put('labels', e.actor, t); } // 동기화 레이블 이벤트만 제외
+    else if (e.event === 'assigned' || e.event === 'unassigned') put('assignee', e.actor, t);
+    else if (e.event === 'closed' || e.event === 'reopened') put('state', e.actor, t);
+    else if (e.event === 'typed' || e.event === 'untyped') put('type', e.actor, t);
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(a)) out[k] = v.login; // 봇 로그인도 그대로 — 쓰는 쪽에서 isBotLogin → 공용
+  const body = await ghBodyEditor(num);
+  if (body) out.body = body;
+  return out;
+}
+// Jira 항목별 진짜 마지막으로 바꾼 사람 accountId(변경 이력 changelog). 공용 계정 · 앱도 그대로 — 쓰는 쪽에서 분류.
+const JCHG_FIELD = { summary: 'summary', description: 'description', labels: 'labels', assignee: 'assignee', status: 'status', issuetype: 'issuetype', Parent: 'parent', parent: 'parent' };
+// 동기화 자신의 Jira 레이블(내용 아님) — github · 짝 레이블. 이것만 바뀐 변경 이력은 「사람의 레이블 변경」 이 아니다.
+const isJiraSyncLabel = (n) => n === GH_MARK_LABEL || isGhPairLabel(n);
+const labelDiff = (fromStr, toStr) => {
+  const f = new Set(String(fromStr || '').split(/\s+/).filter(Boolean));
+  const t = new Set(String(toStr || '').split(/\s+/).filter(Boolean));
+  const out = [];
+  for (const x of f) if (!t.has(x)) out.push(x);
+  for (const x of t) if (!f.has(x)) out.push(x);
+  return out;
+};
+async function jiraActors(key) {
+  const a = {};
+  const put = (f, acct, t) => { if (!acct || !f) return; const tt = Date.parse(t) || 0; if (!a[f] || tt >= a[f].t) a[f] = { acct, t: tt }; };
+  try {
+    for (let at = 0; ; ) {
+      const r = await jira('GET', `/rest/api/3/issue/${encodeURIComponent(key)}/changelog?startAt=${at}&maxResults=100`);
+      for (const h of (r.values || [])) {
+        const acct = h.author && h.author.accountId;
+        for (const it of (h.items || [])) {
+          const f = JCHG_FIELD[it.field] || it.fieldId || null;
+          if (!f) continue;
+          // 레이블: 동기화 레이블(github · 짝)만 바뀐 기록은 사람의 변경이 아니므로 건너뛴다(fromString/toString 차이로 판정)
+          if (f === 'labels' && (it.fromString != null || it.toString != null)) {
+            const ch = labelDiff(it.fromString, it.toString);
+            if (ch.length && ch.every(isJiraSyncLabel)) continue;
+          }
+          put(f, acct, h.created);
+        }
+      }
+      at += (r.values || []).length;
+      if (!r.values || !r.values.length || at >= r.total) break;
+    }
+  } catch (e) { warn(`Jira 변경 이력 읽기 실패 → Jira 쪽 작성자 공용: ${e.message.slice(0, 120)}`); return {}; }
+  const out = {};
+  for (const [f, v] of Object.entries(a)) out[f] = v.acct;
+  return out;
+}
 // 닫을 때: 마크다운 체크 상자 「- [ ]」 → 「- [x]」(코드 블록 안은 건드리지 않는다)
 function checkAllMd(md) {
   let fence = false;
@@ -1259,6 +1459,14 @@ async function reconcile(num, key, origin, fresh) {
   })();
   if (ctx.conflicts.length) warn(`양쪽이 함께 바뀜(${ctx.conflicts.join(', ')}) → 제목 · 본문 · 레이블 · 유형은 나중에 바뀐 쪽, 담당 · 상태 · 상위 · 필드는 Jira 값을 따름`);
 
+  // §5 누가 바꿨나 — 사람별 쓰기용. 스위치 off 면 안 읽고 전부 공용. 동기화 자신의 레이블은 ghActors 에서 제외.
+  const USER_KEYS = env.ISSUE_SYNC_USER_KEYS !== 'off';
+  const syncLabelPred = (n) => n === 'jira' || n === GH_MARK_LABEL || isGhPairLabel(n) || isStatusLabel(n);
+  const ghA = USER_KEYS ? await ghActors(num, syncLabelPred) : {};
+  const jiraA = USER_KEYS ? await jiraActors(key) : {};
+  // GitHub 로그인 → jira() 의 as(그 사람 Jira 토큰). 봇 · 없음 → 공용(null).
+  const asFor = (login) => (login && !isBotLogin(login) ? login : null);
+
   // 3) Jira 쓰기
   const jf = {};
   // GitHub 원본이면 Jira 사본 요약 앞에 「[GH #번호] 」, 레이블에 github 를 늘 둔다(사람이 지워도 되살림)
@@ -1312,26 +1520,38 @@ async function reconcile(num, key, origin, fresh) {
   }
   let jiraWrote = false;
   const jfFailed = new Set();
-  if (Object.keys(jf).length) {
-    try {
-      await jira('PUT', `/rest/api/3/issue/${encodeURIComponent(key)}`, { fields: jf });
-    } catch (e) {
+  // jf 항목마다 GitHub 에서 바꾼 사람(ghA)으로. 봇 · 없음 · 동기화 몫(상위 에픽 · 세부 필드)은 공용.
+  const jfAuthorOf = (k) => {
+    if (k === 'summary') return asFor(ghA.title);
+    // 본문: 편집 이력이 없으면(새 등록 때 정한 값) 그 값을 만든 사람 = 이슈 작성자
+    if (k === 'description') return asFor(ghA.body || (issue.user && issue.user.login));
+    if (k === 'labels') return asFor(ghA.labels);
+    // 담당: GitHub assigned 이벤트가 있으면 그 actor, 없으면(본문 「🙋 담당: 이름 (Jira)」 줄로 바뀜) 본문 편집자
+    if (k === 'assignee') { const fromBody = M.assignee == null ? !ghA.assignee : String(M.assignee).startsWith('jira:'); return asFor(fromBody ? ghA.body : ghA.assignee); }
+    if (k === 'issuetype') return asFor(ghA.type);
+    return null; // parent(상위 에픽) · 세부 필드 → 공용(§4)
+  };
+  // 한 묶음(같은 작성자 몫)을 쓴다 — 한 번에, 실패하면 필드별로 다시(기존 오류 처리 그대로). asLogin 없으면 공용.
+  const writeFieldsGroup = async (sub, asLogin) => {
+    const opt = asLogin ? { as: asLogin } : {};
+    try { await jira('PUT', `/rest/api/3/issue/${encodeURIComponent(key)}`, { fields: sub }, opt); }
+    catch (e) {
       warn(`Jira 한 번에 쓰기 실패 → 필드별로 다시: ${e.message}`);
-      for (const [k, v] of Object.entries(jf)) {
-        try { await jira('PUT', `/rest/api/3/issue/${encodeURIComponent(key)}`, { fields: { [k]: v } }); }
+      for (const [k, v] of Object.entries(sub)) {
+        try { await jira('PUT', `/rest/api/3/issue/${encodeURIComponent(key)}`, { fields: { [k]: v } }, opt); }
         catch (e2) {
           jfFailed.add(k);
           if (k === 'assignee') {
             asgHold = M.assignee;
             // 담당 거절은 대개 「그 사람이 이 스페이스에서 담당자가 될 수 없음」(스페이스 멤버 · 담당 권한) — 이유와 지금 상태를 쉬운 말로
             const who = String(M.assignee || '').replace(/^jira:/, '');
-            const space = String(key).split('-')[0];
+            const spaceKey = String(key).split('-')[0];
             if (/할당받을 수 없|cannot be assigned|assignable/i.test(e2.message)) {
               const jNow = (data.fields && data.fields.assignee && data.fields.assignee.displayName) || '(없음)';
               await alert(`write:${k}:${who}`, `무슨 일: GitHub 에서 담당을 「${who}」 (으)로 바꿨는데, Jira 가 거절했습니다.
-이유: 「${who}」 님은 Jira 스페이스 「${space}」 에서 담당자가 될 수 없습니다(이 스페이스의 멤버가 아니거나 담당 권한이 없음).
+이유: 「${who}」 님은 Jira 스페이스 「${spaceKey}」 에서 담당자가 될 수 없습니다(이 스페이스의 멤버가 아니거나 담당 권한이 없음).
 지금 상태: GitHub 담당 = 「${who}」 · Jira 담당 = 「${jNow}」 (바뀌지 않음) — 두 곳이 서로 다릅니다.
-👉 할 일(둘 중 하나): ① Jira 관리자에게 「${who}」 님을 「${space}」 스페이스에 추가해 달라고 한 뒤, Jira 에서 담당을 「${who}」 (으)로 직접 지정 ② GitHub 담당을 「${space}」 에서 담당이 될 수 있는 사람으로 바꾸기`);
+👉 할 일(둘 중 하나): ① Jira 관리자에게 「${who}」 님을 「${spaceKey}」 스페이스에 추가해 달라고 한 뒤, Jira 에서 담당을 「${who}」 (으)로 직접 지정 ② GitHub 담당을 「${spaceKey}」 에서 담당이 될 수 있는 사람으로 바꾸기`);
               continue;
             }
           }
@@ -1342,8 +1562,14 @@ async function reconcile(num, key, origin, fresh) {
         }
       }
     }
+  };
+  if (Object.keys(jf).length) {
+    // §5 사람별로 나눠 쓴다 — 같은 작성자 몫은 한 요청, 작성자 모름 · 봇 · 동기화 몫은 공용으로 따로
+    const groups = new Map();
+    for (const k of Object.keys(jf)) { const a2 = jfAuthorOf(k) || ''; if (!groups.has(a2)) groups.set(a2, {}); groups.get(a2)[k] = jf[k]; }
+    for (const [a2, sub] of groups) await writeFieldsGroup(sub, a2 || null);
     const jfOk = Object.keys(jf).filter((k) => !jfFailed.has(k));
-    log(`· Jira ${key} 씀: ${jfOk.join(', ') || '(없음)'}${jfFailed.size ? ` · 못 씀: ${[...jfFailed].join(', ')}` : ''}`);
+    log(`· Jira ${key} 씀: ${jfOk.join(', ') || '(없음)'}${jfFailed.size ? ` · 못 씀: ${[...jfFailed].join(', ')}` : ''}${groups.size > 1 ? ` · 사람별 ${groups.size}묶음` : ''}`);
     jiraWrote = true;
   }
   let closeShown = !ghClose || ghClose.r === 'completed'; // Jira 에 닫는 이유가 드러났나
@@ -1360,7 +1586,7 @@ async function reconcile(num, key, origin, fresh) {
         if (want) { body.fields = { resolution: { name: want } }; closeShown = true; log(`· Jira 해결 사유 → ${want}`); }
       }
       if (ghClose && ghClose.r !== 'completed' && (cfg.npStatuses.includes(target) || cfg.dupStatuses.includes(target))) closeShown = true;
-      await jira('POST', `/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, body);
+      await jira('POST', `/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, body, asFor(ghA.state) ? { as: asFor(ghA.state) } : {});
       log(`· Jira 상태 → ${target}`); jiraWrote = true;
     } else await alert(`transition:${target}`, `Jira 에서 「${target}」 상태로 바꿀 수 없게 설정돼 있어 상태를 바꾸지 못했습니다.
 👉 할 일: Jira 에서 직접 상태를 바꿔 주세요.`);
@@ -1473,16 +1699,56 @@ async function reconcile(num, key, origin, fresh) {
       log(`· 닫힘 이유 ${cr.r}${cr.of ? ` (원래 이슈 #${cr.of})` : ''} ← Jira ${cr.via}`);
     }
   }
-  if (Object.keys(patch).length) {
-    try { issue = await gh('PATCH', `/repos/${GH_REPO}/issues/${num}`, patch); }
+  // §5 GitHub PATCH 도 사람별로 — patch 항목마다 Jira 에서 바꾼 사람(jiraA → loginOf)으로. state_reason · duplicate 는 state 와 함께. 봇 · 없음은 공용.
+  const patchAuthorOf = (k) => {
+    // 본문: 변경 이력이 없으면(새 등록 때 정한 값) 그 값을 만든 사람 = 보고자
+    if (k === 'body') return loginOf(jiraA.description || (data.fields.reporter && data.fields.reporter.accountId)) || null;
+    const f = ({ title: 'summary', body: 'description', labels: 'labels', assignees: 'assignee', type: 'issuetype', state: 'status', state_reason: 'status', duplicate_issue_id: 'status' })[k];
+    return f ? (loginOf(jiraA[f]) || null) : null; // Jira accountId → GitHub login(공용 계정 = 사용자) · 앱 · 미매핑 → null(공용)
+  };
+  // 그 칸을 바꾼 사람의 Jira accountId(표시용 — GitHub 계정이 없어 봇으로 갈 때 「GitHub 계정 없음」 인지 가리려고)
+  const patchAuthorAcctOf = (k) => {
+    if (k === 'body') return jiraA.description || (data.fields.reporter && data.fields.reporter.accountId) || null;
+    const f = ({ title: 'summary', body: 'description', labels: 'labels', assignees: 'assignee', type: 'issuetype', state: 'status', state_reason: 'status', duplicate_issue_id: 'status' })[k];
+    return f ? (jiraA[f] || null) : null;
+  };
+  // 한 묶음을 쓴다 — 사람 GitHub 토큰 4xx(권한 없음 등)면 그 쓰기만 봇으로. 중복 닫기 거절 → 계획 안 함(기존 처리 그대로).
+  // botReason = lg 가 없어(봇으로 갈 때) 그 이유 — jiraOnly 면 '(공용 · GitHub 계정 없음)' · 미매핑이면 ''(그냥 봇)
+  const writePatchGroup = async (sub, tok, lg, botReason) => {
+    // lg(사람) 인데 봇으로 떨어질 때 — 토큰이 있다가 4xx 면 거절 · 주인 확인 실패 · 아예 없으면 미등록
+    const personFail = '(공용 · ' + failWhy(lg, !!tok) + ')';
+    const tryPatch = (t) => gh('PATCH', `/repos/${GH_REPO}/issues/${num}`, sub, undefined, t, { by: lg || null, reason: t ? '' : (lg ? personFail : (botReason || '')) });
+    const withDupRetry = async (t) => {
+      try { return await tryPatch(t); }
+      catch (e) {
+        if (sub.state_reason !== 'duplicate') throw e;
+        warn(`GitHub 중복 닫기 실패 → not planned 로: ${e.message.slice(0, 200)}`);
+        delete sub.duplicate_issue_id; sub.state_reason = 'not_planned';
+        return await tryPatch(t);
+      }
+    };
+    if (!tok) return withDupRetry(null);
+    try { return await tryPatch(tok); }
     catch (e) {
-      if (patch.state_reason !== 'duplicate') throw e;
-      // 중복 지정이 거절되면 계획 안 함으로 닫는다
-      warn(`GitHub 중복 닫기 실패 → not planned 로: ${e.message.slice(0, 200)}`);
-      delete patch.duplicate_issue_id; patch.state_reason = 'not_planned';
-      issue = await gh('PATCH', `/repos/${GH_REPO}/issues/${num}`, patch);
+      if (!(e && e.status >= 400 && e.status < 500)) { if (sub.state_reason === 'duplicate') return withDupRetry(tok); throw e; } // 5xx · 끊김은 봇으로 다시 안 함
+      warn(`사람 GitHub 토큰 ${e.status} → 이 쓰기만 봇으로`);
+      return withDupRetry(null);
     }
-    log(`· GitHub #${num} 씀: ${Object.keys(patch).join(', ')}`);
+  };
+  if (Object.keys(patch).length) {
+    const groups = new Map();
+    for (const k of Object.keys(patch)) {
+      const lg = patchAuthorOf(k) || '';
+      if (!groups.has(lg)) groups.set(lg, { sub: {}, acct: null });
+      const g = groups.get(lg); g.sub[k] = patch[k];
+      if (!lg && !g.acct) g.acct = patchAuthorAcctOf(k); // 봇 묶음 — 이유 가리려고 바꾼 사람 accountId 하나 기억
+    }
+    for (const [lg, g] of groups) {
+      const botReason = !lg && g.acct && jiraOnlyName(g.acct) ? '(공용 · GitHub 계정 없음)' : '';
+      const r = await writePatchGroup(g.sub, lg ? userToken(lg) : null, lg, botReason);
+      if (r) issue = r;
+    }
+    log(`· GitHub #${num} 씀: ${Object.keys(patch).join(', ')}${groups.size > 1 ? ` · 사람별 ${groups.size}묶음` : ''}`);
   }
   // 다시 열림 → 동기화가 만든 Jira 중복 링크를 지운다(사람이 만든 링크는 그대로 둔다)
   if (wantState === 'open' && dupLink) {
@@ -1613,7 +1879,7 @@ async function syncComments(num, key, issue, ctx) {
     let h2 = h;
     if (ctx.ghTabled) {
       // 웹에서 올린 파일 줄 → 첨부 표로 GitHub 댓글도 고쳐 쓴다(글 내용은 그대로)
-      const upd = await gh('PATCH', `/repos/${GH_REPO}/issues/comments/${c.id}`, { body: ctx.ghTabled });
+      const upd = await gh('PATCH', `/repos/${GH_REPO}/issues/comments/${c.id}`, { body: ctx.ghTabled }, undefined, null, { skip: true });
       h2 = sha(norm(upd.body));
       log(`· GitHub 댓글 ${c.id} 업로드 파일 줄 → 첨부 표`);
     }
@@ -1623,13 +1889,13 @@ async function syncComments(num, key, issue, ctx) {
     ] });
     let jid;
     if (!ex) {
-      const made = await jira('POST', `/rest/api/3/issue/${encodeURIComponent(key)}/comment`, { body: adf, properties: [{ key: 'ghsync', value: { gh: c.id, h: h2 } }] });
+      const made = await jira('POST', `/rest/api/3/issue/${encodeURIComponent(key)}/comment`, { body: adf, properties: [{ key: 'ghsync', value: { gh: c.id, h: h2 } }] }, { as: c.user.login });
       jid = made.id;
-      log(`· 댓글 GitHub ${c.id} → Jira 새 댓글`);
+      log(`· 댓글 GitHub ${c.id} → Jira 새 댓글(작성자 ${c.user.login})`);
     } else {
       jid = ex.id;
-      await jira('PUT', `/rest/api/3/issue/${encodeURIComponent(key)}/comment/${ex.id}`, { body: adf });
-      log(`· 댓글 GitHub ${c.id} → Jira ${ex.id} 수정`);
+      await jira('PUT', `/rest/api/3/issue/${encodeURIComponent(key)}/comment/${ex.id}`, { body: adf }, { as: c.user.login });
+      log(`· 댓글 GitHub ${c.id} → Jira ${ex.id} 수정(작성자 ${c.user.login})`);
     }
     // Jira 가 저장한 모양을 기억해 두면 다음에 사람이 Jira 사본을 고쳤는지 알 수 있다
     await jira('PUT', `/rest/api/3/comment/${jid}/properties/ghsync`, { gh: c.id, h: h2, jh: jHash((await jGet(jid)).body) });
@@ -1662,7 +1928,7 @@ async function syncComments(num, key, issue, ctx) {
       const adf = await ghToAdf(user, ex.body_html, key, ctx);
       let ghBody = ex.body;
       if (ctx.ghTabled) {
-        const upd = await gh('PATCH', `/repos/${GH_REPO}/issues/comments/${ex.id}`, { body: [head, ctx.ghTabled, `<!-- jira-comment:${c.id} -->`].filter(Boolean).join('\n\n') });
+        const upd = await gh('PATCH', `/repos/${GH_REPO}/issues/comments/${ex.id}`, { body: [head, ctx.ghTabled, `<!-- jira-comment:${c.id} -->`].filter(Boolean).join('\n\n') }, undefined, null, { skip: true });
         ghBody = upd.body;
         log(`· GitHub 댓글 ${ex.id} 업로드 파일 줄 → 첨부 표`);
       }
@@ -1677,20 +1943,30 @@ async function syncComments(num, key, issue, ctx) {
     const who = (c.author && c.author.displayName) || 'Jira 사용자';
     // 머리 줄은 「이름 님 Jira 댓글」만(원문 링크 없음 · RE_JHEAD 는 「· [원문](…)」 이 붙은 머리도 읽는다)
     const body = [`**${who} 님 Jira 댓글**`, md || '_(빈 댓글)_', note, `<!-- jira-comment:${c.id} -->`].filter(Boolean).join('\n\n');
+    // 작성자: 새 댓글 = 단 사람(author) · 수정 = 고친 사람(updateAuthor). 대조표 → GitHub 토큰(없거나 실패하면 봇).
+    // 사본은 끝의 <!-- jira-comment:id --> 로 알아보므로 사람 이름으로 만들어도 원본으로 잘못 읽지 않는다.
+    const cLogin = loginOf(c.author && c.author.accountId);
+    const eLogin = loginOf(c.updateAuthor && c.updateAuthor.accountId) || cLogin;
     let out = ex;
     if (!ex) {
-      // 댓글 단 사람이 대조표에서 GitHub 아이디와 짝이고 토큰(Secret GH_USER_TOKEN_<아이디>)이 있으면 본인 이름으로, 아니면 봇으로.
-      // 사본은 끝의 <!-- jira-comment:id --> 로 알아보므로 사람 이름으로 만들어도 원본으로 잘못 읽지 않는다.
-      const cLogin = loginOf(c.author && c.author.accountId);
       const cTok = userToken(cLogin);
       if (cTok) {
-        try { out = await gh('POST', `/repos/${GH_REPO}/issues/${num}/comments`, { body }, undefined, cTok); log(`· 댓글 Jira ${c.id} → GitHub 새 댓글(작성자 ${cLogin})`); }
+        try { out = await gh('POST', `/repos/${GH_REPO}/issues/${num}/comments`, { body }, undefined, cTok, { by: cLogin }); log(`· 댓글 Jira ${c.id} → GitHub 새 댓글(작성자 ${cLogin})`); }
         catch (e) { out = null; log(`· 댓글 ${cLogin} 토큰으로 못 씀(${e.message.slice(0, 120)}) → 봇으로`); }
       }
-      if (!out) { out = await gh('POST', `/repos/${GH_REPO}/issues/${num}/comments`, { body }); log(`· 댓글 Jira ${c.id} → GitHub 새 댓글`); }
+      if (!out) { out = await gh('POST', `/repos/${GH_REPO}/issues/${num}/comments`, { body }, undefined, null, { by: cLogin || null, reason: cLogin ? '(공용 · ' + failWhy(cLogin, !!cTok) + ')' : (jiraOnlyName(c.author && c.author.accountId) ? '(공용 · GitHub 계정 없음)' : '') }); log(`· 댓글 Jira ${c.id} → GitHub 새 댓글`); }
       n++;
     }
-    else if (norm(ex.body) !== norm(body)) { out = await gh('PATCH', `/repos/${GH_REPO}/issues/comments/${ex.id}`, { body }); log(`· 댓글 Jira ${c.id} → GitHub ${ex.id} 수정`); n++; }
+    else if (norm(ex.body) !== norm(body)) {
+      const eTok = userToken(eLogin);
+      out = null;
+      if (eTok) {
+        try { out = await gh('PATCH', `/repos/${GH_REPO}/issues/comments/${ex.id}`, { body }, undefined, eTok, { by: eLogin }); log(`· 댓글 Jira ${c.id} → GitHub ${ex.id} 수정(작성자 ${eLogin})`); }
+        catch (e) { out = null; log(`· 댓글 수정 ${eLogin} 토큰으로 못 씀(${e.message.slice(0, 120)}) → 봇으로`); }
+      }
+      if (!out) { out = await gh('PATCH', `/repos/${GH_REPO}/issues/comments/${ex.id}`, { body }, undefined, null, { by: eLogin || null, reason: eLogin ? '(공용 · ' + failWhy(eLogin, !!eTok) + ')' : (jiraOnlyName((c.updateAuthor || c.author) && (c.updateAuthor || c.author).accountId) ? '(공용 · GitHub 계정 없음)' : '') }); log(`· 댓글 Jira ${c.id} → GitHub ${ex.id} 수정`); }
+      n++;
+    }
     await jira('PUT', `/rest/api/3/comment/${c.id}/properties/ghsyncj`, { gc: out.id, gh: sha(norm(out.body)), jh });
   }
   log(`· 댓글 GitHub ${ghc.length}개 · Jira ${jc.length}개 확인, ${n}건 옮김`);
@@ -1814,9 +2090,30 @@ async function jiraLoneItems(pairedKeys) {
 }
 const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
 function writeReport(md) {
-  log('\n' + md);
+  // 표는 실행 Summary 탭(GITHUB_STEP_SUMMARY)과 리포트 파일에만 둔다. 로그(stdout)에는 결과 한 줄만 보이게 —
+  // 로그에 남길 때는 줄마다 ::debug:: 를 붙여(한 번에 찍으면 둘째 줄부터 접두어가 빠져 보이는 로그로 샌다) 디버그에만 나오게.
+  for (const line of md.split('\n')) dbg(line);
   if (env.GITHUB_STEP_SUMMARY) fs.appendFileSync(env.GITHUB_STEP_SUMMARY, md + '\n');
   if (env.SYNC_REPORT_FILE) fs.writeFileSync(env.SYNC_REPORT_FILE, md + '\n');
+}
+// §3-3 — 주인 확인에 실패해 이번 실행에서 안 쓴 열쇠(「○○ 님 — 열쇠 확인 실패(이유)」)
+const keyFailNote = () => (KEY_BAD.length ? '⚠ 토큰 확인 실패(이번 실행에서 안 씀): ' + KEY_BAD.map((k) => `${k.person} 님(${k.side} · ${k.why})`).join(', ') : '');
+// 실행 요약 표 — 이번 실행에 쓴 것 한 줄씩. 아무것도 안 쓰면 「바뀐 것 없음」.
+function writeSummaryTable(num, key, fresh) {
+  const link = `GitHub ${num ? '#' + num : '?'} ↔ Jira ${key || '?'}${fresh ? ' (새로 연결)' : ''}`;
+  const note = keyFailNote();
+  if (!REPORT.length) { writeReport(`## 이슈 동기화 결과\n\n${link}${note ? `\n\n${note}` : ''}\n\n바뀐 것 없음`); return; }
+  const by = [...new Set(REPORT.filter((r) => r.by && r.by !== '자동 처리').map((r) => r.by))];
+  const rows = REPORT.map((r) => `| ${r.n} | ${r.time} | ${r.side} | ${r.tgt} | ${r.item} | ${r.by} | ${r.account} |`).join('\n');
+  writeReport(`## 이슈 동기화 결과\n\n${link}${by.length ? ` · 바꾼 사람: ${by.join(', ')}` : ''}${note ? `\n\n${note}` : ''}\n\n| 순서 | 시간 | 위치 | 대상 | 항목 | 변경자 | 반영 계정 |\n|---|---|---|---|---|---|---|\n${rows}`);
+}
+// 공용(Jira)·봇(GitHub)으로 대신 쓴 것 — 사람이 겨눠졌는데 토큰이 없거나 거절돼(또는 GitHub 계정이 없어) 떨어진 것.
+// 대체 이유는 모두 「(공용 …」 으로 적는다(토큰 거절 · 토큰 미등록 · 토큰 미등록/거절 · GitHub 계정 없음).
+const sharedFallbacks = () => REPORT.filter((r) => /\(공용/.test(r.account)).length;
+function resultLine(num, key) {
+  const kf = KEY_BAD.length ? ` · 토큰 확인 실패 ${KEY_BAD.length}건` : '';
+  if (!REPORT.length) { say(`완료 — GitHub #${num} ↔ Jira ${key} · 바뀐 것 없음${kf}`); return; }
+  say(`완료 — GitHub #${num} ↔ Jira ${key} · 반영 ${REPORT.length}건 · 공용으로 대신 쓴 것 ${sharedFallbacks()}건${kf}`);
 }
 // 필드 점검 — 저장소 GitHub 이슈 필드(유형별로 보이는 것)와 스페이스 Jira 칸(유형별)을 spaces.json 짝과 대조한다(읽기만)
 //   ⚠ 짝인데 Jira 유형에 칸이 없음 → GitHub 에서 바꾸면 Jira 쓰기 실패 · GitHub 어느 유형에도 안 보임 → 옮겨도 화면에 안 보임
@@ -1927,6 +2224,38 @@ async function adoptAll() {
   writeReport(`## v1 짝 이어받기 — ${GH_REPO}${DRY ? ' (미리보기 — 쓰지 않음)' : ''}\n\n- 이어받음 ${n}개 · 이미 v2 ${skip}개 · 실패 ${fail}개`);
 }
 
+// ──────────────── who — 누가 바꿨나(6칸 출력) ────────────────
+// 공용 열쇠로 읽기만. 이번 짝에서 바뀐 항목의 작성자(사람)를 방향별로 모아 $GITHUB_OUTPUT 에 jira1..3 · gh1..3 로 낸다.
+//   jira1..3 = GitHub 에서 바꾼 사람(→ JIRA_USER_TOKEN) · gh1..3 = Jira 에서 바꾼 사람(→ GH_USER_TOKEN). 값 = 대문자 아이디.
+// 짝 맞추기 단계가 쓰기 직전에 기록을 다시 읽어 작성자를 맞추므로, 여기서 넉넉히 내도(안 쓰는 칸) 문제없다.
+async function whoMode() {
+  await loadPeople();
+  let num, key;
+  try { ({ num, key } = await resolvePair()); } catch (e) { warn(`who: 짝 찾기 실패 → 전원 공용: ${e.message.slice(0, 120)}`); return; }
+  const jira = new Set(), gh = new Set();
+  const addJira = (login) => { if (login && !isBotLogin(login)) jira.add(idKey(login)); };
+  const addGh = (acct) => { const l = loginOf(acct); if (l && !isBotLogin(l)) gh.add(idKey(l)); };
+  if (num) {
+    // GitHub 쪽 사람(→ JIRA_USER_TOKEN): 필드 바꾼 사람 + 이슈 작성자(새 등록) + 댓글 작성자
+    const space = key ? spaceOf(key) : null;
+    const pref = space && space.statusLabelPrefix;
+    const isSync = (n) => n === 'jira' || n === GH_MARK_LABEL || isGhPairLabel(n) || (pref && String(n).startsWith(pref));
+    try { for (const login of Object.values(await ghActors(num, isSync))) addJira(login); } catch (e) { warn(`who: GitHub 필드 작성자 실패: ${e.message.slice(0, 120)}`); }
+    try { const it = await ghIssue(num); addJira(it.user && it.user.login); } catch (e) { warn(`who: GitHub 이슈 작성자 실패: ${e.message.slice(0, 120)}`); }
+    try { for (const c of await ghList(`/repos/${GH_REPO}/issues/${num}/comments`)) if (!(c.user && c.user.type === 'Bot')) addJira(c.user && c.user.login); } catch (e) { warn(`who: GitHub 댓글 작성자 실패: ${e.message.slice(0, 120)}`); }
+  }
+  if (key) {
+    // Jira 쪽 사람(→ GH_USER_TOKEN): 필드 바꾼 사람 + 보고자(새 등록) + 댓글 작성자 · 수정자
+    try { for (const acct of Object.values(await jiraActors(key))) addGh(acct); } catch (e) { warn(`who: Jira 필드 작성자 실패: ${e.message.slice(0, 120)}`); }
+    try { const d = await jiraIssue(key, spaceOf(key)); addGh(d.fields.reporter && d.fields.reporter.accountId); } catch (e) { warn(`who: Jira 보고자 실패: ${e.message.slice(0, 120)}`); }
+    try { for (const c of await jiraComments(key)) { addGh(c.author && c.author.accountId); addGh(c.updateAuthor && c.updateAuthor.accountId); } } catch (e) { warn(`who: Jira 댓글 작성자 실패: ${e.message.slice(0, 120)}`); }
+  }
+  const j = [...jira].slice(0, 3), g = [...gh].slice(0, 3);
+  const lines = [...j.map((v, i) => `jira${i + 1}=${v}`), ...g.map((v, i) => `gh${i + 1}=${v}`)];
+  if (env.GITHUB_OUTPUT && lines.length) fs.appendFileSync(env.GITHUB_OUTPUT, lines.join('\n') + '\n');
+  log(`· 누가 바꿨나 — GitHub→Jira ${j.join(', ') || '(없음)'} · Jira→GitHub ${g.join(', ') || '(없음)'}`);
+}
+
 async function main() {
   const mode = process.argv[2] || 'sync';
   if (mode === 'collect-fields') return collectFields();
@@ -1943,7 +2272,11 @@ async function main() {
     if (env.GITHUB_OUTPUT) fs.appendFileSync(env.GITHUB_OUTPUT, `group=${group}\n`);
     return;
   }
+  if (mode === 'who') return whoMode();
   await loadPeople();
+  // 표 「반영 계정」에 쓸 공용 Jira 계정 표시 이름(/myself). 못 읽어도 기본값 「공용」.
+  try { const me = await jiraReal('GET', '/rest/api/3/myself', null, false, jiraAuth(), JIRA_BASE); if (me && me.displayName) SHARED_NAME = me.displayName; } catch { /* 공용 그대로 */ }
+  await verifyUserTokens(); // §3-3 열쇠 주인 확인(실행마다 한 번, 쓰기 전에) — 안 맞으면 그 열쇠는 이번 실행에서 안 씀
   RUN.num = env.GITHUB_ISSUE || null; RUN.key = env.JIRA_KEY || null;
   let { num, key, origin } = await resolvePair();
   RUN.num = num || RUN.num; RUN.key = key || RUN.key;
@@ -1977,7 +2310,7 @@ ${msg}`);
     try { r = await jira('POST', '/rest/api/3/issue', { fields: rep ? { ...base, reporter: { accountId: rep } } : base }); }
     catch (e) { if (!rep) throw e; warn(`보고자 지정 실패 → 기본 보고자로 등록: ${e.message.slice(0, 200)}`); r = await jira('POST', '/rest/api/3/issue', { fields: base }); }
     key = r.key;
-    await gh('PATCH', `/repos/${GH_REPO}/issues/${num}`, { body: `${String(it.body || '').replace(/\s+$/, '')}\n\n<!-- jira:${key} -->` });
+    await gh('PATCH', `/repos/${GH_REPO}/issues/${num}`, { body: `${String(it.body || '').replace(/\s+$/, '')}\n\n<!-- jira:${key} -->` }, undefined, null, { skip: true });
     await jira('PUT', `/rest/api/3/issue/${key}/properties/ghsync`, { v: 2, gh: Number(num) });
     log(`· GitHub #${num} → Jira ${key} 새로 등록`);
     fresh = true; origin = 'gh';
@@ -1994,10 +2327,10 @@ ${msg}`);
     const repTok = userToken(repLogin);
     let it = null;
     if (repTok) {
-      try { it = await gh('POST', `/repos/${GH_REPO}/issues`, newIssue, undefined, repTok); log(`· 사본 작성자 = ${repLogin}(등록자 본인 토큰)`); }
+      try { it = await gh('POST', `/repos/${GH_REPO}/issues`, newIssue, undefined, repTok, { by: repLogin }); log(`· 사본 작성자 = ${repLogin}(등록자 본인 토큰)`); }
       catch (e) { log(`· ${repLogin} 토큰으로 만들지 못함(${e.message.slice(0, 120)}) → 봇으로 만들고 본문에 등록자 줄`); }
     } else log(`· 사본 작성자 = 봇(${repLogin ? `${repLogin} 토큰 없음` : '등록자 GitHub 아이디 없음'} → 본문에 등록자 줄)`);
-    if (!it) it = await gh('POST', `/repos/${GH_REPO}/issues`, newIssue);
+    if (!it) it = await gh('POST', `/repos/${GH_REPO}/issues`, newIssue, undefined, null, { by: repLogin || null, reason: repLogin ? '(공용 · ' + failWhy(repLogin, !!repTok) + ')' : (jiraOnlyName(d.fields.reporter && d.fields.reporter.accountId) ? '(공용 · GitHub 계정 없음)' : '') });
     num = String(it.number);
     await jira('PUT', `/rest/api/3/issue/${key}/properties/ghsync`, { v: 2, gh: Number(num) });
     log(`· Jira ${key} → GitHub #${num} 사본 새로 등록`);
@@ -2005,20 +2338,31 @@ ${msg}`);
   }
   await reconcile(num, key, origin, fresh);
   if (DRY) writeReport([`## 미리보기 — #${num} ↔ ${key} (쓰지 않음)`, '', ...(PLAN.length ? PLAN.map((x) => `- ${x.side} ${x.what}`) : ['- 쓸 것 없음'])].join('\n'));
+  else { writeSummaryTable(num, key, fresh); resultLine(num, key); }
 }
 
 main().catch(async (e) => {
   const raw = e && e.message ? e.message : String(e);
-  console.error('::error::' + raw);
+  dbg(raw); // 원문(공용 열쇠가 익명 처리되면 중국어일 수 있음)은 디버그로. 보이는 건 아래 한국어 한 줄.
   // 동기화 실패 → Slack(어느 짝 · 쉬운 말 이유 · 실행 기록). 실행마다 한 번.
   const runUrl = env.GITHUB_RUN_ID ? `${env.GITHUB_SERVER_URL || 'https://github.com'}/${env.GITHUB_REPOSITORY || GH_REPO}/actions/runs/${env.GITHUB_RUN_ID}` : '';
   const pair = [RUN.num ? `<https://github.com/${GH_REPO}/issues/${RUN.num}|GitHub #${RUN.num}>` : '', RUN.key && JIRA_BASE ? `<${JIRA_BASE}/browse/${RUN.key}|Jira ${RUN.key}>` : (RUN.key ? `Jira ${RUN.key}` : '')].filter(Boolean).join(' ↔ ');
-  // 짝의 Jira 업무가 지워진 경우(404) — 실패가 아니라 안내. 업무 삭제는 동기화하지 않는다.
+  // 짝의 Jira 업무가 지워진 경우(404) — 실패가 아니라 안내. 단, 공용 열쇠가 안 통해 익명 처리된 404 와 구분한다.
   const gone = /^Jira \w+ \/rest\/api\/3\/issue\/([A-Z][A-Z0-9]*-\d+)\S* 404/.exec(raw);
   if (gone && gone[1] === RUN.key) {
-    try { await notifySlack(`:warning: *확인해 주세요* — Jira ${RUN.key} 업무가 지워졌습니다${RUN.num ? ` (<https://github.com/${GH_REPO}/issues/${RUN.num}|GitHub #${RUN.num}> 은 그대로 남아 있습니다)` : ''}.\n👉 할 일: 필요 없으면 GitHub 이슈도 닫아 주세요.`); } catch {}
-    process.exit(0);
+    // 공용 열쇠가 통하는지 /myself 로 확인 — 통하면 진짜 삭제, 안 통하면 열쇠 문제(삭제 알림 금지 · 실패 처리)
+    let authOk = false;
+    try { const me = await jiraReal('GET', '/rest/api/3/myself', null, false, jiraAuth(), JIRA_BASE); authOk = !!(me && me.accountId); } catch { authOk = false; }
+    if (authOk) {
+      say(`안내 — Jira ${RUN.key} 업무가 지워졌습니다${RUN.num ? ` (GitHub #${RUN.num} 은 그대로 남아 있습니다)` : ''} · 할 일: 필요 없으면 GitHub 이슈도 닫아 주세요`);
+      try { await notifySlack(`:warning: *확인해 주세요* — Jira ${RUN.key} 업무가 지워졌습니다${RUN.num ? ` (<https://github.com/${GH_REPO}/issues/${RUN.num}|GitHub #${RUN.num}> 은 그대로 남아 있습니다)` : ''}.\n👉 할 일: 필요 없으면 GitHub 이슈도 닫아 주세요.`); } catch {}
+      process.exit(0);
+    }
+    say('::error::실패 — Jira 공용 토큰이 통하지 않습니다 · 할 일: JIRA_EMAIL · JIRA_API_TOKEN 을 확인해 주세요');
+    try { await notifySlack(`:x: *동기화 실패*${pair ? ` — ${pair}` : ''}\nJira 공용 토큰이 통하지 않습니다 — JIRA_EMAIL · JIRA_API_TOKEN 을 확인해 주세요.\n${TODO_DEV}${runUrl ? ` (<${runUrl}|자세한 기록>)` : ''}`); } catch {}
+    process.exit(1);
   }
+  say(`::error::실패 — ${easyError(raw)} · 할 일: 계속되면 담당 개발자에게 알려 주세요`);
   try { await notifySlack(`:x: *동기화 실패*${pair ? ` — ${pair}` : ''}
 GitHub 와 Jira 를 맞추지 못했습니다 — ${easyError(raw)}.
 ${TODO_DEV}${runUrl ? ` (<${runUrl}|자세한 기록>)` : ''}`); } catch {}
